@@ -1,0 +1,3 @@
+# Scripts and code deploy to Linux (EC2) — keep LF regardless of checkout OS.
+*.sh text eol=lf
+*.py text eol=lf
