@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+
+# Only needed for "auto" execution mode (real order placement via
+# clients/wallet_client.py) -- not required for the default
+# manual_review or paper trading flows.
+py-clob-client-v2

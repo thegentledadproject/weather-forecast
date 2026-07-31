@@ -1,0 +1,234 @@
+"""
+config.py
+
+PURPOSE
+-------
+Station registry + shared constants. This is THE file you touch to
+add a new station/market. Everything else in the codebase looks up
+a StationConfig by ICAO code and stays generic from there.
+
+To add a new station (e.g. WMKK):
+  1. Add a STATIONS["WMKK"] = StationConfig(...) entry below.
+  2. If its official forecast source doesn't have an adapter yet,
+     add one in clients/official/ (see clients/official/base.py for
+     the interface) and register it in clients/official/registry.py.
+  3. Nothing else needs to change -- pipeline.py, calibration.py,
+     probability.py, storage.py are all station-parameterized already.
+
+DEPENDENCIES
+------------
+None besides models.py (standard library otherwise).
+"""
+
+from pathlib import Path
+
+from models import StationConfig
+
+# --- Shared monsoon-phase lookup (reused across Southeast Asian stations) ---
+# Coarse, deliberately simple for the MVP. A given station can override
+# this per-entry below if its local seasonal pattern differs.
+_SEA_MONSOON_PHASE_BY_MONTH = {
+    12: "northeast_monsoon", 1: "northeast_monsoon", 2: "northeast_monsoon", 3: "northeast_monsoon",
+    4: "inter_monsoon", 5: "inter_monsoon",
+    6: "southwest_monsoon", 7: "southwest_monsoon", 8: "southwest_monsoon", 9: "southwest_monsoon",
+    10: "inter_monsoon", 11: "inter_monsoon",
+}
+
+# --- Station registry -----------------------------------------------------
+STATIONS = {
+    "WSSS": StationConfig(
+        icao="WSSS",
+        display_name="Singapore Changi Airport",
+        country="Singapore",
+        lat=1.3644,
+        lon=103.9915,
+        wunderground_slug="sg/singapore/WSSS",
+        long_term_normal_max_c=31.4,  # NEA 1991-2020 climatological reference, July
+        official_client_key="nea",
+        polymarket_city_slug="singapore",
+        monsoon_phase_by_month=_SEA_MONSOON_PHASE_BY_MONTH,
+        seed_observations=[
+            # (date_iso, max_temp_c) -- from NEA's Jul 2026 fortnightly outlook review.
+            # See clients/official/nea.py NEAClient for how this feeds calibration.
+            ("2026-07-01", 32.1), ("2026-07-02", 29.9), ("2026-07-03", 31.5),
+            ("2026-07-04", 33.1), ("2026-07-05", 33.3), ("2026-07-06", 32.3),
+            ("2026-07-07", 32.9), ("2026-07-08", 32.2), ("2026-07-09", 31.4),
+            ("2026-07-10", 32.9), ("2026-07-11", 31.5), ("2026-07-12", 30.7),
+            ("2026-07-13", 32.0), ("2026-07-14", 32.7),
+        ],
+    ),
+    "WMKK": StationConfig(
+        icao="WMKK",
+        display_name="Kuala Lumpur International Airport",
+        country="Malaysia",
+        lat=2.7456,
+        lon=101.7099,
+        wunderground_slug="my/sepang-district/WMKK",
+        long_term_normal_max_c=32.2,  # placeholder -- confirm against MET Malaysia's
+                                       # published climatological normals before relying
+                                       # on this for real calibration (see framework doc:
+                                       # Polymarket resolves KL to WMKK's Wunderground page)
+        official_client_key="met_malaysia",
+        polymarket_city_slug="kuala-lumpur",
+        monsoon_phase_by_month=_SEA_MONSOON_PHASE_BY_MONTH,
+        seed_observations=[],  # not yet populated -- see clients/official/met_malaysia.py
+    ),
+}
+
+
+def get_station(icao: str) -> StationConfig:
+    """Look up a StationConfig by ICAO code. Raises KeyError with a clear message if unregistered."""
+    icao = icao.upper()
+    if icao not in STATIONS:
+        raise KeyError(
+            f"Station '{icao}' is not registered. Known stations: {list(STATIONS)}. "
+            f"Add a StationConfig entry in config.STATIONS to support it."
+        )
+    return STATIONS[icao]
+
+
+# --- Open-Meteo (Tier 1 model access, best-effort) ----------------------
+# Station-agnostic endpoints -- lat/lon passed per-call from StationConfig.
+OPEN_METEO_ECMWF_URL = "https://api.open-meteo.com/v1/ecmwf"
+OPEN_METEO_GFS_URL = "https://api.open-meteo.com/v1/gfs"
+OPEN_METEO_ENSEMBLE_URL = "https://api.open-meteo.com/v1/ensemble"
+
+# --- Polymarket-style resolution buckets --------------------------------
+# CONFIRMED against real Polymarket data (multiple live pulls across this
+# project): Singapore/KL temperature-bracket markets consistently list 11
+# outcomes -- "25 or below", 26 through 34 individually, then "35 or above".
+# BUCKET_MIN_C/MAX_C represent the two EDGE buckets themselves (25 and 35),
+# not the lowest/highest explicit numbers -- range(BUCKET_MIN_C, BUCKET_MAX_C+1)
+# must yield exactly 11 values to match the real market structure.
+# Previously set to 27/36 (10 buckets, shifted and wrong on both ends) --
+# corrected after rechecking against live order-book data.
+BUCKET_MIN_C = 25
+BUCKET_MAX_C = 35
+
+# --- Local storage --------------------------------------------------
+DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR.mkdir(exist_ok=True)
+DB_PATH = DATA_DIR / "polyweather.sqlite3"
+
+# --- Position risk management --------------------------------------------
+# Exit thresholds are intentionally asymmetric: take profit sooner than you
+# accept loss, since the edge this system trades on is a morning-only
+# phenomenon that decays through the day (see edge analysis) -- letting a
+# winning position ride hoping for more upside fights the system's own
+# timing thesis. Tune these per your own risk tolerance; these are starting
+# defaults, not researched optima.
+PROFIT_TAKE_PCT = 0.50      # exit once unrealized gain hits +50% of entry price
+STOP_LOSS_PCT = 0.30        # exit once unrealized loss hits -30% of entry price
+
+# Trailing stop: once a position's gain (measured from its high-water mark,
+# not just current price) crosses TRAILING_STOP_ACTIVATION_PCT, the fixed
+# PROFIT_TAKE_PCT target above is superseded -- the position is allowed to
+# keep running, but protected by a stop that trails the peak price down by
+# TRAILING_STOP_PCT. This lets a strong move keep paying out past the fixed
+# target while still locking in most of the gain if it reverses, rather
+# than capping every winner at the same fixed percentage.
+# Deliberately set the activation threshold BELOW the fixed profit-take so
+# trailing takes over before the hard cap would otherwise fire.
+TRAILING_STOP_ACTIVATION_PCT = 0.25   # start trailing once peak gain reaches +25%
+TRAILING_STOP_PCT = 0.15              # exit if price falls 15% off its peak, once trailing is active
+
+# After this local hour, tighten both thresholds (see risk_manager.py) --
+# reflects the edge-decay curve: once the primary trading window closes,
+# be quicker to lock in gains and quicker to cut losses, since there's no
+# more new edge coming to justify holding through volatility.
+EDGE_DECAY_TIGHTEN_HOUR_LOCAL = 10  # 10:00 local, per the scanning-schedule analysis
+TIGHTENED_PROFIT_TAKE_PCT = 0.25
+TIGHTENED_STOP_LOSS_PCT = 0.15
+TIGHTENED_TRAILING_STOP_ACTIVATION_PCT = 0.15  # trail sooner once edge is decaying
+TIGHTENED_TRAILING_STOP_PCT = 0.08             # and trail tighter -- lock in gains faster
+
+# --- Scheduler windows ----------------------------------------------------
+# All times are LOCAL (SGT/MYT, UTC+8 -- both registered stations share this
+# offset). Defined as (start_hour, start_min, end_hour, end_min, interval_min,
+# mode, min_net_ev, description).
+#
+# Hard floor: nothing runs before 04:00 local, by explicit design decision --
+# not a technical limitation, a deliberate choice. The 23:00-ish "market
+# open" window explored earlier in the framework's development was walked
+# back after real data showed markets typically open ~48h ahead of
+# resolution, not the evening before -- so it's excluded from the default
+# schedule below and available only as an opt-in extra (see
+# ENABLE_MARKET_OPEN_WINDOW).
+#
+# modes:
+#   "closed"       -- scheduler does nothing, sleeps until next window
+#   "pre_poll"     -- watching for the official forecast to publish
+#   "primary"      -- full cycle: forecast -> calibration -> EV -> exits.
+#                      Lowest EV threshold of the day (peak edge window)
+#   "secondary"    -- same full cycle, but a higher EV bar and wider interval
+#                      (edge is decaying, require more confidence to act)
+#   "monitor_only" -- exit-checks only, no new entries surfaced
+#   "risk_only"    -- exit-checks only, plus same-day nowcast signal watch
+SCHEDULE_WINDOWS = [
+    (0, 0, 4, 0, None, "closed", None, "Overnight -- explicit floor, nothing runs before 04:00"),
+    (4, 0, 4, 45, 15, "pre_poll", None, "Early watch -- checking if forecast posted ahead of schedule"),
+    (4, 45, 5, 0, 2, "pre_poll", None, "Tight pre-poll -- waiting for the 05:00 forecast publish event"),
+    (5, 0, 8, 0, 10, "primary", 0.15, "Primary edge window -- confirmed bias-correction edge, tightest scan interval"),
+    (8, 0, 10, 0, 30, "secondary", 0.25, "Edge decaying -- wider interval, higher EV bar required to act"),
+    (10, 0, 12, 0, 120, "monitor_only", None, "Decision-closed -- no new entries, watching existing positions"),
+    (12, 0, 16, 0, 60, "risk_only", None, "Afternoon peak-heat window -- nowcast-triggered risk checks only"),
+    (16, 0, 22, 45, 180, "monitor_only", None, "Evening -- sparse position monitoring"),
+    (22, 45, 24, 0, None, "closed", None, "Late night -- log closing state, then stop until 04:00"),
+]
+
+# Opt-in only -- disabled by default per the walked-back Window-0 analysis.
+# If enabled, adds a sparse scan around a station's likely next-day market
+# open; treat any signal from this window as lower-confidence than the
+# 05:00-08:00 primary window (see edge analysis).
+ENABLE_MARKET_OPEN_WINDOW = False
+MARKET_OPEN_WINDOW = (23, 0, 23, 30, 10, "secondary", 0.35, "Optional market-open window -- higher EV bar, unconfirmed edge")
+
+# --- Entry sizing & gating (entry_manager.py) ------------------------------
+# Bankroll figure used purely for Kelly-fraction sizing math -- NOT a real
+# funded balance (no wallet/custody exists in this codebase, see executor.py).
+# Set this to whatever a real deployment's actual bankroll would be before
+# trusting recommended_size_usd for anything real.
+BANKROLL_USD = 1000.0
+
+# Fractional Kelly, not full Kelly -- full Kelly is provably correct only
+# under known-exact probabilities, which a calibrated estimate is not.
+# Quarter-Kelly trades some growth rate for a much shallower drawdown curve
+# when the model's probability is wrong, which it sometimes will be.
+KELLY_FRACTION = 0.25
+
+# Hard per-trade cap, independent of what Kelly sizing alone would suggest --
+# a large enough apparent edge should never translate into betting the whole
+# bankroll on one bucket of one station's market.
+MAX_POSITION_USD = 150.0
+
+# Never size a position larger than this fraction of the visible order-book
+# depth (within a 10% price-impact band, per market_client.get_available_depth_usd).
+# Two reasons: (1) the slippage ESTIMATE itself becomes unreliable past this
+# point since it's extrapolating past what the book actually shows, and
+# (2) placing an order this large would materially move the market itself.
+MAX_DEPTH_UTILIZATION_PCT = 0.25
+
+# Absolute gate, independent of net EV. Even if net_ev_per_dollar is still
+# positive after subtracting slippage, a trade requiring this much slippage
+# to fill is a sign the book is too thin to trust the fill price at all --
+# reject rather than trade into it.
+MAX_ACCEPTABLE_SLIPPAGE_PCT = 0.10
+
+# Station maturity gating, per the edge analysis: WSSS has a confirmed,
+# measured bias-correction edge (14+ days of observed history). WMKK does
+# not yet -- any WMKK trade is exploratory until it earns the same status,
+# so it's sized down hard rather than treated as equivalent-confidence.
+STATION_MATURITY = {
+    "WSSS": "mature",
+    "WMKK": "exploratory",
+}
+EXPLORATORY_SIZE_MULTIPLIER = 0.20  # exploratory stations get 20% of what mature-station sizing would suggest
+
+# Shared budget across ALL approved legs for one station on one day -- e.g.
+# a YES leg on the top bucket plus NO legs hedging tail buckets, opened
+# together (see entry_manager.apply_portfolio_budget). Without this, each
+# leg is sized independently up to MAX_POSITION_USD and the combined total
+# exposure for one station/day is unbounded. Set higher than a single
+# MAX_POSITION_USD to allow a real multi-leg basket, but still capped well
+# below "every leg at max size simultaneously."
+MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD = 250.0

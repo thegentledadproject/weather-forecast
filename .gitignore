@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Runtime state — never commit trading history or positions
+*.db
+*.sqlite
+*.sqlite3
+
+# Credentials
+.env
+*.pem
+*.key
