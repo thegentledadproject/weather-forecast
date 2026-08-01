@@ -9,7 +9,21 @@ mispriced; risk_manager.py/position_manager.py can manage a position
 once it exists; nothing sat between them turning "this looks good" into
 "here's exactly how much to trade, or why not to."
 
-Four checks, in order, for every candidate EVResult:
+Two vetoes run BEFORE any sizing, since neither can be fixed by trading
+smaller:
+  0a. Edge plausibility -- a raw edge past config.MAX_PLAUSIBLE_RAW_EDGE
+      is a data error, not alpha, and is rejected outright. This is not
+      hypothetical: a price-inversion bug produced "edges" of 0.88 and
+      net EVs of +1298% that cleared every EV, slippage and sizing gate
+      below and traded real money, because nothing asked whether an edge
+      that large was believable in the first place.
+  0b. Per-bucket position cap -- config.MAX_OPEN_POSITIONS_PER_BUCKET
+      open positions on the same (station, date, bucket, side) already
+      means this bet is on. Repeat entries across cycles are not extra
+      opportunities, they are one bet accidentally sized up past every
+      per-trade cap below.
+
+Then four checks, in order, for every surviving candidate EVResult:
   1. Kelly-fraction sizing off the real edge (raw_edge / (1 - price)),
      scaled down to fractional Kelly -- see KELLY_FRACTION in config.py
      for why full Kelly is deliberately not used.
@@ -36,7 +50,7 @@ executor.py's manual_review/auto gating still applies downstream.
 
 DEPENDENCIES
 ------------
-config.py, models.py (local)
+config.py, models.py, storage.py, executor.py (local)
 clients/market_client.py (local)
 """
 
@@ -44,6 +58,8 @@ from datetime import date
 from typing import List, Optional
 
 import config
+import storage
+import executor
 from models import EVResult, EntryDecision
 from clients import market_client
 
@@ -62,6 +78,38 @@ def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
     return ev_result.raw_edge / (1 - ev_result.market_price)
 
 
+def count_open_positions_for_bucket(
+    station_icao: str,
+    target_date: date,
+    bucket_c: int,
+    side: str,
+    is_paper: Optional[bool] = None,
+) -> Optional[int]:
+    """
+    How many positions are already open on this exact
+    (station, target_date, bucket, side). Returns None if open positions
+    could not be loaded at all -- callers must treat that as "unknown,
+    therefore do not add another leg," not as zero.
+
+    is_paper scopes the count to one track. It matters: paper and real
+    positions are separate books, so a paper position must not block a
+    real entry on the same bucket (or the reverse) -- that would silently
+    halve real exposure the moment paper mode is used anywhere.
+    """
+    try:
+        open_positions = storage.load_open_positions(station_icao=station_icao, is_paper=is_paper)
+    except Exception as exc:
+        print(f"[entry_manager] could not load open positions to enforce the per-bucket cap: {exc}")
+        return None
+
+    return sum(
+        1 for p in open_positions
+        if p.target_date == target_date
+        and p.bucket_c == bucket_c
+        and p.side.upper() == side.upper()
+    )
+
+
 def evaluate_entry(
     ev_result: EVResult,
     token_id: str,
@@ -69,12 +117,71 @@ def evaluate_entry(
 ) -> EntryDecision:
     """
     Core entry point: turn one EVResult into a sized, gated
-    EntryDecision. Fetches live order-book depth for this specific
-    bucket/side and re-validates the trade at its actual recommended
-    size, rather than trusting the flat-size screen ev_engine.py used.
+    EntryDecision. Runs the two pre-sizing vetoes (edge plausibility,
+    per-bucket position cap), then fetches live order-book depth for this
+    specific bucket/side and re-validates the trade at its actual
+    recommended size, rather than trusting the flat-size screen
+    ev_engine.py used.
     """
     station_icao = ev_result.station_icao
     maturity = config.STATION_MATURITY.get(station_icao, "exploratory")
+
+    def _rejected(reason: str) -> EntryDecision:
+        """Uniform shape for a pre-sizing rejection -- nothing was sized, so every sizing field is empty."""
+        return EntryDecision(
+            station_icao=station_icao, target_date=ev_result.target_date,
+            bucket_c=ev_result.bucket_c, side=ev_result.side,
+            kelly_fraction_raw=0.0, kelly_fraction_applied=0.0,
+            recommended_size_usd=0.0, available_depth_usd=None,
+            slippage_at_size_pct=None, net_ev_at_size=None,
+            approved=False, reason=reason,
+            station_maturity=maturity,
+            entry_price=ev_result.market_price,
+            token_id=token_id,
+        )
+
+    # Veto 0a: edge plausibility. An edge this large on a liquid weather
+    # market is bad data, not alpha -- reject before it can be sized.
+    raw_edge = ev_result.raw_edge
+    if raw_edge is not None and abs(raw_edge) > config.MAX_PLAUSIBLE_RAW_EDGE:
+        print(
+            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: raw edge "
+            f"{raw_edge:+.1%} exceeds the {config.MAX_PLAUSIBLE_RAW_EDGE:.0%} plausibility ceiling. An edge "
+            f"this large is a PRESUMED DATA ERROR (bad or inverted quote, stale calibration, wrong token id) "
+            f"-- not a real trading signal. Not trading it; investigate the price feed and the calibration."
+        )
+        return _rejected(
+            f"VETOED: raw edge {raw_edge:+.1%} exceeds MAX_PLAUSIBLE_RAW_EDGE "
+            f"({config.MAX_PLAUSIBLE_RAW_EDGE:.0%}) -- presumed data error, not alpha."
+        )
+
+    # Veto 0b: per-bucket position cap. This bet is either already on, or
+    # we can't tell -- either way, don't stack another leg onto it. Counted
+    # within this candidate's own track (paper vs. real), matching how
+    # executor.open_position() stamps Position.is_paper from the same mode.
+    candidate_is_paper = executor.EXECUTION_MODE.get(station_icao, "manual_review") == "paper"
+    open_count = count_open_positions_for_bucket(
+        station_icao, ev_result.target_date, ev_result.bucket_c, ev_result.side,
+        is_paper=candidate_is_paper,
+    )
+    if open_count is None:
+        print(
+            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: could not read "
+            f"open positions, so the per-bucket cap cannot be enforced -- refusing to open blind."
+        )
+        return _rejected("Open positions unreadable -- per-bucket cap unenforceable, refusing to open blind.")
+
+    if open_count >= config.MAX_OPEN_POSITIONS_PER_BUCKET:
+        print(
+            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side} on "
+            f"{ev_result.target_date}: {open_count} position(s) already open on this exact bucket/side, cap is "
+            f"{config.MAX_OPEN_POSITIONS_PER_BUCKET}. Re-entering the same bucket across cycles is one bet "
+            f"sized up by accident, not a second opportunity -- skipping."
+        )
+        return _rejected(
+            f"Per-bucket cap: {open_count} position(s) already open on this bucket/side "
+            f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET})."
+        )
 
     kelly_raw = compute_kelly_fraction(ev_result)
     if kelly_raw is None or kelly_raw <= 0:

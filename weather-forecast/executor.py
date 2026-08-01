@@ -34,6 +34,7 @@ models.py, storage.py (local)
 """
 
 from datetime import datetime, timezone
+from typing import Optional
 
 from models import Position, ExitDecision, EntryDecision
 import storage
@@ -147,23 +148,43 @@ def _place_buy_order(position: Position, decision: EntryDecision) -> None:
     )
 
 
-def close_position(position: Position, decision: ExitDecision) -> None:
+def close_position(
+    position: Position,
+    decision: ExitDecision,
+    status: Optional[str] = None,
+    exit_reason: Optional[str] = None,
+) -> None:
     """
     Close an open position per risk_manager's ExitDecision. This is
     the function that makes profit-taking/stop-loss real: it fires
     immediately when the decision says to exit, independent of
     whether the underlying weather market has resolved yet.
+
+    status/exit_reason override what gets written to storage, for exits
+    that are NOT a risk_manager price decision. position_manager.py uses
+    them for market resolution (status="closed_resolution",
+    exit_reason="market_resolved"), so a resolved market can never be
+    filed under the derived "closed_{decision.reason}" of a stop-loss.
+    Left None (the normal path), both are derived exactly as before.
     """
     mode = EXECUTION_MODE.get(position.station_icao, "manual_review")
     exit_time = datetime.now(timezone.utc).isoformat()
+    status = status or f"closed_{decision.reason}"
 
     if mode == "manual_review":
+        # A resolved market can't be sold into -- the book is gone. Telling
+        # an operator to SELL there sends them chasing a fill that cannot
+        # exist, so say what actually needs doing instead.
+        if status == "closed_resolution":
+            action = "REDEEM this position -- the market has RESOLVED, there is nothing left to sell into."
+        else:
+            action = f"SELL {position.size_usd:.2f} USD of this position now."
         print(
             f"\n[ACTION NEEDED] {position.station_icao} {position.bucket_c}°C "
             f"({position.side}) -- {decision.reason.upper()}\n"
             f"  Entry: {position.entry_price:.3f}  Current: {decision.current_price:.3f}  "
             f"P&L: {decision.pnl_pct:+.1%}\n"
-            f"  Recommended: SELL {position.size_usd:.2f} USD of this position now.\n"
+            f"  Recommended: {action}\n"
         )
         # Log as pending-manual so it doesn't get re-flagged identically
         # every single scan cycle while a human hasn't acted yet.
@@ -171,8 +192,8 @@ def close_position(position: Position, decision: ExitDecision) -> None:
             position_id=position.position_id,
             exit_price=decision.current_price,
             exit_time=exit_time,
-            status=f"closed_{decision.reason}",
-            reason=f"{decision.reason} (manual review, pnl={decision.pnl_pct:+.1%})",
+            status=status,
+            reason=exit_reason or f"{decision.reason} (manual review, pnl={decision.pnl_pct:+.1%})",
         )
         return
 
@@ -186,8 +207,8 @@ def close_position(position: Position, decision: ExitDecision) -> None:
             position_id=position.position_id,
             exit_price=decision.current_price,
             exit_time=exit_time,
-            status=f"closed_{decision.reason}",
-            reason=f"{decision.reason} (paper, pnl={decision.pnl_pct:+.1%})",
+            status=status,
+            reason=exit_reason or f"{decision.reason} (paper, pnl={decision.pnl_pct:+.1%})",
         )
         return
 
@@ -197,8 +218,8 @@ def close_position(position: Position, decision: ExitDecision) -> None:
             position_id=position.position_id,
             exit_price=decision.current_price,
             exit_time=exit_time,
-            status=f"closed_{decision.reason}",
-            reason=f"{decision.reason} (auto, pnl={decision.pnl_pct:+.1%})",
+            status=status,
+            reason=exit_reason or f"{decision.reason} (auto, pnl={decision.pnl_pct:+.1%})",
         )
         return
 

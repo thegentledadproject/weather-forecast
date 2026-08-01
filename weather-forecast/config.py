@@ -142,6 +142,27 @@ TIGHTENED_STOP_LOSS_PCT = 0.15
 TIGHTENED_TRAILING_STOP_ACTIVATION_PCT = 0.15  # trail sooner once edge is decaying
 TIGHTENED_TRAILING_STOP_PCT = 0.08             # and trail tighter -- lock in gains faster
 
+# --- Exit-side price plausibility (position_manager.py) -------------------
+# A price at either extreme of the book is far more often a RESOLVED market
+# (or a broken quote) than a live one worth stop-lossing out of: a resolved
+# bucket prints ~1.00 on the winning side and ~0.00 on the losing side.
+# Anything at or below MIN_EXIT_PRICE -- or at or above 1 - MIN_EXIT_PRICE --
+# is therefore routed through the resolution check (Gamma "closed" lookup +
+# a confirming re-fetch) instead of straight into stop-loss logic. Booking a
+# resolution as a stop-loss corrupts the performance record twice over: it
+# misattributes the exit reason AND records a fabricated exit price.
+MIN_EXIT_PRICE = 0.03
+
+# Largest price move between two consecutive scan cycles that is treated as
+# real without a second opinion. Weather buckets do move fast, but a jump
+# bigger than this against a position's last known price is more likely a
+# bad quote, a stale feed, or a token-id mix-up than genuine market movement
+# -- so it requires a confirming re-fetch before ANY exit action is taken.
+# If the re-fetch disagrees or fails, the cycle acts on NOTHING and leaves
+# the position open: skipping one cycle is recoverable, exiting on a
+# phantom price is not.
+MAX_SINGLE_CYCLE_MOVE = 0.5
+
 # --- Scheduler windows ----------------------------------------------------
 # All times are LOCAL (SGT/MYT, UTC+8 -- both registered stations share this
 # offset). Defined as (start_hour, start_min, end_hour, end_min, interval_min,
@@ -213,6 +234,28 @@ MAX_DEPTH_UTILIZATION_PCT = 0.25
 # to fill is a sign the book is too thin to trust the fill price at all --
 # reject rather than trade into it.
 MAX_ACCEPTABLE_SLIPPAGE_PCT = 0.10
+
+# Hard plausibility ceiling on the raw edge (model_prob - market_price) of
+# any candidate entry. On a liquid weather market, an edge this large is
+# not alpha -- it is bad data. Real, tradeable disagreements between a
+# calibrated forecast and a live book run to a few cents; anything past
+# this is a stale calibration, a broken quote, or a side/price mix-up.
+# This constant exists because of a real incident: market_client derived
+# NO prices as `1 - yes_price` from a token that was already the NO token,
+# so every NO position was priced at `1 - reality`. That produced "edges"
+# of 0.88 and net EVs of +1298% which sailed through every EV and sizing
+# gate into real money -- because nothing anywhere asked whether an edge
+# that big was even believable. Now something does.
+MAX_PLAUSIBLE_RAW_EDGE = 0.25
+
+# Maximum simultaneously-open positions on the exact same
+# (station, target_date, bucket, side). One is the right number: repeat
+# entries on one bucket are not independent bets, they are the same bet
+# sized up by accident, and they silently multiply exposure past every
+# per-trade cap above. On day 1 in production the same bucket was entered
+# 4 times across consecutive cycles because nothing checked what was
+# already open before approving another leg.
+MAX_OPEN_POSITIONS_PER_BUCKET = 1
 
 # Station maturity gating, per the edge analysis: WSSS has a confirmed,
 # measured bias-correction edge (14+ days of observed history). WMKK does

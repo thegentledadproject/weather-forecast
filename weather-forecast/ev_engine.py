@@ -74,11 +74,27 @@ def fetch_market_quotes(token_map: Dict[int, dict]) -> Dict[int, MarketQuote]:
     whose price fetch fails are still included in the result with
     None prices, so downstream EV computation can report "no price
     available" explicitly rather than silently dropping the bucket.
+
+    Each side is fetched from its OWN token id -- yes_token_id for YES,
+    no_token_id for NO. Neither is ever derived from the other: the two
+    are independently quoted (NegRisk) and `1 - yes_price` is not the NO
+    price. See clients/market_client.py's module docstring for what that
+    assumption cost the last time it was made.
     """
     quotes = {}
     for bucket_c, ids in token_map.items():
         yes_price = market_client.get_current_price_for_side(ids["yes_token_id"], "YES")
         no_price = market_client.get_current_price_for_side(ids["no_token_id"], "NO")
+        # Advisory cross-check only -- see market_client's module docstring
+        # for why this is a log line and not a gate: a derived (inverted)
+        # price sums to exactly 1.00 and would pass, so the real guards
+        # are the per-token fetch and MAX_PLAUSIBLE_RAW_EDGE. What a large
+        # residual here DOES catch is a token-map mix-up or a stale side.
+        if yes_price is not None and no_price is not None and abs(yes_price + no_price - 1.0) > 0.10:
+            print(
+                f"[ev_engine] SANITY: bucket {bucket_c} yes+no = {yes_price + no_price:.2f} "
+                f"-- sides may be stale or the token map mismapped; edge veto is the backstop."
+            )
         quotes[bucket_c] = MarketQuote(
             bucket_c=bucket_c,
             yes_price=yes_price,

@@ -103,7 +103,17 @@ class Position:
     entry_price: float      # price per share at entry, in dollars (e.g. 0.32)
     size_usd: float         # dollar amount staked
     entry_time: str         # ISO timestamp
-    status: str = "open"    # "open", "closed_profit", "closed_stop", "closed_trailing_stop", "closed_manual", "closed_resolution"
+    # The EXACT set of status strings actually written anywhere in this codebase:
+    #   "open"                 -- executor.open_position()
+    #   "closed_take_profit"   -- executor.close_position(), from ExitDecision.reason
+    #   "closed_stop_loss"     -- executor.close_position(), from ExitDecision.reason
+    #   "closed_trailing_stop" -- executor.close_position(), from ExitDecision.reason
+    #   "closed_resolution"    -- position_manager._close_as_resolved(), passed explicitly
+    # The first three closed_* strings are derived as f"closed_{decision.reason}"
+    # from the reasons risk_manager.evaluate_exit() sets should_exit=True on, so
+    # they track that function exactly. "closed_resolution" is passed explicitly
+    # instead, precisely so a resolved market can never be filed as a stop-loss.
+    status: str = "open"
     high_water_mark: float = None  # best price seen since entry; defaults to entry_price -- drives the trailing stop
     exit_price: float = None
     exit_time: str = None
@@ -124,7 +134,11 @@ class ExitDecision:
     """Output of risk_manager's exit evaluation for one open position."""
     position_id: str
     should_exit: bool
-    reason: str              # "take_profit", "stop_loss", "time_decay_tighten", "hold"
+    # Reasons actually produced: risk_manager.evaluate_exit() sets "stop_loss",
+    # "trailing_stop", "take_profit" (should_exit=True) and "trailing_active",
+    # "hold" (should_exit=False); position_manager adds "resolution"
+    # (should_exit=True) and "resolution_unknown" (should_exit=False).
+    reason: str
     current_price: float
     pnl_pct: float             # unrealized P&L, as a fraction (0.25 = +25%)
 

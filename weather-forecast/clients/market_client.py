@@ -12,12 +12,35 @@ and stop-loss decisions are only as good as the live price feed
 they're checked against.
 
 Two responsibilities, kept separate from execution:
-  - get_bucket_prices(): read-only price lookup, used both for entry
-    EV calculation (ev_engine.py, not yet built) and for exit
-    monitoring (position_manager.py, this update)
+  - get_token_price(): read-only price lookup for ONE outcome token,
+    used both for entry EV calculation (ev_engine.py) and for exit
+    monitoring (position_manager.py). get_current_price_for_side() is a
+    thin wrapper over it. There is deliberately NO two-sided "fetch the
+    whole bucket" helper: a caller wanting both sides asks for both token
+    ids, so the code never has a place where one side could be inferred
+    from the other. (The previous two-sided helper also could not have
+    caught a re-introduced inversion -- a NO price derived as `1 - yes`
+    sums to exactly 1.00 and sails through any yes+no consistency check.
+    The real guards are structural: each side is fetched from its own
+    token id, and config.MAX_PLAUSIBLE_RAW_EDGE vetoes the absurd edges a
+    price error produces.)
   - This module does NOT place orders -- that's executor.py's job.
     Keeping price-reading and order-placement in different modules
     means a bug here can't accidentally cause a bad trade.
+
+NEVER DERIVE ONE SIDE'S PRICE FROM THE OTHER'S
+----------------------------------------------
+YES and NO on a Polymarket bucket are SEPARATELY QUOTED tokens linked
+by the NegRisk conversion mechanism -- they are not required to sum to
+exactly $1, and neither is derivable from the other. An earlier version
+of this module fetched one token, labelled it "yes_price", and returned
+`1 - price` as the NO price. Callers were already passing each side's
+OWN token id, so every NO position was recorded at `1 - reality`, which
+manufactured "edges" of 0.88 and EVs of +1298% that sailed straight
+through the entry gates into real money. Every function below fetches
+each token id it is given, directly, and returns exactly what the book
+said for that token. If a price is missing, callers get None -- never
+an inferred substitute.
 
 IMPLEMENTATION NOTE
 --------------------
@@ -25,7 +48,7 @@ Polymarket's public CLOB REST API is the intended real backing for
 this client. The endpoint/shape below is written against Polymarket's
 documented CLOB API structure but has NOT been exercised against a
 live pull in this environment (network to Polymarket's API was not
-available for testing here) -- treat get_bucket_prices() as needing
+available for testing here) -- treat get_token_price() as needing
 a real smoke-test against production before position_manager.py is
 trusted with real capital. Fails soft (returns None) so callers
 degrade gracefully rather than crash.
@@ -37,7 +60,7 @@ models.py (local)
 """
 
 from datetime import datetime, timezone
-from typing import Optional, Dict
+from typing import Optional
 
 import requests
 
@@ -49,42 +72,52 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_bucket_prices(market_token_id: str, timeout: int = 10) -> Optional[Dict[str, float]]:
+def get_token_price(token_id: str, timeout: int = 10) -> Optional[float]:
     """
-    Fetch the current best bid/ask (used here as a proxy for YES price)
-    for one outcome token. Returns {"yes_price": float, "no_price": float}
-    or None on failure.
+    Fetch the current CLOB price for ONE outcome token -- the single
+    primitive every other price lookup in this module is built on.
 
-    market_token_id identifies a single outcome's YES token on
-    Polymarket's CLOB -- callers (position_manager.py) look this up per
-    open Position from whatever token-id mapping was recorded at entry
-    time (executor.py's responsibility to record when a trade is placed).
+    The price returned is the price of the token id passed in, exactly
+    as quoted. No complement arithmetic, no assumption about whether
+    this token is the YES or the NO side of its bucket: that is the
+    caller's business, and the token id already encodes it.
+
+    Returns None on any failure (network, HTTP error, missing/unparseable
+    "price" field) so callers fail soft rather than act on a guess.
     """
     try:
         resp = requests.get(
             f"{CLOB_API_BASE}/price",
-            params={"token_id": market_token_id, "side": "buy"},
+            params={"token_id": token_id, "side": "buy"},
             timeout=timeout,
         )
         resp.raise_for_status()
         payload = resp.json()
-        yes_price = float(payload.get("price"))
-        return {"yes_price": yes_price, "no_price": round(1 - yes_price, 4)}
+        return float(payload.get("price"))
     except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
-        print(f"[market_client] get_bucket_prices failed for token {market_token_id}: {exc}")
+        print(f"[market_client] get_token_price failed for token {token_id}: {exc}")
         return None
 
 
-def get_current_price_for_side(market_token_id: str, side: str) -> Optional[float]:
+def get_current_price_for_side(token_id: str, side: str) -> Optional[float]:
     """
-    Convenience wrapper: returns the current price relevant to a
-    specific Position's side ("YES" or "NO"), or None on failure.
+    The current live price for one Position's own side, or None on failure.
     This is the single call position_manager.py needs per open position.
+
+    CONTRACT: `token_id` IS that side's own token -- the NO token for a
+    NO position, the YES token for a YES position. It is NOT a canonical
+    YES token from which the other side gets derived. YES and NO are
+    independently quoted (NegRisk), so `1 - yes_price` is NOT the NO
+    price; deriving it that way is exactly the bug that recorded every
+    NO position at `1 - reality`.
+
+    `side` is kept purely for call-site signature compatibility and for
+    the failure log message -- it never changes the value returned.
     """
-    prices = get_bucket_prices(market_token_id)
-    if prices is None:
-        return None
-    return prices["yes_price"] if side.upper() == "YES" else prices["no_price"]
+    price = get_token_price(token_id)
+    if price is None:
+        print(f"[market_client] no live {side.upper()} price available for token {token_id} this cycle")
+    return price
 
 
 def get_order_book(market_token_id: str, timeout: int = 10) -> Optional[dict]:
@@ -95,7 +128,7 @@ def get_order_book(market_token_id: str, timeout: int = 10) -> Optional[dict]:
     -- or None on failure. Used by estimate_slippage() to model the
     real cost of a trade rather than assuming a flat percentage.
 
-    NOTE: like get_bucket_prices, this is written against Polymarket's
+    NOTE: like get_token_price, this is written against Polymarket's
     documented CLOB API shape but has not been exercised against a
     live pull in this environment. Confirm the exact field names
     against a real response before trusting the parsing below.

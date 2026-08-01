@@ -195,7 +195,7 @@ def update_high_water_mark(position_id: str, new_high_water_mark: float) -> None
 
 
 def close_position(position_id: str, exit_price: float, exit_time: str, status: str, reason: str) -> None:
-    """Mark a position closed -- status should be one of 'closed_profit', 'closed_stop', 'closed_manual', 'closed_resolution'."""
+    """Mark a position closed -- status should be one of 'closed_take_profit', 'closed_stop_loss', 'closed_trailing_stop', 'closed_resolution' (see models.Position.status)."""
     with _connect() as conn:
         conn.execute(
             "UPDATE positions SET status = ?, exit_price = ?, exit_time = ?, exit_reason = ? WHERE position_id = ?",

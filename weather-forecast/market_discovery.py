@@ -20,6 +20,11 @@ How it works, per Polymarket's documented Gamma API structure:
   4. Parse each market's bucket label and outcomes/clobTokenIds into
      one token_map entry.
 
+The same event lookup also answers "has this market closed/resolved?"
+via get_market_state() -- position_manager.py needs that to tell a
+resolved market's 0.00/1.00 print apart from a genuine price collapse,
+so a resolution is never booked as a stop-loss.
+
 CONFIDENCE NOTE
 ----------------
 The event/market discovery shape above (slug lookup, "markets" array,
@@ -148,6 +153,83 @@ def parse_token_ids(market: dict) -> Optional[Dict[str, str]]:
     except (KeyError, ValueError, TypeError) as exc:
         print(f"[market_discovery] parse_token_ids failed: {exc}")
         return None
+
+
+def _as_bool(value) -> bool:
+    """
+    Coerce a Gamma boolean-ish field to a real bool. Gamma returns these
+    as JSON booleans in the responses seen so far, but string "true"/
+    "false" has been observed on some Polymarket endpoints -- handle both
+    rather than have `bool("false")` silently report a live market as
+    closed. Anything unrecognised is treated as falsey (i.e. NOT closed),
+    which is the safe direction: a position is only ever closed as
+    resolved on a POSITIVE signal, never on an ambiguous one.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
+def get_market_state(
+    station: StationConfig,
+    target_date: date,
+    bucket_c: Optional[int] = None,
+    bucket_min: int = 0,
+    bucket_max: int = 0,
+    timeout: int = 10,
+) -> Optional[dict]:
+    """
+    Report whether a station's market is closed/resolved, per Gamma.
+
+    Pass bucket_c to ask about ONE bucket's market (bucket_min/bucket_max
+    are then needed so the "or below"/"or above" edge labels resolve to
+    real bucket numbers, same as discover_token_map). Omit it to ask
+    about the event as a whole.
+
+    Returns:
+        {"slug": str, "bucket_c": Optional[int], "closed": bool,
+         "closed_flag": bool, "archived": bool}
+      -- where "closed" is the answer callers should act on (closed OR
+      archived, since an archived market is not tradeable either).
+
+    Returns None for UNKNOWN -- network failure, event not found, or the
+    requested bucket not present in the event. Unknown is deliberately
+    distinct from False: position_manager.py treats only an explicit True
+    as grounds to close a position as resolved, and never raises out of
+    here on a network failure (fetch_event already fails soft).
+    """
+    slug = build_event_slug(station, target_date)
+    event = fetch_event(slug, timeout=timeout)
+    if event is None:
+        return None
+
+    source = event
+    if bucket_c is not None:
+        markets = event.get("markets", []) or []
+        source = None
+        for market in markets:
+            if parse_bucket_label(market, bucket_min, bucket_max) == bucket_c:
+                source = market
+                break
+        if source is None:
+            print(
+                f"[market_discovery] bucket {bucket_c}°C not found in event '{slug}' "
+                f"({len(markets)} market(s) listed) -- market state unknown"
+            )
+            return None
+
+    closed_flag = _as_bool(source.get("closed", False))
+    archived = _as_bool(source.get("archived", False))
+
+    return {
+        "slug": slug,
+        "bucket_c": bucket_c,
+        "closed": closed_flag or archived,
+        "closed_flag": closed_flag,
+        "archived": archived,
+    }
 
 
 def discover_token_map(
