@@ -57,18 +57,14 @@ try:
     import config  # noqa: E402
     import storage  # noqa: E402
 
-    total_open = total_closed = 0
+    open_positions = storage.load_open_positions(is_paper=True)
+    closed_positions = []
     for icao in config.STATIONS:
-        try:
-            total_open += len(storage.load_open_positions(icao, is_paper=True))
-        except TypeError:
-            total_open += len(storage.load_open_positions(icao))
-        try:
-            total_closed += len(storage.load_position_history(icao, is_paper=True))
-        except TypeError:
-            total_closed += len(storage.load_position_history(icao))
-    open_n, closed_n = total_open, total_closed
+        closed_positions.extend(storage.load_position_history(icao, is_paper=True))
+    closed_positions.sort(key=lambda p: p.exit_time or "", reverse=True)
+    open_n, closed_n = len(open_positions), len(closed_positions)
 except Exception as exc:  # noqa: BLE001
+    open_positions, closed_positions = [], []
     warnings.append(f"position read failed: {exc}")
 
 if closed_n:
@@ -83,6 +79,107 @@ if closed_n:
         pnl_display = f"{total:+.1f}%"
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"P&L summary failed: {exc}")
+
+# --- positions detail table --------------------------------------------------
+def status_label(status):
+    """Map a position status string to (label, css class), tolerant of the
+    exact wording the risk manager writes (e.g. closed_stop vs closed_stop_loss)."""
+    s = (status or "").lower()
+    if s == "open":
+        return "open", "st-open"
+    if "profit" in s:
+        return "take profit", "st-good"
+    if "trailing" in s:
+        return "trailing stop", "st-warn"
+    if "stop" in s:
+        return "stop loss", "st-bad"
+    if "resol" in s:
+        return "resolved", "st-neutral"
+    if "manual" in s:
+        return "manual close", "st-neutral"
+    return s.replace("_", " "), "st-neutral"
+
+
+def _hm(iso_ts):
+    """ISO timestamp -> compact 'dd MMM HH:MM' SGT string."""
+    if not iso_ts:
+        return "&mdash;"
+    try:
+        dt = datetime.fromisoformat(str(iso_ts))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        secs = dt.timestamp() + 8 * 3600
+        d = datetime.fromtimestamp(secs, tz=timezone.utc)
+        return d.strftime("%d %b %H:%M")
+    except ValueError:
+        return html.escape(str(iso_ts)[:16])
+
+
+def _pos_row(p):
+    is_open = p.status == "open"
+    label, cls = status_label(p.status)
+    if is_open:
+        mark = p.high_water_mark if p.high_water_mark is not None else p.entry_price
+        last_price = f"{mark:.2f}<span class='sub'>hwm</span>"
+        ret = "&mdash;"
+        ret_cls = ""
+        when = _hm(p.entry_time)
+    else:
+        last_price = f"{p.exit_price:.2f}" if p.exit_price is not None else "&mdash;"
+        if p.exit_price is not None and p.entry_price:
+            r = (p.exit_price - p.entry_price) / p.entry_price * 100
+            ret = f"{r:+.1f}%"
+            ret_cls = "pos" if r >= 0 else "neg"
+        else:
+            ret, ret_cls = "&mdash;", ""
+        when = _hm(p.exit_time)
+    return (
+        "<tr>"
+        f"<td class='mono'>{html.escape(p.station_icao)}</td>"
+        f"<td class='mono'>{html.escape(str(p.target_date))}</td>"
+        f"<td class='mono'>{p.bucket_c}&deg;C</td>"
+        f"<td class='mono'>{html.escape(p.side)}</td>"
+        f"<td class='mono num'>${p.size_usd:,.0f}</td>"
+        f"<td class='mono num'>{p.entry_price:.2f}</td>"
+        f"<td class='mono num'>{last_price}</td>"
+        f"<td class='mono num {ret_cls}'>{ret}</td>"
+        f"<td><span class='st {cls}'>{html.escape(label)}</span></td>"
+        f"<td class='mono dim2'>{when}</td>"
+        "</tr>"
+    )
+
+
+MAX_CLOSED_SHOWN = 15
+try:
+    shown = open_positions + closed_positions[:MAX_CLOSED_SHOWN]
+    if shown:
+        omitted = len(closed_positions) - min(len(closed_positions), MAX_CLOSED_SHOWN)
+        rows = "".join(_pos_row(p) for p in shown)
+        foot = (
+            f"<p class='cap' style='margin:10px 0 0'>{omitted} older closed positions not shown.</p>"
+            if omitted > 0 else ""
+        )
+        positions_html = (
+            "<div class='tablewrap'><table class='ptable'>"
+            "<thead><tr><th>Station</th><th>Market date</th><th>Bucket</th><th>Side</th>"
+            "<th class='num'>Size</th><th class='num'>Entry</th><th class='num'>Last/exit</th>"
+            "<th class='num'>Return</th><th>Status</th><th>Entered/exited</th></tr></thead>"
+            f"<tbody>{rows}</tbody></table></div>{foot}"
+        )
+        positions_cap = (
+            f"{len(open_positions)} open &middot; {min(len(closed_positions), MAX_CLOSED_SHOWN)} most recent closed"
+            " &middot; open rows show high-water mark, not a live quote"
+        )
+    else:
+        positions_html = (
+            "<div class='empty'>No paper positions yet &mdash; the first candidates appear in the"
+            " 05:00&ndash;08:00 SGT entry window, and only if the EV engine finds edge worth taking.</div>"
+        )
+        positions_cap = "paper positions, both stations"
+except Exception as exc:  # noqa: BLE001
+    warnings.append(f"positions table failed: {exc}")
+    positions_html = "<div class='empty'>positions table unavailable</div>"
+    positions_cap = ""
 
 now_utc = datetime.now(timezone.utc)
 snap_sgt = now_utc.astimezone(timezone.utc).strftime("%d %b %Y, ")
@@ -180,6 +277,28 @@ page = """<!doctype html>
   .badge.immature { background:var(--warn-bg); color:var(--warn); }
   .station dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:12px 0 0; font-size:13px; }
   .station dt { color:var(--muted); } .station dd { margin:0; color:var(--ink-2); }
+  .tablewrap { overflow-x:auto; }
+  .ptable { border-collapse:collapse; width:100%; font-size:12.5px; }
+  .ptable th { text-align:left; font-size:10.5px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--muted); font-weight:600; padding:6px 12px 6px 0; border-bottom:1px solid var(--line);
+    white-space:nowrap; }
+  .ptable td { padding:8px 12px 8px 0; border-bottom:1px solid var(--line); white-space:nowrap;
+    color:var(--ink-2); }
+  .ptable tr:last-child td { border-bottom:none; }
+  .ptable .mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+  .ptable th.num, .ptable td.num { text-align:right; }
+  .ptable .pos { color:var(--good); } .ptable .neg { color:var(--bad); }
+  .ptable .dim2 { color:var(--muted); }
+  .ptable .sub { font-size:9.5px; color:var(--muted); margin-left:4px; }
+  .st { font-family:var(--mono); font-size:10.5px; letter-spacing:.05em; text-transform:uppercase;
+    padding:2px 8px; border-radius:4px; white-space:nowrap; }
+  .st-open { background:var(--teal-faint); color:var(--teal); }
+  .st-good { background:var(--good-bg); color:var(--good); }
+  .st-bad { background:var(--bad-bg); color:var(--bad); }
+  .st-warn { background:var(--warn-bg); color:var(--warn); }
+  .st-neutral { background:var(--paper); color:var(--muted); border:1px solid var(--line); }
+  .empty { font-size:13.5px; color:var(--muted); background:var(--paper);
+    border:1px dashed var(--line); border-radius:6px; padding:16px 18px; }
   .callout { border:1px solid var(--warn); background:var(--warn-bg); border-radius:8px;
     padding:14px 18px; font-size:13.5px; color:var(--ink-2); }
   .callout b { color:var(--warn); font-family:var(--mono); font-size:12px; letter-spacing:.08em;
@@ -265,6 +384,12 @@ page = """<!doctype html>
     </div>
   </div>
 
+  <div class="card">
+    <h2>Positions</h2>
+    <p class="cap">@@POSCAP@@</p>
+    @@POSTABLE@@
+  </div>
+
   @@WARNINGS@@
 
   <div class="card">
@@ -313,6 +438,8 @@ page = (
     .replace("@@CLOSED@@", tile_val(closed_n))
     .replace("@@PNL@@", pnl_display)
     .replace("@@PNLDIM@@", "dim" if pnl_display == "&mdash;" else "")
+    .replace("@@POSCAP@@", positions_cap)
+    .replace("@@POSTABLE@@", positions_html)
     .replace("@@WARNINGS@@", warn_html)
     .replace("@@JOURNAL@@", html.escape(journal))
     .replace("@@DEPLOYMS@@", str(deploy_epoch_ms))
