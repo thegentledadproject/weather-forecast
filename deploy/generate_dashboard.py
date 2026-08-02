@@ -375,7 +375,7 @@ page = """<!doctype html>
   .pills { display:flex; gap:8px; flex-wrap:wrap; }
   .pill { display:inline-flex; align-items:center; gap:7px; font-family:var(--mono);
     font-size:12px; padding:5px 12px; border-radius:999px; border:1px solid var(--line);
-    background:var(--card); color:var(--ink-2); white-space:nowrap; }
+    background:var(--card); color:var(--ink-2); white-space:nowrap; text-decoration:none; }
   .pill .dot { width:8px; height:8px; border-radius:50%; }
   .pill.active { border-color:var(--good); color:var(--good); background:var(--good-bg); }
   .pill.active .dot { background:var(--good); }
@@ -469,6 +469,7 @@ page = """<!doctype html>
       <div class="pills">
         <span class="pill @@PILLCLS@@"><span class="dot"></span>@@PILLTXT@@</span>
         <span class="pill paperm"><span class="dot"></span>paper mode &mdash; no live orders</span>
+        <a class="pill" href="backtest.html">backtest lab &rarr;</a>
       </div>
     </div>
   </header>

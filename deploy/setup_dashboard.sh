@@ -11,16 +11,18 @@ sudo rm -f /var/www/html/index.nginx-debian.html
 echo "== generator into place =="
 sudo mv /home/ubuntu/generate_dashboard.py /usr/local/bin/generate_dashboard.py
 sudo chmod 644 /usr/local/bin/generate_dashboard.py
+sudo mv /home/ubuntu/generate_backtest_dashboard.py /usr/local/bin/generate_backtest_dashboard.py
+sudo chmod 644 /usr/local/bin/generate_backtest_dashboard.py
 
 echo "== systemd service + timer =="
 sudo tee /etc/systemd/system/polyweather-dashboard.service >/dev/null <<UNIT
 [Unit]
-Description=Regenerate polyweather status dashboard
+Description=Regenerate polyweather status dashboard (paper trading + backtest lab)
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$VENV_PY /usr/local/bin/generate_dashboard.py
+ExecStart=/bin/sh -c '$VENV_PY /usr/local/bin/generate_dashboard.py && $VENV_PY /usr/local/bin/generate_backtest_dashboard.py'
 UNIT
 
 sudo tee /etc/systemd/system/polyweather-dashboard.timer >/dev/null <<UNIT
