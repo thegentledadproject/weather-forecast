@@ -331,15 +331,15 @@ def _seed_observations(station) -> List[ObservedReading]:
 
 def _pick_observation(candidates: List[ObservedReading]) -> Optional[ObservedReading]:
     """
-    One observation from possibly several for the same date. Prefers a
-    real stored reading over seed data (a confirmed figure beats a
-    manually maintained constant), then lowest source name for a stable
-    tie-break. Deterministic by construction -- resolution must never
-    depend on row order.
+    One observation from possibly several for the same date, by
+    config.observation_source_rank: METAR settlement-grade first (the
+    same record Polymarket's Wunderground source displays), then any
+    other fetched reading, seed constants last. Deterministic by
+    construction -- resolution must never depend on row order.
     """
     if not candidates:
         return None
-    return sorted(candidates, key=lambda o: (o.source == "seed_data", o.source))[0]
+    return sorted(candidates, key=lambda o: config.observation_source_rank(o.source))[0]
 
 
 # --------------------------------------------------------------------------
@@ -441,7 +441,11 @@ def run(
         station_icao, start_date - timedelta(days=OBSERVATION_WINDOW_DAYS + 400)
     )
     stored_obs.sort(key=lambda o: (o.target_date, o.source))
-    all_observations = seed_obs + stored_obs
+    # Best source per day (METAR settlement-grade > other fetched > seed),
+    # exactly as pipeline.run() now feeds calibration live -- and it makes
+    # resolution deterministic in what it settles against, closing the
+    # resolution-source mismatch the framework originally flagged.
+    all_observations = storage.dedupe_observations(seed_obs + stored_obs)
 
     tokens_seen: set = set()
 

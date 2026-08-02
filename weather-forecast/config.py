@@ -41,6 +41,27 @@ def local_today() -> date:
     """The current calendar date in the market's timezone (UTC+8)."""
     return (datetime.now(timezone.utc) + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)).date()
 
+
+# --- Observation source ranking -------------------------------------------
+# Polymarket settles these markets on Wunderground's station history, which
+# is the airport METAR record. clients/metar_client.py ingests exactly that
+# (source below), so when several sources report the same day, settlement-
+# grade truth must win: METAR first, then any other fetched reading (e.g.
+# the Open-Meteo analysis backfill, "openmeteo_recent_actual"), with the
+# hand-maintained seed constants last. Used by resolution picking in the
+# backtest AND by dedup before calibration blending -- two rows for one day
+# would otherwise double-count it in the observed mean.
+RESOLUTION_GRADE_OBSERVATION_SOURCE = "metar_daily_max"
+
+
+def observation_source_rank(source: str) -> tuple:
+    """Sort key: lower ranks win. Deterministic across ties via the name."""
+    if source == RESOLUTION_GRADE_OBSERVATION_SOURCE:
+        return (0, source)
+    if source == "seed_data":
+        return (2, source)
+    return (1, source)
+
 # --- Shared monsoon-phase lookup (reused across Southeast Asian stations) ---
 # Coarse, deliberately simple for the MVP. A given station can override
 # this per-entry below if its local seasonal pattern differs.

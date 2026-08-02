@@ -134,6 +134,16 @@ def run_cycle(window: dict, station_icaos: Optional[list] = None) -> None:
         print("[scheduler] closed window -- nothing to do.")
         return
 
+    # Resolution-grade observation ingest: pull any missing recent METAR
+    # daily maxima (the settlement-source record) into storage. Runs at
+    # most once per local day (the client self-throttles) and must never
+    # break a cycle.
+    try:
+        from clients import metar_client
+        metar_client.ingest_missing_recent(station_icaos)
+    except Exception as exc:  # noqa: BLE001 - ingest is auxiliary to trading
+        print(f"[scheduler] METAR observation ingest skipped: {exc}")
+
     if mode == "pre_poll":
         for icao in station_icaos:
             station = config.get_station(icao)

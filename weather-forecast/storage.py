@@ -119,6 +119,23 @@ def load_observations_since(station_icao: str, cutoff: date) -> List[ObservedRea
     ]
 
 
+def dedupe_observations(observations: List[ObservedReading]) -> List[ObservedReading]:
+    """
+    One reading per (station, target_date), keeping the best source per
+    config.observation_source_rank (METAR settlement-grade first, seed
+    constants last). The observations table's primary key allows one row
+    PER SOURCE per day, so any consumer that averages readings -- the
+    calibration blend above all -- must dedupe first or a day reported by
+    two sources counts twice. Output sorted by date for determinism.
+    """
+    best: dict = {}
+    for obs in observations:
+        key = (obs.station_icao, obs.target_date)
+        if key not in best or config.observation_source_rank(obs.source) < config.observation_source_rank(best[key].source):
+            best[key] = obs
+    return sorted(best.values(), key=lambda o: (o.station_icao, o.target_date))
+
+
 def load_forecast_history(station_icao: str, source: str, limit: int = 90) -> List[PointForecast]:
     """Load past forecasts from one source for one station, most recent first."""
     with _connect() as conn:

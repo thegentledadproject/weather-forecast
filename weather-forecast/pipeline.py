@@ -75,6 +75,9 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
     ensemble = openmeteo_client.get_ensemble_spread(station)
     observations = climate_monitor_client.load_recent_observations(station, days=30)
     observations += storage.load_observations_since(station.icao, target_date.replace(day=1))
+    # Two sources reporting the same day must not double-count in the
+    # 60/40 calibration blend; settlement-grade METAR rows win.
+    observations = storage.dedupe_observations(observations)
 
     estimate = calibrate(
         station=station,
