@@ -185,6 +185,9 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
             ensemble_members=openmeteo_client.get_ensemble_spread(station),
         )
         ev_results = ev_engine.run_for_station(estimate)
+        # Snapshot every computation -- including empty ones -- so the
+        # status dashboard can show the latest EV table and its age.
+        ev_engine.save_ev_snapshot(station_icao, ev_results)
         if ev_results:
             best = ev_engine.best_opportunities(ev_results, min_net_ev=min_net_ev)
             if best:

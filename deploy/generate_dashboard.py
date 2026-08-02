@@ -7,10 +7,12 @@ Every data read is fail-soft: a failure shows up ON the page rather than
 killing the render.
 """
 import html
+import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+import time
+from datetime import date, datetime, timezone
 
 PKG = "/home/ubuntu/weather-forecast/weather-forecast"
 OUT = "/var/www/html/index.html"
@@ -80,6 +82,140 @@ if closed_n:
         pnl_display = f"{total * 100:+.1f}%"
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"P&L summary failed: {exc}")
+
+# --- live dependency probes --------------------------------------------------
+# Actively probed from this instance on every regeneration (5 min), so the
+# page answers "is each upstream feed reachable RIGHT NOW", not "did the
+# daemon happen to log an error recently."
+def _probe(name, url, ok_when=None, timeout=6):
+    import requests  # deferred so a missing requests only breaks probes, not the page
+
+    t0 = time.time()
+    try:
+        r = requests.get(url, timeout=timeout, headers={"User-Agent": "polyweather-status/1.0"})
+        ms = int((time.time() - t0) * 1000)
+        state = "ok" if (ok_when(r) if ok_when else r.status_code == 200) else "degraded"
+        return {"name": name, "state": state, "detail": f"HTTP {r.status_code} &middot; {ms} ms"}
+    except Exception as exc:  # noqa: BLE001 - a dead probe is itself the data point
+        return {"name": name, "state": "down", "detail": html.escape(type(exc).__name__)}
+
+
+def _run_probes():
+    try:
+        import market_discovery
+
+        wsss = config.get_station("WSSS")
+        slug = market_discovery.build_event_slug(wsss, date.today())
+        om = f"?latitude={wsss.lat}&longitude={wsss.lon}&daily=temperature_2m_max&timezone=auto&forecast_days=1"
+        return [
+            _probe("NEA (data.gov.sg)", "https://api.data.gov.sg/v1/environment/24-hour-weather-forecast"),
+            _probe("WWIS / MET Malaysia", "https://worldweather.wmo.int/en/json/82_en.json"),
+            _probe("Open-Meteo ECMWF", config.OPEN_METEO_ECMWF_URL + om),
+            _probe("Open-Meteo ensemble", config.OPEN_METEO_ENSEMBLE_URL + om + "&models=ecmwf_ifs025"),
+            _probe("Wunderground", wsss.wunderground_history_url, timeout=8),
+            # Gamma: 200 with a non-empty list means today's event is actually listed;
+            # 200-but-empty is degraded (API up, market not found), not ok.
+            _probe("Gamma API (today's event)", f"https://gamma-api.polymarket.com/events?slug={slug}",
+                   ok_when=lambda r: r.status_code == 200 and r.json()),
+            # CLOB: reachability only -- a garbage token id SHOULD 404/400; any
+            # HTTP answer < 500 proves the trading API is up and talking.
+            _probe("CLOB price API", "https://clob.polymarket.com/price?token_id=1&side=buy",
+                   ok_when=lambda r: r.status_code < 500),
+        ]
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"probes failed to run: {exc}")
+        return []
+
+
+_PROBE_STATE_LABELS = {"ok": "ok", "degraded": "degraded", "down": "DOWN"}
+probes = _run_probes()
+if probes:
+    chips = "".join(
+        f"<div class='probe p-{p['state']}'><span class='pdot'></span>"
+        f"<span class='pname'>{html.escape(p['name'])}</span>"
+        f"<span class='pdetail'>{_PROBE_STATE_LABELS[p['state']]} &middot; {p['detail']}</span></div>"
+        for p in probes
+    )
+    n_down = sum(1 for p in probes if p["state"] != "ok")
+    probes_cap = ("all upstream feeds reachable" if n_down == 0
+                  else f"{n_down} of {len(probes)} feeds not fully OK")
+    probes_html = f"<div class='probes'>{chips}</div>"
+else:
+    probes_cap = "probe run failed -- see warnings"
+    probes_html = "<div class='empty'>probes unavailable</div>"
+
+# --- latest EV snapshot ------------------------------------------------------
+EV_ENTRY_SCREEN = 0.15  # matches scheduler's min_net_ev entry screen
+
+
+def _load_ev_snapshots():
+    snaps = []
+    for icao in config.STATIONS:
+        p = config.DATA_DIR / f"ev_latest_{icao}.json"
+        try:
+            if p.exists():
+                with open(p, encoding="utf-8") as fh:
+                    snaps.append(json.load(fh))
+        except (OSError, ValueError) as exc:
+            warnings.append(f"EV snapshot unreadable for {icao}: {exc}")
+    return snaps
+
+
+def _ev_rows(snap):
+    rows = []
+    priced = [r for r in snap.get("results", []) if r.get("net_ev_per_dollar") is not None]
+    unpriced = len(snap.get("results", [])) - len(priced)
+    for r in sorted(priced, key=lambda x: x["net_ev_per_dollar"], reverse=True):
+        ev = r["net_ev_per_dollar"]
+        cls = "pos" if ev >= EV_ENTRY_SCREEN else ""
+        rows.append(
+            "<tr>"
+            f"<td class='mono'>{html.escape(snap['station_icao'])}</td>"
+            f"<td class='mono'>{r['bucket_c']}&deg;C</td>"
+            f"<td class='mono'>{html.escape(r['side'])}</td>"
+            f"<td class='mono num'>{r['model_prob']:.1%}</td>"
+            f"<td class='mono num'>{r['market_price']:.3f}</td>"
+            f"<td class='mono num'>{r['raw_edge']:+.1%}</td>"
+            f"<td class='mono num {cls}'>{ev:+.1%}</td>"
+            "</tr>"
+        )
+    return rows, unpriced
+
+
+try:
+    ev_snaps = _load_ev_snapshots()
+    if ev_snaps:
+        all_rows, total_unpriced = [], 0
+        ages = []
+        for snap in ev_snaps:
+            rows, unpriced = _ev_rows(snap)
+            all_rows.extend(rows)
+            total_unpriced += unpriced
+            ages.append(snap.get("generated_at", ""))
+        newest = max(ages) if ages else ""
+        age_note = f"as of {html.escape(newest[11:16])} UTC" if len(newest) >= 16 else ""
+        if all_rows:
+            ev_html = (
+                "<div class='tablewrap'><table class='ptable'>"
+                "<thead><tr><th>Station</th><th>Bucket</th><th>Side</th>"
+                "<th class='num'>Model p</th><th class='num'>Mkt price</th>"
+                "<th class='num'>Raw edge</th><th class='num'>Net EV/$</th></tr></thead>"
+                f"<tbody>{''.join(all_rows)}</tbody></table></div>"
+            )
+            if total_unpriced:
+                ev_html += (f"<p class='cap' style='margin:10px 0 0'>{total_unpriced} bucket/side rows "
+                            "had no live quote (unseeded far-tail books).</p>")
+        else:
+            ev_html = "<div class='empty'>Latest EV computation found no priceable buckets.</div>"
+        ev_cap = (f"latest computation {age_note} &middot; rows at or above the "
+                  f"{EV_ENTRY_SCREEN:.0%} net-EV entry screen highlighted")
+    else:
+        ev_html = ("<div class='empty'>No EV snapshot yet &mdash; the engine computes during the morning "
+                   "entry windows (05:00&ndash;10:00 SGT) and saves its table here from then on.</div>")
+        ev_cap = "model edge vs. market, per bucket and side"
+except Exception as exc:  # noqa: BLE001
+    warnings.append(f"EV card failed: {exc}")
+    ev_html, ev_cap = "<div class='empty'>EV view unavailable</div>", ""
 
 # --- positions detail table --------------------------------------------------
 def status_label(status):
@@ -278,6 +414,17 @@ page = """<!doctype html>
   .badge.immature { background:var(--warn-bg); color:var(--warn); }
   .station dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:12px 0 0; font-size:13px; }
   .station dt { color:var(--muted); } .station dd { margin:0; color:var(--ink-2); }
+  .probes { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:8px; }
+  .probe { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:6px;
+    border:1px solid var(--line); background:var(--paper); font-size:12px; min-width:0; }
+  .pdot { width:9px; height:9px; border-radius:50%; flex:none; }
+  .p-ok .pdot { background:var(--good); }
+  .p-degraded .pdot { background:var(--warn); }
+  .p-down .pdot { background:var(--bad); }
+  .p-down { border-color:var(--bad); }
+  .pname { color:var(--ink); font-weight:600; white-space:nowrap; }
+  .pdetail { font-family:var(--mono); font-size:10.5px; color:var(--muted); margin-left:auto;
+    white-space:nowrap; }
   .tablewrap { overflow-x:auto; }
   .ptable { border-collapse:collapse; width:100%; font-size:12.5px; }
   .ptable th { text-align:left; font-size:10.5px; letter-spacing:.08em; text-transform:uppercase;
@@ -340,6 +487,12 @@ page = """<!doctype html>
   </div>
 
   <div class="card">
+    <h2>Live feeds</h2>
+    <p class="cap">@@PROBESCAP@@ &middot; probed from this instance at generation time</p>
+    @@PROBES@@
+  </div>
+
+  <div class="card">
     <h2>Trading day &mdash; Singapore time (UTC+8)</h2>
     <p class="cap">Simplified view of the scheduler&rsquo;s windows. The edge lives in the morning:
       entries 05:00&ndash;08:00, decaying to nothing by 10:00.</p>
@@ -383,6 +536,12 @@ page = """<!doctype html>
         <dt>Resolution source</dt><dd>Wunderground WMKK history</dd>
       </dl>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>Edge &mdash; latest EV table</h2>
+    <p class="cap">@@EVCAP@@</p>
+    @@EVCARD@@
   </div>
 
   <div class="card">
@@ -439,6 +598,10 @@ page = (
     .replace("@@CLOSED@@", tile_val(closed_n))
     .replace("@@PNL@@", pnl_display)
     .replace("@@PNLDIM@@", "dim" if pnl_display == "&mdash;" else "")
+    .replace("@@PROBESCAP@@", probes_cap)
+    .replace("@@PROBES@@", probes_html)
+    .replace("@@EVCAP@@", ev_cap)
+    .replace("@@EVCARD@@", ev_html)
     .replace("@@POSCAP@@", positions_cap)
     .replace("@@POSTABLE@@", positions_html)
     .replace("@@WARNINGS@@", warn_html)

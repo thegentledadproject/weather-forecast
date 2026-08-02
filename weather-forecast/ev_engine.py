@@ -51,6 +51,8 @@ config.py, models.py, probability.py (local)
 clients/market_client.py (local)
 """
 
+import json
+import os
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -244,6 +246,49 @@ def run_for_station(
         print(f"[ev_engine] no token map discovered for {station.icao} on {estimate.target_date} -- cannot compute EV.")
         return []
     return compute_ev_table(estimate, token_map, trade_size_usd, fee_rate_pct)
+
+
+def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
+    """
+    Persist the latest EV table for one station to
+    data/ev_latest_<ICAO>.json, overwriting the previous snapshot.
+
+    Read by the status dashboard (deploy/generate_dashboard.py), which
+    runs in a separate process on its own timer -- a JSON file is the
+    simplest handoff that survives daemon restarts and needs no schema
+    migration. An EMPTY results list still writes a snapshot: "computed
+    at 05:01 and found nothing" and "never computed" are different facts,
+    and the dashboard should be able to tell them apart.
+
+    Fails soft: the EV table drives trading, the snapshot only drives
+    reporting, so a disk error here must never break the cycle.
+    """
+    path = config.DATA_DIR / f"ev_latest_{station_icao}.json"
+    payload = {
+        "station_icao": station_icao,
+        "generated_at": _now_iso(),
+        "target_date": str(results[0].target_date) if results else None,
+        "results": [
+            {
+                "bucket_c": r.bucket_c,
+                "side": r.side,
+                "model_prob": r.model_prob,
+                "market_price": r.market_price,
+                "raw_edge": r.raw_edge,
+                "slippage_pct": r.estimated_slippage_pct,
+                "net_ev_per_dollar": r.net_ev_per_dollar,
+                "notes": r.notes,
+            }
+            for r in results
+        ],
+    }
+    try:
+        tmp = str(path) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"[ev_engine] could not save EV snapshot for {station_icao}: {exc}")
 
 
 def print_ev_table(results: List[EVResult]) -> None:
