@@ -187,11 +187,16 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
         import entry_manager
 
         station = config.get_station(station_icao)
+        target_date = config.local_today()
         estimate = calibrate(
             station=station,
-            target_date=config.local_today(),
+            target_date=target_date,
+            # Same assembly as pipeline.run(): seeds + STORED observations
+            # (incl. settlement-grade METAR daily maxima), deduped. The
+            # trading path previously passed climate-monitor seeds only,
+            # calibrating blind to every reading actually collected.
+            observations=pipeline.gather_observations(station, target_date),
             forecasts=pipeline.gather_forecasts(station),
-            observations=climate_monitor_client.load_recent_observations(station, days=30),
             ensemble_members=openmeteo_client.get_ensemble_spread(station),
         )
         ev_results = ev_engine.run_for_station(estimate)

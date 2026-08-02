@@ -574,9 +574,12 @@ def run(
             "storage.observations",
         ],
         "observation_source_note": (
-            "The live trading path (scheduler._run_full_cycle) calibrates on seed "
-            "observations ONLY; this replay also uses stored observations, matching "
-            "pipeline.run(). The replay is therefore better informed than the live trader."
+            "Live and replay calibrate on the same inputs since 2026-08-02: "
+            "scheduler._run_full_cycle uses pipeline.gather_observations() "
+            "(seeds + stored observations, deduped by source rank), matching "
+            "this replay's assembly. Before that fix the live path used seed "
+            "observations only and replays of earlier dates were better "
+            "informed than the live trader that traded them."
         ),
         "ensemble_members": None,
         "ensemble_note": (
