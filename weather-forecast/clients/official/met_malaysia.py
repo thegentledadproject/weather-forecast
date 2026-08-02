@@ -39,6 +39,8 @@ from typing import Optional
 
 import requests
 
+
+import config
 from models import StationConfig, PointForecast
 from clients.official.base import OfficialClient
 
@@ -110,7 +112,7 @@ class METMalaysiaClient(OfficialClient):
             return PointForecast(
                 station_icao=station.icao,
                 source="wwis_met_malaysia",
-                target_date=date.today(),
+                target_date=config.local_today(),
                 max_temp_c=float(max_c) if max_c is not None else None,
                 fetched_at=_now_iso(),
                 raw_note=today_entry.get("weather", ""),

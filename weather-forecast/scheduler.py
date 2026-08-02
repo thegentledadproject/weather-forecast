@@ -179,7 +179,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
         station = config.get_station(station_icao)
         estimate = calibrate(
             station=station,
-            target_date=date.today(),
+            target_date=config.local_today(),
             forecasts=pipeline.gather_forecasts(station),
             observations=climate_monitor_client.load_recent_observations(station, days=30),
             ensemble_members=openmeteo_client.get_ensemble_spread(station),

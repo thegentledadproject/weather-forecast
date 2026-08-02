@@ -69,7 +69,7 @@ def gather_same_day_signal(station) -> str:
 def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
     """Run the full pipeline for one station/date. Returns a summary dict."""
     station = config.get_station(station_icao)
-    target_date = target_date or date.today()
+    target_date = target_date or config.local_today()
 
     forecasts = gather_forecasts(station)
     ensemble = openmeteo_client.get_ensemble_spread(station)

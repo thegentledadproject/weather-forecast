@@ -20,9 +20,26 @@ DEPENDENCIES
 None besides models.py (standard library otherwise).
 """
 
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from models import StationConfig
+
+# --- Trading-day clock ----------------------------------------------------
+# Both registered stations (and the markets they trade) live in UTC+8
+# (SGT/MYT). The deployment box runs on UTC, where date.today() is still
+# YESTERDAY for the first eight hours of the local day -- including the
+# entire 05:00-08:00 primary entry window. Every forecast fetched in that
+# window was being labeled with the previous day's date, and the trading
+# cycle was calibrating for (and discovering the market of) a day that had
+# already ended. Any code that needs "today" in the trading sense MUST use
+# local_today(), never date.today().
+LOCAL_UTC_OFFSET_HOURS = 8
+
+
+def local_today() -> date:
+    """The current calendar date in the market's timezone (UTC+8)."""
+    return (datetime.now(timezone.utc) + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)).date()
 
 # --- Shared monsoon-phase lookup (reused across Southeast Asian stations) ---
 # Coarse, deliberately simple for the MVP. A given station can override

@@ -165,7 +165,7 @@ def check_and_exit_positions(station_icao: Optional[str] = None) -> List[ExitDec
         # A bucket whose date has passed is resolved by definition, whatever
         # the book still prints -- a stale but plausible last-traded quote
         # would otherwise never trip the extreme-price check at all.
-        is_past_dated = position.target_date < date.today()
+        is_past_dated = position.target_date < config.local_today()
 
         if is_extreme or is_big_move or is_past_dated:
             # None of these is acted on off a single quote. Confirm the

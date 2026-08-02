@@ -44,7 +44,7 @@ def _fetch_daily_max(url: str, station: StationConfig, source_label: str, timeou
 
         dates = payload["daily"]["time"]
         maxes = payload["daily"]["temperature_2m_max"]
-        today_str = date.today().isoformat()
+        today_str = config.local_today().isoformat()
 
         if today_str not in dates:
             return None
@@ -53,7 +53,7 @@ def _fetch_daily_max(url: str, station: StationConfig, source_label: str, timeou
         return PointForecast(
             station_icao=station.icao,
             source=source_label,
-            target_date=date.today(),
+            target_date=config.local_today(),
             max_temp_c=float(maxes[idx]),
             fetched_at=_now_iso(),
         )
