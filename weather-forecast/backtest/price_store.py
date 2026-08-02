@@ -36,6 +36,7 @@ backtest/settings.py (local)
 
 import sqlite3
 import statistics
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Dict, Iterable, List, Optional
 
@@ -103,6 +104,27 @@ def _connect(db_path=None) -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _db(db_path=None):
+    """
+    Transaction scope AND connection lifetime in one context manager.
+
+    sqlite3's own `with conn:` only delimits a transaction -- it never
+    closes the connection, so using `with _connect(...)` directly leaks
+    one file descriptor per call. A backtest run performs tens of
+    thousands of get_price_at() lookups, which exhausted the default
+    1024-fd limit on the EC2 instance ("unable to open database file")
+    the first time a real multi-day run was attempted. Every function in
+    this module must use _db(), never _connect() directly.
+    """
+    conn = _connect(db_path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def _now_iso() -> str:
     """UTC ISO timestamp, same format executor.py writes for entry_time/exit_time."""
     return datetime.now(timezone.utc).isoformat()
@@ -130,7 +152,7 @@ def upsert_token(
     every caller having to agree on case -- note models.Position.side
     uses upper-case "YES"/"NO", so conversion happens at this boundary.
     """
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO market_tokens VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
@@ -160,7 +182,7 @@ def save_snapshot(
     interrupted and re-run constantly, and a re-run must not duplicate
     history or fail.
     """
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO price_snapshots VALUES (?, ?, ?, ?, ?, ?)",
             (token_id, int(ts), price, depth_usd, source, int(fidelity_min)),
@@ -179,7 +201,7 @@ def save_snapshots(rows: Iterable[tuple], source: str, fidelity_min: int, db_pat
     ]
     if not payload:
         return 0
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         conn.executemany("INSERT OR REPLACE INTO price_snapshots VALUES (?, ?, ?, ?, ?, ?)", payload)
     return len(payload)
 
@@ -209,7 +231,7 @@ def get_price_at(
 
     Returns {"price", "ts", "source", "depth_usd", "fidelity_min"} or None.
     """
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         row = conn.execute(
             "SELECT price, ts, source, depth_usd, fidelity_min FROM price_snapshots "
             "WHERE token_id = ? AND ts <= ? "
@@ -246,7 +268,7 @@ def load_token_map(station_icao: str, target_date, db_path=None) -> Dict[int, Di
     Buckets with only one side recorded still appear, with the missing
     side absent from the inner dict; callers that need both must check.
     """
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         rows = conn.execute(
             "SELECT bucket_c, side, token_id FROM market_tokens WHERE station_icao = ? AND target_date = ?",
             (station_icao, _date_str(target_date)),
@@ -280,7 +302,7 @@ def list_tokens(station_icao=None, target_date=None, db_path=None) -> List[dict]
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY target_date, bucket_c, side"
 
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         rows = conn.execute(query, params).fetchall()
 
     return [
@@ -314,7 +336,7 @@ def log_fetch(
     downgrades a 1-minute request to hourly bars changes what the
     backtest is allowed to claim, and that fact must survive the fetch.
     """
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         conn.execute(
             "INSERT INTO fetch_log VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -350,7 +372,7 @@ def coverage_stats(token_ids: List[str], start_ts: int, end_ts: int, db_path=Non
         return empty
 
     placeholders = ",".join("?" for _ in token_ids)
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         rows = conn.execute(
             f"SELECT source, depth_usd, fidelity_min FROM price_snapshots "
             f"WHERE token_id IN ({placeholders}) AND ts >= ? AND ts <= ?",
@@ -380,7 +402,7 @@ def observed_depth_median(station_icao: str, db_path=None) -> Optional[float]:
     "observed_median" depth regime (settings.DEPTH_REGIMES) -- a
     measured stand-in for missing depth, rather than an invented one.
     """
-    with _connect(db_path) as conn:
+    with _db(db_path) as conn:
         rows = conn.execute(
             "SELECT ps.depth_usd FROM price_snapshots ps "
             "JOIN market_tokens mt ON mt.token_id = ps.token_id "
