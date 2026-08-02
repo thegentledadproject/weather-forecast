@@ -1,0 +1,394 @@
+"""
+backtest/price_store.py
+
+PURPOSE
+-------
+Local SQLite store for HISTORICAL market data: which token traded which
+(station, date, bucket, side), and what it was quoted at over time.
+This is the missing input backtest_engine.run_trading_strategy_backtest()
+refuses to run without -- no historical Polymarket price data existed
+anywhere in this codebase, so no price-based strategy backtest was
+honestly possible. This module is where that data lands.
+
+SEPARATE DATABASE, ON PURPOSE
+-----------------------------
+Every function writes to settings.MARKET_DATA_DB, NEVER config.DB_PATH.
+The live trading database holds positions; this one holds bulk research
+data written by fetchers that get re-run, interrupted and schema-churned
+freely. They must not share a file. Nothing here should ever be given
+config.DB_PATH as db_path.
+
+THE LOOK-AHEAD GUARD
+--------------------
+get_price_at() returns the newest row with ts <= the requested instant,
+never the nearest one. "Nearest" is the single easiest way to build a
+backtest that quietly trades on prices from the future and prints a
+wonderful Sharpe ratio. It also refuses rows that are too old to be
+credible (see settings.MAX_STALENESS_FACTOR): a gap in the history is
+"no quote", not "the price never moved", because treating it as the
+latter manufactures fills and hold-throughs that never happened.
+
+DEPENDENCIES
+------------
+sqlite3, statistics, datetime, typing (standard library)
+backtest/settings.py (local)
+"""
+
+import sqlite3
+import statistics
+from datetime import datetime, timezone
+from typing import Dict, Iterable, List, Optional
+
+from backtest import settings
+
+# Source string for quotes captured from a genuinely live order book, as
+# opposed to reconstructed/interpolated series. Preferred on ties in
+# get_price_at() and the basis of coverage reporting -- a run built mostly
+# on non-live sources is a different (weaker) claim than one built on
+# observed books, and the two must stay distinguishable.
+LIVE_SNAPSHOT_SOURCE = "live_snapshot"
+
+
+def _connect(db_path=None) -> sqlite3.Connection:
+    """
+    Open the market-data database, creating the schema if absent -- same
+    lazy-creation style as storage._connect(), so there is no separate
+    migration step to forget to run.
+    """
+    conn = sqlite3.connect(db_path or settings.MARKET_DATA_DB)
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_tokens (
+            token_id TEXT PRIMARY KEY,
+            station_icao TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            bucket_c INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            event_slug TEXT NOT NULL DEFAULT '',
+            discovered_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_mt_lookup ON market_tokens(station_icao, target_date, bucket_c, side)"
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS price_snapshots (
+            token_id TEXT NOT NULL,
+            ts INTEGER NOT NULL,
+            price REAL NOT NULL,
+            depth_usd REAL,
+            source TEXT NOT NULL,
+            fidelity_min INTEGER NOT NULL,
+            PRIMARY KEY (token_id, ts, source)
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_ps_lookup ON price_snapshots(token_id, ts)")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fetch_log (
+            token_id TEXT,
+            start_ts INTEGER,
+            end_ts INTEGER,
+            fidelity_requested INTEGER,
+            fidelity_observed INTEGER,
+            n_rows INTEGER,
+            fetched_at TEXT,
+            http_status INTEGER
+        )
+        """
+    )
+    return conn
+
+
+def _now_iso() -> str:
+    """UTC ISO timestamp, same format executor.py writes for entry_time/exit_time."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _date_str(target_date) -> str:
+    """Accept either a date object or an already-ISO string, store the ISO string (storage.py convention)."""
+    return target_date if isinstance(target_date, str) else target_date.isoformat()
+
+
+def upsert_token(
+    token_id: str,
+    station_icao: str,
+    target_date,
+    bucket_c: int,
+    side: str,
+    event_slug: str = "",
+    discovered_at: Optional[str] = None,
+    db_path=None,
+) -> None:
+    """
+    Record (or refresh) the mapping from a CLOB token id to the exact
+    (station, target_date, bucket, side) it represents. side is stored
+    lower-cased ("yes"/"no") so load_token_map() can key off it without
+    every caller having to agree on case -- note models.Position.side
+    uses upper-case "YES"/"NO", so conversion happens at this boundary.
+    """
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO market_tokens VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                token_id,
+                station_icao,
+                _date_str(target_date),
+                bucket_c,
+                side.lower(),
+                event_slug,
+                discovered_at or _now_iso(),
+            ),
+        )
+
+
+def save_snapshot(
+    token_id: str,
+    ts: int,
+    price: float,
+    depth_usd: Optional[float],
+    source: str,
+    fidelity_min: int,
+    db_path=None,
+) -> None:
+    """
+    Persist one observed quote. INSERT OR REPLACE on (token_id, ts,
+    source), so re-fetching a range is idempotent -- fetchers get
+    interrupted and re-run constantly, and a re-run must not duplicate
+    history or fail.
+    """
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO price_snapshots VALUES (?, ?, ?, ?, ?, ?)",
+            (token_id, int(ts), price, depth_usd, source, int(fidelity_min)),
+        )
+
+
+def save_snapshots(rows: Iterable[tuple], source: str, fidelity_min: int, db_path=None) -> int:
+    """
+    Bulk variant of save_snapshot(). rows are
+    (token_id, ts, price, depth_usd) tuples sharing one source and
+    fidelity. Returns the number of rows written.
+    """
+    payload = [
+        (token_id, int(ts), price, depth_usd, source, int(fidelity_min))
+        for (token_id, ts, price, depth_usd) in rows
+    ]
+    if not payload:
+        return 0
+    with _connect(db_path) as conn:
+        conn.executemany("INSERT OR REPLACE INTO price_snapshots VALUES (?, ?, ?, ?, ?, ?)", payload)
+    return len(payload)
+
+
+def get_price_at(
+    token_id: str,
+    ts: int,
+    max_staleness_s: Optional[int] = None,
+    db_path=None,
+) -> Optional[dict]:
+    """
+    The most recent quote AT OR BEFORE ts -- the look-ahead guard.
+
+    Never returns a row from after ts, not even one microsecond after and
+    not even if it is closer in time. A "nearest quote" lookup is how a
+    backtest ends up trading on prices it could not have seen.
+
+    Staleness: if max_staleness_s is given, a row older than that is
+    treated as no quote at all. If it is None, the limit is derived from
+    the row's own recorded fidelity
+    (settings.MAX_STALENESS_FACTOR x fidelity_min x 60) -- a 5-minute
+    series going quiet for an hour is a data gap, and pretending the last
+    print is still the market invents both fills and hold-throughs.
+
+    On an exact ts tie between sources, live order-book snapshots win over
+    reconstructed series.
+
+    Returns {"price", "ts", "source", "depth_usd", "fidelity_min"} or None.
+    """
+    with _connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT price, ts, source, depth_usd, fidelity_min FROM price_snapshots "
+            "WHERE token_id = ? AND ts <= ? "
+            "ORDER BY ts DESC, (source = ?) DESC LIMIT 1",
+            (token_id, int(ts), LIVE_SNAPSHOT_SOURCE),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    price, row_ts, source, depth_usd, fidelity_min = row
+
+    limit_s = max_staleness_s
+    if limit_s is None:
+        limit_s = settings.MAX_STALENESS_FACTOR * (fidelity_min or settings.DEFAULT_SNAPSHOT_FIDELITY_MIN) * 60
+    if int(ts) - row_ts > limit_s:
+        return None
+
+    return {
+        "price": price,
+        "ts": row_ts,
+        "source": source,
+        "depth_usd": depth_usd,
+        "fidelity_min": fidelity_min,
+    }
+
+
+def load_token_map(station_icao: str, target_date, db_path=None) -> Dict[int, Dict[str, str]]:
+    """
+    {bucket_c: {"yes_token_id": ..., "no_token_id": ...}} for one
+    station/date -- the same shape market_discovery.discover_token_map()
+    returns live, so entry-side code can be handed either one.
+
+    Buckets with only one side recorded still appear, with the missing
+    side absent from the inner dict; callers that need both must check.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT bucket_c, side, token_id FROM market_tokens WHERE station_icao = ? AND target_date = ?",
+            (station_icao, _date_str(target_date)),
+        ).fetchall()
+
+    token_map: Dict[int, Dict[str, str]] = {}
+    for bucket_c, side, token_id in rows:
+        entry = token_map.setdefault(bucket_c, {})
+        if side == "yes":
+            entry["yes_token_id"] = token_id
+        elif side == "no":
+            entry["no_token_id"] = token_id
+    return token_map
+
+
+def list_tokens(station_icao=None, target_date=None, db_path=None) -> List[dict]:
+    """Every recorded token, optionally filtered to one station and/or target date."""
+    query = (
+        "SELECT token_id, station_icao, target_date, bucket_c, side, event_slug, discovered_at "
+        "FROM market_tokens"
+    )
+    clauses = []
+    params: list = []
+    if station_icao:
+        clauses.append("station_icao = ?")
+        params.append(station_icao)
+    if target_date:
+        clauses.append("target_date = ?")
+        params.append(_date_str(target_date))
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY target_date, bucket_c, side"
+
+    with _connect(db_path) as conn:
+        rows = conn.execute(query, params).fetchall()
+
+    return [
+        {
+            "token_id": r[0],
+            "station_icao": r[1],
+            "target_date": r[2],
+            "bucket_c": r[3],
+            "side": r[4],
+            "event_slug": r[5],
+            "discovered_at": r[6],
+        }
+        for r in rows
+    ]
+
+
+def log_fetch(
+    token_id: str,
+    start_ts: int,
+    end_ts: int,
+    fidelity_requested: int,
+    fidelity_observed: int,
+    n_rows: int,
+    http_status: int,
+    db_path=None,
+) -> None:
+    """
+    Append-only record of what was fetched and what came back. Worth
+    keeping because fidelity_requested vs fidelity_observed is the honest
+    answer to "how good is this history really" -- an API that silently
+    downgrades a 1-minute request to hourly bars changes what the
+    backtest is allowed to claim, and that fact must survive the fetch.
+    """
+    with _connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO fetch_log VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                token_id,
+                None if start_ts is None else int(start_ts),
+                None if end_ts is None else int(end_ts),
+                fidelity_requested,
+                fidelity_observed,
+                n_rows,
+                _now_iso(),
+                http_status,
+            ),
+        )
+
+
+def coverage_stats(token_ids: List[str], start_ts: int, end_ts: int, db_path=None) -> dict:
+    """
+    Data-quality summary for a set of tokens over a window: how many
+    ticks exist, what share came from live order-book snapshots, what
+    share carry depth, and the median sampling fidelity.
+
+    Read this BEFORE reading a backtest's P&L. A result built on 12%
+    coverage is not a weaker version of the same finding, it is a
+    different and much smaller claim.
+    """
+    empty = {
+        "n_ticks": 0,
+        "pct_live_snapshot": 0.0,
+        "pct_with_depth": 0.0,
+        "median_fidelity_min": None,
+    }
+    if not token_ids:
+        return empty
+
+    placeholders = ",".join("?" for _ in token_ids)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            f"SELECT source, depth_usd, fidelity_min FROM price_snapshots "
+            f"WHERE token_id IN ({placeholders}) AND ts >= ? AND ts <= ?",
+            list(token_ids) + [int(start_ts), int(end_ts)],
+        ).fetchall()
+
+    if not rows:
+        return empty
+
+    n = len(rows)
+    n_live = sum(1 for r in rows if r[0] == LIVE_SNAPSHOT_SOURCE)
+    n_depth = sum(1 for r in rows if r[1] is not None)
+    fidelities = [r[2] for r in rows if r[2] is not None]
+
+    return {
+        "n_ticks": n,
+        "pct_live_snapshot": round(n_live / n, 4),
+        "pct_with_depth": round(n_depth / n, 4),
+        "median_fidelity_min": statistics.median(fidelities) if fidelities else None,
+    }
+
+
+def observed_depth_median(station_icao: str, db_path=None) -> Optional[float]:
+    """
+    Median observed order-book depth across this station's live
+    snapshots, or None if depth was never recorded. Feeds the
+    "observed_median" depth regime (settings.DEPTH_REGIMES) -- a
+    measured stand-in for missing depth, rather than an invented one.
+    """
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT ps.depth_usd FROM price_snapshots ps "
+            "JOIN market_tokens mt ON mt.token_id = ps.token_id "
+            "WHERE mt.station_icao = ? AND ps.source = ? AND ps.depth_usd IS NOT NULL",
+            (station_icao, LIVE_SNAPSHOT_SOURCE),
+        ).fetchall()
+
+    depths = [r[0] for r in rows]
+    if not depths:
+        return None
+    return statistics.median(depths)

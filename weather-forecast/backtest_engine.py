@@ -16,15 +16,35 @@ split into two parts with very different confidence levels:
     in run_observed_only_backtest), not just by convention, specifically
     to avoid the look-ahead bias flagged in the reanalysis.
 
-  PART 2 -- TRADING-STRATEGY BACKTEST (explicitly NOT built)
-    Validating entry_manager.py's sizing or risk_manager.py's exit
-    logic against history would require historical Polymarket PRICE
-    data, not weather data. market_client.py only fetches live prices
-    -- there is no get_price_history() anywhere in this codebase, and
-    it is not confirmed whether Polymarket's CLOB API even exposes
-    historical price series. run_trading_strategy_backtest() below is
-    a stub that raises NotImplementedError with this explanation,
-    rather than silently returning fake results.
+  PART 2 -- TRADING-STRATEGY BACKTEST (now delegates to backtest/engine.py)
+    The data dependency that used to block this is resolved. Polymarket
+    CLOB's `/prices-history` endpoint is confirmed real and working --
+    GET https://clob.polymarket.com/prices-history?market=<token_id>&
+    startTs=<unix>&endTs=<unix>&fidelity=<min> -- see
+    backtest/price_history_client.py. The one caveat: already-resolved
+    markets have only been observed to return COARSE (>=12h) granularity
+    from that endpoint regardless of the requested fidelity. Finer-
+    granularity coverage instead comes from live snapshot capture that
+    piggybacks on ev_engine's live cycles, persisted into
+    data/market_data.sqlite3 (see backtest/snapshot_collector.py and
+    ev_engine.py's own per-cycle capture).
+
+    run_trading_strategy_backtest() below now delegates to the real
+    replay engine, backtest.engine.run(), which DOES validate: real
+    entry/exit simulation against a mix of live-captured snapshots and
+    CLOB history, fills at quote price (matching live paper-trading
+    semantics, not a slipped fill), gate-by-gate entry logic parity with
+    production (see tests/test_parity_entry.py), and realistic
+    no-lookahead sequencing (see backtest/engine.py's own module
+    docstring for the full list of look-ahead guards).
+
+    What remains modeled/unverified, honestly: order-book depth is
+    unavailable for pure-CLOB-history periods, so the "strict" depth
+    regime will reject those ticks outright; the fee schedule is still
+    unverified against live Polymarket fee behavior; and fills assume
+    quote-price execution, with slippage tracked separately as a
+    sensitivity metric (see backtest/fill_model.py) rather than applied
+    to realized P&L.
 
 TWO BACKTEST MODES WITHIN PART 1
 ----------------------------------
@@ -53,8 +73,10 @@ import statistics
 from datetime import date, timedelta
 from typing import List, Optional
 
+import backtest.engine
 import config
 import storage
+from backtest.engine import BacktestRun
 from calibration import blend_central_estimate
 from models import ObservedReading, BacktestResult, BacktestSummary
 
@@ -190,24 +212,33 @@ def print_summary(summary: Optional[BacktestSummary]) -> None:
     )
 
 
-def run_trading_strategy_backtest(*args, **kwargs):
+def run_trading_strategy_backtest(
+    station_icao: str,
+    start_date: date,
+    end_date: date,
+    depth_regime: str = "strict",
+    fee_rate_pct: float = 0.0,
+    bankroll_mode: str = "static",
+    market_db_path=None,
+    run_id: str = None,
+) -> BacktestRun:
     """
-    PART 2 -- NOT IMPLEMENTED, deliberately.
+    PART 2 -- delegates to backtest.engine.run(), the real replay engine.
 
-    Validating entry_manager.py's Kelly sizing or risk_manager.py's
-    trailing-stop/profit-take logic against history requires historical
-    Polymarket PRICE PATHS for each bucket -- not weather data. This
-    codebase has no get_price_history() anywhere (market_client.py is
-    live-price-only), and it is not confirmed that Polymarket's CLOB
-    API exposes historical price series at all for these markets.
-
-    Raising here rather than returning empty/fake results, so this gap
-    can never be silently mistaken for "backtested and validated."
+    Thin passthrough: this function exists so callers that only know
+    about backtest_engine.py (rather than the backtest/ package) still
+    get a working trading-strategy backtest, without duplicating
+    engine.run()'s replay logic here. See the module docstring's PART 2
+    section for what this now validates and what remains modeled/
+    unverified.
     """
-    raise NotImplementedError(
-        "Trading-strategy backtesting is blocked on a real data dependency: "
-        "historical Polymarket price paths, which this codebase does not yet "
-        "fetch and has not confirmed are available via Polymarket's API. "
-        "Do not stub this with synthetic price data and call it validated -- "
-        "confirm the data source first."
+    return backtest.engine.run(
+        station_icao,
+        start_date,
+        end_date,
+        depth_regime=depth_regime,
+        fee_rate_pct=fee_rate_pct,
+        bankroll_mode=bankroll_mode,
+        market_db_path=market_db_path,
+        run_id=run_id,
     )

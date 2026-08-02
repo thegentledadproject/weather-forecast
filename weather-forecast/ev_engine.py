@@ -53,6 +53,7 @@ clients/market_client.py (local)
 
 import json
 import os
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -64,6 +65,16 @@ import market_discovery
 
 DEFAULT_FEE_RATE_PCT = 0.0  # UNVERIFIED -- see module docstring
 DEFAULT_TRADE_SIZE_USD = 50.0
+
+# Kill switch for piggybacked snapshot capture (see _capture_snapshots()
+# below): when True, every run_for_station() cycle also writes this
+# cycle's live YES/NO prices (and depth, where known) into
+# backtest/price_store.py's tables, so high-fidelity history accumulates
+# for free during normal paper-trading operation -- valuable because the
+# CLOB /prices-history endpoint is only coarse-grained for resolved
+# markets (see backtest/price_history_client.py's module docstring).
+# Flip to False to disable capture entirely without touching call sites.
+ENABLE_SNAPSHOT_CAPTURE = True
 
 
 def _now_iso() -> str:
@@ -111,6 +122,7 @@ def compute_ev_table(
     token_map: Dict[int, dict],
     trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
     fee_rate_pct: float = DEFAULT_FEE_RATE_PCT,
+    quotes: Optional[Dict[int, MarketQuote]] = None,
 ) -> List[EVResult]:
     """
     Core entry point. For every bucket with a token_map entry, compute
@@ -118,13 +130,20 @@ def compute_ev_table(
     calibrated probability and a live market quote + real slippage
     estimate from the order book.
 
+    quotes: optional pre-fetched {bucket_c: MarketQuote} map. Pass this
+    when the caller already fetched quotes this cycle (e.g.
+    run_for_station(), which also needs them for snapshot capture) to
+    avoid re-hitting the market client a second time. If omitted,
+    quotes are fetched here as before.
+
     Returns one EVResult per (bucket, side) -- 2x len(token_map)
     entries. Buckets with no live price available get an EVResult
     with net_ev_per_dollar=None rather than being silently skipped,
     so callers can see what couldn't be evaluated this cycle.
     """
     model_probs = {b.bucket_c: b.probability for b in bucket_probabilities(estimate)}
-    quotes = fetch_market_quotes(token_map)
+    if quotes is None:
+        quotes = fetch_market_quotes(token_map)
 
     results = []
     for bucket_c, ids in token_map.items():
@@ -245,7 +264,77 @@ def run_for_station(
     if not token_map:
         print(f"[ev_engine] no token map discovered for {station.icao} on {estimate.target_date} -- cannot compute EV.")
         return []
-    return compute_ev_table(estimate, token_map, trade_size_usd, fee_rate_pct)
+    quotes = fetch_market_quotes(token_map)
+    _capture_snapshots(station.icao, estimate.target_date, token_map, quotes)
+    return compute_ev_table(estimate, token_map, trade_size_usd, fee_rate_pct, quotes=quotes)
+
+
+def _capture_snapshots(
+    station_icao: str,
+    target_date,
+    token_map: Dict[int, dict],
+    quotes: Dict[int, MarketQuote],
+) -> None:
+    """
+    Best-effort piggyback capture: writes this cycle's already-fetched
+    YES/NO prices (and depth, where the quote carries it) into
+    backtest/price_store.py's market_tokens/price_snapshots tables, so
+    live paper-trading cycles double as free historical-data collection
+    (see ENABLE_SNAPSHOT_CAPTURE above for why this matters).
+
+    Imports backtest.price_store/backtest.settings LAZILY (only inside
+    this function) so a missing/broken `backtest` package can never
+    break importing ev_engine.py itself -- and the whole body is wrapped
+    in a broad except so a failure here (including that ImportError)
+    can NEVER interrupt or break a live trading cycle. This is capture
+    only, never a gate: it must fail silently (past a single warning
+    line) no matter what goes wrong.
+    """
+    if not ENABLE_SNAPSHOT_CAPTURE:
+        return
+
+    try:
+        import backtest.price_store as price_store
+        import backtest.settings as settings
+
+        target_date_iso = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+        discovered_at = _now_iso()
+        now_ts = int(time.time())
+
+        for bucket_c, ids in token_map.items():
+            quote = quotes.get(bucket_c)
+            if quote is None:
+                continue
+
+            for side, token_id, price, depth_usd in [
+                ("yes", ids.get("yes_token_id"), quote.yes_price, quote.yes_depth_usd),
+                ("no", ids.get("no_token_id"), quote.no_price, quote.no_depth_usd),
+            ]:
+                if not token_id:
+                    continue
+
+                price_store.upsert_token(
+                    token_id=token_id,
+                    station_icao=station_icao,
+                    target_date=target_date_iso,
+                    bucket_c=bucket_c,
+                    side=side,
+                    discovered_at=discovered_at,
+                )
+
+                if price is None:
+                    continue
+
+                price_store.save_snapshot(
+                    token_id=token_id,
+                    ts=now_ts,
+                    price=price,
+                    depth_usd=depth_usd,
+                    source="live_snapshot",
+                    fidelity_min=settings.DEFAULT_SNAPSHOT_FIDELITY_MIN,
+                )
+    except Exception as exc:
+        print(f"[ev_engine] snapshot capture failed this cycle (non-fatal, trading unaffected): {exc}")
 
 
 def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:

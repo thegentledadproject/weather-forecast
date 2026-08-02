@@ -34,6 +34,7 @@ config.py, models.py (local)
 """
 
 from datetime import datetime, timezone
+from typing import Optional
 
 import config
 from models import Position, ExitDecision
@@ -50,9 +51,20 @@ def _local_hour(tz_offset_hours: int = 8) -> int:
     return (utc_now.hour + tz_offset_hours) % 24
 
 
-def _active_thresholds() -> dict:
-    """Return the full threshold set appropriate for the current time of day."""
-    if _local_hour() >= config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL:
+def _active_thresholds(local_hour: Optional[int] = None) -> dict:
+    """
+    Return the full threshold set appropriate for the given time of day.
+
+    local_hour defaults to None, which reads the real wall clock via
+    _local_hour() -- unchanged behaviour for every live caller. Passing an
+    explicit hour (0-23) uses that instead, which is what a simulated
+    replay needs: a backtest re-running a past morning must apply the
+    thresholds that were active AT THAT SIMULATED HOUR, not whatever hour
+    the backtest itself happens to be executed at.
+    """
+    if local_hour is None:
+        local_hour = _local_hour()
+    if local_hour >= config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL:
         return {
             "profit_take_pct": config.TIGHTENED_PROFIT_TAKE_PCT,
             "stop_loss_pct": config.TIGHTENED_STOP_LOSS_PCT,
@@ -89,14 +101,26 @@ def update_high_water_mark(position: Position, current_price: float) -> float:
     return max(position.high_water_mark, current_price)
 
 
-def evaluate_exit(position: Position, current_price: float) -> ExitDecision:
+def evaluate_exit(
+    position: Position,
+    current_price: float,
+    local_hour: Optional[int] = None,
+) -> ExitDecision:
     """
     Core decision function. Assumes position.high_water_mark is
     already up to date for this cycle (position_manager.py updates it
     before calling this). Pure logic -- no I/O, no side effects, easy
     to unit-test independent of live price feeds.
+
+    local_hour is threaded straight through to _active_thresholds():
+    None (the default) reads the real wall clock exactly as before, and
+    an explicit hour (0-23) pins the edge-decay tightening to a
+    caller-supplied time. That makes the function fully pure when the
+    hour is supplied -- a replay or a unit test can then evaluate the
+    same position at 06:00 and at 14:00 and get the two genuinely
+    different answers the live system would have given.
     """
-    thresholds = _active_thresholds()
+    thresholds = _active_thresholds(local_hour=local_hour)
     pnl_pct = compute_pnl_pct(position.entry_price, current_price)
 
     # 1. Hard stop-loss -- always checked first, overrides everything else.

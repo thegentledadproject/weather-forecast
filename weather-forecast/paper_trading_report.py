@@ -52,16 +52,28 @@ def _position_return_pct(position: Position) -> Optional[float]:
     return (position.exit_price - position.entry_price) / position.entry_price
 
 
-def summarize_paper_performance(station_icao: str) -> Optional[dict]:
+def summarize_positions(positions: List[Position]) -> Optional[dict]:
     """
-    Aggregate performance stats across all closed paper positions for
-    one station: win rate, mean/total return, breakdown by exit reason
+    Aggregate performance stats across a list of CLOSED positions held
+    in memory: win rate, mean/total return, breakdown by exit reason
     (take_profit / stop_loss / trailing_stop -- lets you see whether
     the trailing stop is actually earning its complexity vs. a plain
-    fixed take-profit would have). Returns None if there's no paper
-    history yet for this station.
+    fixed take-profit would have). Returns None for an empty list, or
+    for a list where no position has a usable realized return.
+
+    Pure -- no I/O of any kind. That is the whole point of it being
+    separate from summarize_paper_performance() below: a simulated run
+    holds its closed positions in memory and never writes them to the
+    live positions table, so it needs these metrics computed off a list.
+    Both paths therefore report the SAME numbers computed by the SAME
+    code, which is the only way a backtest figure and a paper-trading
+    figure can honestly be compared side by side.
+
+    station_icao is read off the positions themselves; callers are
+    expected to pass a single station's positions, as
+    summarize_paper_performance() does.
     """
-    history = load_paper_history(station_icao)
+    history = positions
     if not history:
         return None
 
@@ -88,7 +100,7 @@ def summarize_paper_performance(station_icao: str) -> Optional[dict]:
             }
 
     return {
-        "station_icao": station_icao,
+        "station_icao": history[0].station_icao,
         "n_trades": len(returns),
         "win_rate": round(len(wins) / len(returns), 4),
         "mean_return_pct": round(statistics.fmean(returns), 4),
@@ -98,6 +110,19 @@ def summarize_paper_performance(station_icao: str) -> Optional[dict]:
         "mean_loss_pct": round(statistics.fmean(losses), 4) if losses else None,
         "by_exit_reason": reason_summary,
     }
+
+
+def summarize_paper_performance(station_icao: str) -> Optional[dict]:
+    """
+    Aggregate performance stats across all closed paper positions for
+    one station -- the I/O half: load this station's paper history from
+    storage, then hand it to summarize_positions() for the arithmetic.
+    Returns None if there's no paper history yet for this station.
+
+    Metric semantics are unchanged; every calculation, rounding and
+    field name lives in summarize_positions() now, verbatim.
+    """
+    return summarize_positions(load_paper_history(station_icao))
 
 
 def print_report(station_icao: str) -> None:
