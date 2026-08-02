@@ -76,7 +76,8 @@ if closed_n:
             summary = ptr.summarize_paper_performance(icao)
             if isinstance(summary, dict):
                 total += float(summary.get("total_return_pct_sum") or 0.0)
-        pnl_display = f"{total:+.1f}%"
+        # summarize_paper_performance returns FRACTIONS (0.5 = 50%)
+        pnl_display = f"{total * 100:+.1f}%"
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"P&L summary failed: {exc}")
 
