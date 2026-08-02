@@ -67,6 +67,12 @@ import requests
 CLOB_API_BASE = "https://clob.polymarket.com"
 CLOB_BOOK_ENDPOINT = f"{CLOB_API_BASE}/book"
 
+# Token ids CLOB has answered 404 ("no orderbook exists") for, so each
+# unseeded far-tail bucket is logged once per process rather than once
+# per scan cycle. In-memory on purpose: a token can gain an orderbook
+# any time, and a restart re-checking them all is correct behavior.
+_no_orderbook_seen = set()
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -84,6 +90,14 @@ def get_token_price(token_id: str, timeout: int = 10) -> Optional[float]:
 
     Returns None on any failure (network, HTTP error, missing/unparseable
     "price" field) so callers fail soft rather than act on a guess.
+
+    A 404 is a KNOWN market condition, not an error: CLOB answers
+    "No orderbook exists for the requested token id" for bucket markets
+    that are listed on Gamma but were never seeded with orders -- the
+    far-tail temperature buckets sit in this state all day, every day
+    (confirmed against the live API 2026-08-02). Those are logged once
+    per token per process instead of once per cycle, so 20 dead tails
+    don't bury one real failure in the journal.
     """
     try:
         resp = requests.get(
@@ -91,6 +105,14 @@ def get_token_price(token_id: str, timeout: int = 10) -> Optional[float]:
             params={"token_id": token_id, "side": "buy"},
             timeout=timeout,
         )
+        if resp.status_code == 404:
+            if token_id not in _no_orderbook_seen:
+                _no_orderbook_seen.add(token_id)
+                print(
+                    f"[market_client] no orderbook for token {token_id} -- listed but unseeded "
+                    f"(normal for far-tail buckets); treating as no-quote, not logging again."
+                )
+            return None
         resp.raise_for_status()
         payload = resp.json()
         return float(payload.get("price"))

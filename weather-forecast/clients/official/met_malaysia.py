@@ -67,14 +67,19 @@ class METMalaysiaClient(OfficialClient):
         try:
             resp = requests.get(WWIS_CITY_LIST_URL, timeout=timeout)
             resp.raise_for_status()
-            # full_city_list.txt is a flat text listing; format needs confirming
-            # against a live pull. Parsing here is intentionally defensive --
-            # if the expected "id;cityName;..." shape isn't found, fail soft.
+            # Confirmed live format (2026-08-02): semicolon-separated with
+            # every field double-quoted, header row included:
+            #   "Country";"City";"CityId"
+            #   "Malaysia";"Kuala Lumpur";"82"
+            # City is field 1 and the id is field 2 -- an earlier version
+            # took field 0 (the COUNTRY, quotes and all) as the id and
+            # requested /json/%22Malaysia%22_en.json, a guaranteed 404.
             for line in resp.text.splitlines():
-                parts = line.split(";")
-                if len(parts) >= 2 and city_name.lower() in parts[1].lower():
-                    self._city_id_cache[city_name] = parts[0]
-                    return parts[0]
+                parts = [p.strip().strip('"') for p in line.split(";")]
+                if len(parts) >= 3 and parts[1].lower() == city_name.lower():
+                    self._city_id_cache[city_name] = parts[2]
+                    return parts[2]
+            print(f"[METMalaysiaClient] city '{city_name}' not found in WWIS city list")
             return None
         except requests.RequestException as exc:
             print(f"[METMalaysiaClient] city lookup failed: {exc}")

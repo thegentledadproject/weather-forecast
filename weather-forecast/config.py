@@ -91,7 +91,9 @@ def get_station(icao: str) -> StationConfig:
 # Station-agnostic endpoints -- lat/lon passed per-call from StationConfig.
 OPEN_METEO_ECMWF_URL = "https://api.open-meteo.com/v1/ecmwf"
 OPEN_METEO_GFS_URL = "https://api.open-meteo.com/v1/gfs"
-OPEN_METEO_ENSEMBLE_URL = "https://api.open-meteo.com/v1/ensemble"
+# Ensemble runs live on their own host, NOT api.open-meteo.com -- the main
+# host 404s the /v1/ensemble path (confirmed against the live API 2026-08-02).
+OPEN_METEO_ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 
 # --- Polymarket-style resolution buckets --------------------------------
 # CONFIRMED against real Polymarket data (multiple live pulls across this

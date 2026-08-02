@@ -84,7 +84,9 @@ def get_ensemble_spread(station: StationConfig, timeout: int = 10) -> Optional[L
         "daily": "temperature_2m_max",
         "timezone": "auto",
         "forecast_days": 1,
-        "models": "ecmwf_ifs025_ensemble",
+        # Model id on the ensemble host is plain "ecmwf_ifs025" -- the
+        # "_ensemble" suffix 404s (confirmed against the live API 2026-08-02).
+        "models": "ecmwf_ifs025",
     }
     try:
         resp = requests.get(config.OPEN_METEO_ENSEMBLE_URL, params=params, timeout=timeout)
