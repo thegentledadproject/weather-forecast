@@ -133,10 +133,12 @@ def evaluate_exit(
             pnl_pct=pnl_pct,
         )
 
-    # 2. Trailing stop -- active once the peak gain has crossed the
-    #    activation threshold. Supersedes the fixed profit-take below.
+    # 2. Trailing stop breach -- checked before the fixed take so a peak
+    #    that has already given back TRAILING_STOP_PCT exits as what it
+    #    is: a trailing-stop event, not a profit-take.
     hwm_pnl_pct = compute_pnl_pct(position.entry_price, position.high_water_mark)
-    if hwm_pnl_pct >= thresholds["trailing_activation_pct"]:
+    trailing_active = hwm_pnl_pct >= thresholds["trailing_activation_pct"]
+    if trailing_active:
         drawdown_from_peak = (position.high_water_mark - current_price) / position.high_water_mark
         if drawdown_from_peak >= thresholds["trailing_stop_pct"]:
             return ExitDecision(
@@ -146,23 +148,34 @@ def evaluate_exit(
                 current_price=current_price,
                 pnl_pct=pnl_pct,
             )
-        # Trailing is active and hasn't been breached -- hold, and note
-        # in the reason that we're in trailing mode (informational only,
-        # doesn't change should_exit).
-        return ExitDecision(
-            position_id=position.position_id,
-            should_exit=False,
-            reason="trailing_active",
-            current_price=current_price,
-            pnl_pct=pnl_pct,
-        )
 
-    # 3. Fixed profit-take -- only reachable if trailing hasn't activated yet.
+    # 3. Fixed profit-take -- the hard cap on greed. Checked BEFORE the
+    #    trailing-active hold: this system's edge is a morning-only
+    #    phenomenon that decays through the day, so a position sitting at
+    #    +PROFIT_TAKE_PCT is cashed rather than ridden in the hope the
+    #    trailing stop locks in more. (Until 2026-08-02 this check sat
+    #    below an early "trailing is active, hold" return; since
+    #    update_high_water_mark() guarantees hwm >= price, any pnl at the
+    #    take level had always activated trailing first, and this branch
+    #    was UNREACHABLE -- zero take_profit exits were possible, live or
+    #    simulated. Found by the backtest's reachability sweep.)
     if pnl_pct >= thresholds["profit_take_pct"]:
         return ExitDecision(
             position_id=position.position_id,
             should_exit=True,
             reason="take_profit",
+            current_price=current_price,
+            pnl_pct=pnl_pct,
+        )
+
+    if trailing_active:
+        # Trailing is armed and neither it nor the fixed take has been
+        # hit -- hold, and note trailing mode in the reason
+        # (informational only, doesn't change should_exit).
+        return ExitDecision(
+            position_id=position.position_id,
+            should_exit=False,
+            reason="trailing_active",
             current_price=current_price,
             pnl_pct=pnl_pct,
         )

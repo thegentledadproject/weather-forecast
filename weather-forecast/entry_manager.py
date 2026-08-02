@@ -351,9 +351,38 @@ def veto_same_bucket_conflicts(decisions: List[EntryDecision]) -> List[EntryDeci
     return result
 
 
+def station_day_exposure_usd(
+    station_icao: str,
+    target_date: date,
+    is_paper: Optional[bool] = None,
+) -> Optional[float]:
+    """
+    Dollars ALREADY deployed into this station's market for this target
+    date, across earlier cycles today: open positions plus positions
+    already closed (a leg entered at 05:10 and stopped out at 06:40 still
+    spent budget -- "per day" means cumulative dollars put at risk, not
+    concurrent exposure, or re-entering after every stop-out would let a
+    bad morning burn through the cap several times over).
+
+    Returns None if either read fails -- callers must treat that as
+    "unknown, therefore no budget remains," the same fail-closed rule as
+    count_open_positions_for_bucket(). is_paper scopes to one track,
+    matching how the per-bucket cap and executor stamp positions.
+    """
+    try:
+        positions = storage.load_open_positions(station_icao=station_icao, is_paper=is_paper)
+        positions += storage.load_position_history(station_icao, limit=1000, is_paper=is_paper)
+    except Exception as exc:
+        print(f"[entry_manager] could not load positions to enforce the station/day budget: {exc}")
+        return None
+
+    return sum(p.size_usd for p in positions if p.target_date == target_date)
+
+
 def apply_portfolio_budget(
     decisions: List[EntryDecision],
     max_total_usd: float = None,
+    existing_exposure_usd: float = 0.0,
 ) -> List[EntryDecision]:
     """
     Caps the COMBINED size of all approved decisions (e.g. a YES leg on
@@ -365,22 +394,52 @@ def apply_portfolio_budget(
     MAX_POSITION_USD independently and blow well past any sane total
     exposure for one station on one day.
 
+    existing_exposure_usd is what earlier cycles ALREADY spent against
+    the same budget (see station_day_exposure_usd). Until 2026-08-02
+    this was implicitly zero, which made the "per day" cap a per-CYCLE
+    cap: ~18 entry cycles a day could each spend the full budget afresh.
+    Found by the backtest build's gate audit. Callers evaluating a
+    single cycle in isolation (unit tests) keep the old behavior via the
+    0.0 default.
+
     Scales every approved leg down PROPORTIONALLY if the combined total
-    exceeds the budget, preserving the relative sizing the Kelly/depth
-    logic already decided rather than arbitrarily keeping some legs
-    at full size and zeroing others.
+    exceeds the remaining budget, preserving the relative sizing the
+    Kelly/depth logic already decided rather than arbitrarily keeping
+    some legs at full size and zeroing others. If nothing remains, every
+    approved leg is rejected outright.
     """
     max_total_usd = max_total_usd if max_total_usd is not None else config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD
+    remaining_usd = max_total_usd - existing_exposure_usd
     approved = [d for d in decisions if d.approved]
     total_requested = sum(d.recommended_size_usd for d in approved)
 
-    if total_requested <= max_total_usd or total_requested == 0:
+    if approved and remaining_usd <= 0:
+        print(
+            f"[entry_manager] station/day budget exhausted: ${existing_exposure_usd:.2f} already deployed "
+            f"against a ${max_total_usd:.2f} budget -- rejecting all {len(approved)} approved leg(s) this cycle."
+        )
+        result = []
+        for d in decisions:
+            if d.approved:
+                result.append(EntryDecision(
+                    **{**d.__dict__,
+                       "approved": False,
+                       "recommended_size_usd": 0.0,
+                       "reason": d.reason + f" [rejected: station/day budget exhausted "
+                                            f"(${existing_exposure_usd:.2f} of ${max_total_usd:.2f} already deployed)]"}
+                ))
+            else:
+                result.append(d)
+        return result
+
+    if total_requested <= remaining_usd or total_requested == 0:
         return decisions
 
-    scale = max_total_usd / total_requested
+    scale = remaining_usd / total_requested
     print(
         f"[entry_manager] portfolio budget exceeded: {len(approved)} approved leg(s) "
-        f"requesting ${total_requested:.2f} total, budget is ${max_total_usd:.2f} -- "
+        f"requesting ${total_requested:.2f} total, remaining budget is ${remaining_usd:.2f} "
+        f"(${existing_exposure_usd:.2f} of ${max_total_usd:.2f} already deployed) -- "
         f"scaling all approved legs by {scale:.2%}."
     )
 
@@ -410,11 +469,26 @@ def decide_portfolio_entries(
       1. decide_entries() -- per-leg Kelly/depth/maturity sizing (unchanged)
       2. veto_same_bucket_conflicts() -- kill any same-bucket YES+NO pair
       3. apply_portfolio_budget() -- scale down if the combined total
-         exceeds the shared per-station-per-day budget
+         exceeds what REMAINS of the shared per-station-per-day budget
+         after earlier cycles' entries (fail-closed if that can't be read)
     """
     decisions = decide_entries(ev_results, token_map, min_net_ev=min_net_ev)
     decisions = veto_same_bucket_conflicts(decisions)
-    decisions = apply_portfolio_budget(decisions)
+
+    existing_usd = 0.0
+    if ev_results:
+        station_icao = ev_results[0].station_icao
+        candidate_is_paper = executor.EXECUTION_MODE.get(station_icao, "manual_review") == "paper"
+        existing_usd = station_day_exposure_usd(
+            station_icao, ev_results[0].target_date, is_paper=candidate_is_paper,
+        )
+        if existing_usd is None:
+            # Same fail-closed stance as the per-bucket cap: unknown spend
+            # means unknown remaining budget -- treat it as exhausted
+            # rather than as a fresh budget.
+            existing_usd = config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD
+
+    decisions = apply_portfolio_budget(decisions, existing_exposure_usd=existing_usd)
     return decisions
 
 

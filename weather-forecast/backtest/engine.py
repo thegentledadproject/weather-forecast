@@ -842,6 +842,15 @@ def _entry_pass(
             continue
         candidates.append((result, token_id))
 
+    # Dollars already deployed into this station/day by earlier cycles --
+    # open positions plus same-day closed ones (a stopped-out leg still
+    # spent budget). Mirrors entry_manager.station_day_exposure_usd().
+    existing_exposure_usd = portfolio.total_open_exposure(station.icao, day) + sum(
+        p.size_usd
+        for p in portfolio.closed
+        if p.station_icao == station.icao and p.target_date == day
+    )
+
     decisions = entry_sim.decide_portfolio_entries_sim(
         candidates=candidates,
         portfolio=portfolio,
@@ -849,6 +858,7 @@ def _entry_pass(
         price_lookup=lambda token_id: prices.snapshot(token_id, tick.ts),
         min_net_ev=tick.min_net_ev,
         sizing_bankroll=portfolio.sizing_bankroll(),
+        existing_exposure_usd=existing_exposure_usd,
     )
     counters["n_decisions"] = int(counters["n_decisions"]) + len(decisions)
 

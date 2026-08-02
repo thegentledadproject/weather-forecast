@@ -48,14 +48,14 @@ from live even when the approve/reject verdict matched.
 
 LIVE QUIRKS REPLICATED, NOT FIXED
 ---------------------------------
-  - apply_portfolio_budget() caps only the candidates decided in THIS
-    cycle. It is blind to positions already open from earlier cycles, so
-    config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD is a per-cycle cap
-    in practice, not a per-day one. Across the ~18 primary/secondary
-    ticks of a live day, total exposure can therefore exceed it several
-    times over. Replicated deliberately: a backtest that quietly enforced
-    the budget correctly would report a risk profile the live system does
-    not have.
+  - (FIXED live on 2026-08-02, and mirrored here the same day.)
+    apply_portfolio_budget() originally capped only the candidates
+    decided in THIS cycle -- blind to earlier cycles' entries, making
+    config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD a per-cycle cap in
+    practice. Both sides now deduct dollars already deployed into the
+    same (station, target date), open AND closed: live reads them via
+    entry_manager.station_day_exposure_usd(), the sim passes the same
+    figure from PortfolioState through existing_exposure_usd below.
   - The per-bucket cap counts (station, target_date, bucket, SIDE) --
     side-specific. Note backtest/portfolio.py's count_open_for_bucket()
     counts across BOTH sides, which is stricter than live; this module
@@ -310,6 +310,7 @@ def decide_portfolio_entries_sim(
     min_net_ev: float,
     sizing_bankroll: float,
     station_maturity: Optional[str] = None,
+    existing_exposure_usd: float = 0.0,
 ) -> List[EntryDecision]:
     """
     Replica of entry_manager.decide_portfolio_entries(), in the same three
@@ -317,7 +318,10 @@ def decide_portfolio_entries_sim(
 
       1. per-leg evaluate_entry_sim()   (replicated)
       2. veto_same_bucket_conflicts()   (live function, reused)
-      3. apply_portfolio_budget()       (live function, reused)
+      3. apply_portfolio_budget()       (live function, reused, fed the
+         dollars this station/day already spent -- the engine computes it
+         from PortfolioState exactly as live computes it from storage via
+         entry_manager.station_day_exposure_usd())
 
     candidates are (EVResult, token_id) pairs, already screened by
     ev_engine.best_opportunities() exactly as the live scheduler does.
@@ -366,5 +370,5 @@ def decide_portfolio_entries_sim(
         )
 
     decisions = veto_same_bucket_conflicts(decisions)
-    decisions = apply_portfolio_budget(decisions)
+    decisions = apply_portfolio_budget(decisions, existing_exposure_usd=existing_exposure_usd)
     return decisions
