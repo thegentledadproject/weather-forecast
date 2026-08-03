@@ -69,6 +69,9 @@ from clients import market_client
 # the set stays small and a restart merely re-logs each veto once.
 _bucket_cap_vetoes_logged = set()
 
+# Same dedup pattern for the daily stop-out cooldown veto (0c).
+_cooldown_vetoes_logged = set()
+
 
 def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
     """
@@ -113,6 +116,36 @@ def count_open_positions_for_bucket(
         if p.target_date == target_date
         and p.bucket_c == bucket_c
         and p.side.upper() == side.upper()
+    )
+
+
+def count_stop_outs_for_bucket(
+    station_icao: str,
+    target_date: date,
+    bucket_c: int,
+    side: str,
+    is_paper: Optional[bool] = None,
+) -> Optional[int]:
+    """
+    How many times this exact (station, target_date, bucket, side) has
+    already exited via STOP-LOSS -- feeds the daily re-entry cooldown.
+    Counts closed_stop_loss only: a trailing stop is a winner giving back
+    its peak, which is a different fact from the market rejecting the
+    entry outright. Returns None if history could not be read at all --
+    callers must treat that as "unknown, do not open", not as zero.
+    """
+    try:
+        history = storage.load_position_history(station_icao, is_paper=is_paper)
+    except Exception as exc:
+        print(f"[entry_manager] could not load position history to enforce the stop-out cooldown: {exc}")
+        return None
+
+    return sum(
+        1 for p in history
+        if p.target_date == target_date
+        and p.bucket_c == bucket_c
+        and p.side.upper() == side.upper()
+        and p.status == "closed_stop_loss"
     )
 
 
@@ -161,6 +194,17 @@ def evaluate_entry(
             f"({config.MAX_PLAUSIBLE_RAW_EDGE:.0%}) -- presumed data error, not alpha."
         )
 
+    # Veto 0a2: edge MATERIALITY -- the mirror of 0a. Percentage EV explodes
+    # mechanically as price -> 0, floating claimed edges of a few cents to
+    # the top of the ranking even though they sit inside the bid-ask noise
+    # of a near-empty book. An edge must be worth at least MIN_ABS_RAW_EDGE
+    # in absolute cents to be a tradeable disagreement rather than noise.
+    if raw_edge is not None and abs(raw_edge) < config.MIN_ABS_RAW_EDGE:
+        return _rejected(
+            f"Absolute edge {raw_edge:+.3f} below MIN_ABS_RAW_EDGE ({config.MIN_ABS_RAW_EDGE:.2f}) "
+            f"-- inside book noise, not a tradeable disagreement."
+        )
+
     # Veto 0b: per-bucket position cap. This bet is either already on, or
     # we can't tell -- either way, don't stack another leg onto it. Counted
     # within this candidate's own track (paper vs. real), matching how
@@ -195,6 +239,37 @@ def evaluate_entry(
         return _rejected(
             f"Per-bucket cap: {open_count} position(s) already open on this bucket/side "
             f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET})."
+        )
+
+    # Veto 0c: stop-out cooldown. The open-position cap (0b) stops STACKING
+    # but has no memory of exits, so a bucket could run "stop -> re-buy ->
+    # stop" all day, paying the spread on every lap (it did, on 2026-08-03).
+    # One stop-loss on a bucket/side is the market's answer for the day.
+    stop_outs = count_stop_outs_for_bucket(
+        station_icao, ev_result.target_date, ev_result.bucket_c, ev_result.side,
+        is_paper=candidate_is_paper,
+    )
+    if stop_outs is None:
+        print(
+            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: could not read "
+            f"position history, so the stop-out cooldown cannot be enforced -- refusing to open blind."
+        )
+        return _rejected("Position history unreadable -- stop-out cooldown unenforceable, refusing to open blind.")
+
+    if stop_outs >= config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY:
+        veto_key = (station_icao, ev_result.target_date, ev_result.bucket_c, ev_result.side.upper())
+        if veto_key not in _cooldown_vetoes_logged:
+            _cooldown_vetoes_logged.add(veto_key)
+            print(
+                f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side} on "
+                f"{ev_result.target_date}: already stop-lossed {stop_outs}x on this bucket/side today "
+                f"(cooldown limit {config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY}). Re-buying a bucket the market "
+                f"just stopped us out of is churn, not conviction -- no more entries here today. "
+                f"(Further cooldown vetoes for this bucket today will not be logged.)"
+            )
+        return _rejected(
+            f"Stop-out cooldown: {stop_outs} stop-loss exit(s) on this bucket/side today "
+            f"(max {config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY})."
         )
 
     kelly_raw = compute_kelly_fraction(ev_result)

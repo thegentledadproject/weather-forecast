@@ -124,7 +124,16 @@ def evaluate_exit(
     pnl_pct = compute_pnl_pct(position.entry_price, current_price)
 
     # 1. Hard stop-loss -- always checked first, overrides everything else.
-    if pnl_pct <= -thresholds["stop_loss_pct"]:
+    #    EXCEPT for lottery-priced entries (see LOTTERY_PRICE_THRESHOLD in
+    #    config.py): below that entry price the percentage threshold is
+    #    sub-tick, so any book wobble "triggers" it, and the stop converts
+    #    "win p% of the time" into "win only if the price never dips two
+    #    cents first" -- forfeiting the exact tail scenarios that justify
+    #    the ticket. Max loss is the stake, accepted at entry and sized
+    #    tiny by Kelly; downside exits for these come from resolution
+    #    detection (position_manager), not from price noise.
+    is_lottery = position.entry_price < config.LOTTERY_PRICE_THRESHOLD
+    if not is_lottery and pnl_pct <= -thresholds["stop_loss_pct"]:
         return ExitDecision(
             position_id=position.position_id,
             should_exit=True,

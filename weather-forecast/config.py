@@ -182,6 +182,36 @@ TIGHTENED_STOP_LOSS_PCT = 0.15
 TIGHTENED_TRAILING_STOP_ACTIVATION_PCT = 0.15  # trail sooner once edge is decaying
 TIGHTENED_TRAILING_STOP_PCT = 0.08             # and trail tighter -- lock in gains faster
 
+# --- Lottery-priced positions (risk_manager.py, entry_manager.py) ----------
+# Below this entry price, a percentage stop-loss is structurally meaningless:
+# 30% of a $0.04 entry is 1.2 cents -- UNDER Polymarket's 1-cent tick -- so
+# the smallest possible two-tick wobble on a near-empty book must blow
+# through the stop. Live case (2026-08-02/03): WSSS 31°C YES bought 3x at
+# $0.04-0.10 on a $14-deep book, stopped out every time within minutes-to-
+# hours on 2-cent noise, once just 21 minutes after entry. A ticket like
+# this is a hold-to-resolution bet: its max loss is its (Kelly-tiny) stake,
+# already fully accepted at entry, and stopping it on price noise forfeits
+# exactly the rare winning paths that justify buying it. Positions entered
+# below this threshold therefore skip the percentage stop-loss entirely;
+# upside exits (profit-take, trailing stop) and resolution detection
+# still apply.
+LOTTERY_PRICE_THRESHOLD = 0.15
+
+# After this many stop-loss exits on the same (station, date, bucket, side),
+# entries there are blocked for the rest of the day. The per-bucket open-
+# position cap stops STACKING but has no memory of exits, so on 2026-08-03
+# the same bucket ran a "stop -> re-buy -> stop" churn loop, paying the
+# spread on every lap. One stop-out is the market's answer for the day.
+MAX_STOP_OUTS_PER_BUCKET_PER_DAY = 1
+
+# Minimum ABSOLUTE edge (model_prob - market_price, in dollars/share) for
+# any entry. Percentage EV explodes mechanically as price -> 0, which
+# floats sub-tick "edges" to the top of the EV ranking: a claimed edge
+# smaller than a few cents on an illiquid book is inside the bid-ask noise,
+# not a tradeable disagreement. Complements MAX_PLAUSIBLE_RAW_EDGE (which
+# catches absurdly LARGE edges); this catches meaninglessly SMALL ones.
+MIN_ABS_RAW_EDGE = 0.03
+
 # --- Exit-side price plausibility (position_manager.py) -------------------
 # A price at either extreme of the book is far more often a RESOLVED market
 # (or a broken quote) than a live one worth stop-lossing out of: a resolved
