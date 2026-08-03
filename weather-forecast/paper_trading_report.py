@@ -85,6 +85,18 @@ def summarize_positions(positions: List[Position]) -> Optional[dict]:
     wins = [r for r in returns if r > 0]
     losses = [r for r in returns if r <= 0]
 
+    # Dollar-weighted view: the summed-percent metric treats a -50% on a
+    # $1 lottery ticket as heavier than a -20% on a $58 conviction bet,
+    # which badly misstates what the bankroll actually experienced. Weight
+    # each realized return by its stake instead.
+    total_staked = 0.0
+    total_pnl_usd = 0.0
+    for p in history:
+        r = _position_return_pct(p)
+        if r is not None and p.size_usd:
+            total_staked += p.size_usd
+            total_pnl_usd += p.size_usd * r
+
     by_reason = {}
     for p in history:
         reason = p.status.replace("closed_", "")
@@ -105,6 +117,10 @@ def summarize_positions(positions: List[Position]) -> Optional[dict]:
         "win_rate": round(len(wins) / len(returns), 4),
         "mean_return_pct": round(statistics.fmean(returns), 4),
         "total_return_pct_sum": round(sum(returns), 4),  # naive sum, not compounded -- see print_report note
+        "total_staked_usd": round(total_staked, 2),
+        "total_pnl_usd": round(total_pnl_usd, 2),
+        # P&L per dollar actually put at risk -- the honest headline number.
+        "dollar_weighted_return_pct": round(total_pnl_usd / total_staked, 4) if total_staked else None,
         "std_return_pct": round(statistics.stdev(returns), 4) if len(returns) > 1 else 0.0,
         "mean_win_pct": round(statistics.fmean(wins), 4) if wins else None,
         "mean_loss_pct": round(statistics.fmean(losses), 4) if losses else None,
@@ -141,6 +157,11 @@ def print_report(station_icao: str) -> None:
     if summary["mean_loss_pct"] is not None:
         print(f"Mean losing trade:   {summary['mean_loss_pct']:+.1%}")
     print(f"Sum of returns (naive, NOT compounded -- see note below): {summary['total_return_pct_sum']:+.1%}")
+    if summary["dollar_weighted_return_pct"] is not None:
+        print(
+            f"Dollar-weighted:   {summary['total_pnl_usd']:+,.2f} USD on "
+            f"{summary['total_staked_usd']:,.2f} staked = {summary['dollar_weighted_return_pct']:+.1%}"
+        )
     print("\nBy exit reason:")
     for reason, stats in summary["by_exit_reason"].items():
         print(f"  {reason:15s} n={stats['n']:3d}  mean_return={stats['mean_return_pct']:+.1%}")

@@ -55,6 +55,7 @@ journal = sh("journalctl -u polyweather -n 14 --no-pager --output=cat") or "(jou
 # --- positions + P&L via the package's own storage layer ---------------------
 open_n = closed_n = None
 pnl_display = "&mdash;"
+pnl_note = "dollar-weighted, closed trades only"
 try:
     import config  # noqa: E402
     import storage  # noqa: E402
@@ -73,13 +74,18 @@ if closed_n:
     try:
         import paper_trading_report as ptr  # noqa: E402
 
-        total = 0.0
+        pnl_usd = 0.0
+        staked_usd = 0.0
         for icao in config.STATIONS:
             summary = ptr.summarize_paper_performance(icao)
             if isinstance(summary, dict):
-                total += float(summary.get("total_return_pct_sum") or 0.0)
-        # summarize_paper_performance returns FRACTIONS (0.5 = 50%)
-        pnl_display = f"{total * 100:+.1f}%"
+                pnl_usd += float(summary.get("total_pnl_usd") or 0.0)
+                staked_usd += float(summary.get("total_staked_usd") or 0.0)
+        # Dollar-weighted: what the bankroll actually experienced, not the
+        # per-trade percent sum that overweights $1 lottery tickets.
+        pnl_display = f"{'-' if pnl_usd < 0 else '+'}${abs(pnl_usd):,.2f}"
+        if staked_usd:
+            pnl_note = f"{pnl_usd / staked_usd:+.1%} dollar-weighted on ${staked_usd:,.0f} staked"
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"P&L summary failed: {exc}")
 
@@ -484,7 +490,7 @@ page = """<!doctype html>
     <div class="tile"><div class="label">Closed positions</div><div class="value">@@CLOSED@@</div>
       <div class="note">what the report scores</div></div>
     <div class="tile"><div class="label">Paper P&amp;L</div><div class="value @@PNLDIM@@">@@PNL@@</div>
-      <div class="note">summed return, uncompounded</div></div>
+      <div class="note">@@PNLNOTE@@</div></div>
   </div>
 
   <div class="card">
@@ -598,6 +604,7 @@ page = (
     .replace("@@OPEN@@", tile_val(open_n))
     .replace("@@CLOSED@@", tile_val(closed_n))
     .replace("@@PNL@@", pnl_display)
+    .replace("@@PNLNOTE@@", pnl_note)
     .replace("@@PNLDIM@@", "dim" if pnl_display == "&mdash;" else "")
     .replace("@@PROBESCAP@@", probes_cap)
     .replace("@@PROBES@@", probes_html)

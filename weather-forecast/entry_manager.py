@@ -63,6 +63,12 @@ import executor
 from models import EVResult, EntryDecision
 from clients import market_client
 
+# (station, target_date, bucket_c, side) keys whose per-bucket-cap veto has
+# already been logged, so a held position doesn't re-print the same veto on
+# every scan cycle all day. In-memory on purpose: keys embed the date, so
+# the set stays small and a restart merely re-logs each veto once.
+_bucket_cap_vetoes_logged = set()
+
 
 def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
     """
@@ -172,12 +178,20 @@ def evaluate_entry(
         return _rejected("Open positions unreadable -- per-bucket cap unenforceable, refusing to open blind.")
 
     if open_count >= config.MAX_OPEN_POSITIONS_PER_BUCKET:
-        print(
-            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side} on "
-            f"{ev_result.target_date}: {open_count} position(s) already open on this exact bucket/side, cap is "
-            f"{config.MAX_OPEN_POSITIONS_PER_BUCKET}. Re-entering the same bucket across cycles is one bet "
-            f"sized up by accident, not a second opportunity -- skipping."
-        )
+        # Log the full explanation ONCE per bucket/side/day: a held position
+        # re-triggers this veto on every scan cycle for hours, and the repeat
+        # lines bury real events in the journal. The veto itself still fires
+        # every time -- only the logging is deduplicated.
+        veto_key = (station_icao, ev_result.target_date, ev_result.bucket_c, ev_result.side.upper())
+        if veto_key not in _bucket_cap_vetoes_logged:
+            _bucket_cap_vetoes_logged.add(veto_key)
+            print(
+                f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side} on "
+                f"{ev_result.target_date}: {open_count} position(s) already open on this exact bucket/side, cap is "
+                f"{config.MAX_OPEN_POSITIONS_PER_BUCKET}. Re-entering the same bucket across cycles is one bet "
+                f"sized up by accident, not a second opportunity -- skipping. "
+                f"(Further cap vetoes for this bucket today will not be logged.)"
+            )
         return _rejected(
             f"Per-bucket cap: {open_count} position(s) already open on this bucket/side "
             f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET})."
