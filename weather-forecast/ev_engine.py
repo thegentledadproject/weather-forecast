@@ -108,6 +108,19 @@ def taker_fee_pct_of_notional(price: Optional[float]) -> float:
 # Flip to False to disable capture entirely without touching call sites.
 ENABLE_SNAPSHOT_CAPTURE = True
 
+# Order-book depth is NOT in the quotes run_for_station() already holds --
+# it costs one /book call per side token. Fetching it every cycle would
+# roughly double the cycle's market-client traffic for data whose only
+# consumer is the backtest's fill model, so depth is captured on every
+# Nth capture pass instead (rows between depth passes store depth NULL,
+# exactly as before). The first month of capture stored depth on ZERO
+# rows -- MarketQuote.yes/no_depth_usd is never populated by the quote
+# path -- which kept the backtest's observed_median depth regime
+# permanently non-viable. Counter is per-process; a daemon restart just
+# makes the next pass a depth pass.
+DEPTH_CAPTURE_EVERY_N_PASSES = 3
+_capture_pass_count = 0
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -336,6 +349,10 @@ def _capture_snapshots(
         import backtest.price_store as price_store
         import backtest.settings as settings
 
+        global _capture_pass_count
+        depth_pass = (_capture_pass_count % DEPTH_CAPTURE_EVERY_N_PASSES) == 0
+        _capture_pass_count += 1
+
         target_date_iso = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
         discovered_at = _now_iso()
         now_ts = int(time.time())
@@ -351,6 +368,15 @@ def _capture_snapshots(
             ]:
                 if not token_id:
                     continue
+
+                if depth_pass and depth_usd is None and price is not None:
+                    # One /book call per side token, depth-pass cycles only.
+                    # Per-token fail-soft: a dead book must cost this token
+                    # its depth field, not the whole capture pass.
+                    try:
+                        depth_usd = market_client.get_available_depth_usd(token_id)
+                    except Exception:  # noqa: BLE001
+                        depth_usd = None
 
                 price_store.upsert_token(
                     token_id=token_id,
