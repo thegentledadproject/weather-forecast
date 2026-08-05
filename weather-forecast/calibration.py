@@ -59,26 +59,35 @@ def estimate_std_dev(
     forecasts: List[PointForecast],
     observations: List[ObservedReading],
     ensemble_members: List[float] = None,
-) -> float:
+) -> tuple:
     """
-    Estimate spread (std dev, in degrees C) for the probability step.
-    Prefers real ensemble spread when available; otherwise falls back
-    to variance across point forecasts, then to observed-history
-    variance, then to a conservative default.
+    Estimate spread (std dev, in degrees C) for the probability step, and
+    report WHICH tier of the fallback chain produced it. Prefers real
+    ensemble spread when available; otherwise falls back to variance
+    across point forecasts, then to observed-history variance, then to a
+    conservative flat default.
+
+    Returns (std_dev_c, source), where source is one of "ensemble",
+    "forecast_variance", "observed_variance", "fallback_default" -- see
+    CalibratedEstimate.spread_source for how this gets used downstream.
+    The source matters as much as the number: a std dev is an input to
+    the probability distribution the edge is measured against, so an
+    edge computed on a guessed spread is only as trustworthy as the guess.
     """
     if ensemble_members and len(ensemble_members) > 1:
-        return round(statistics.stdev(ensemble_members), 2)
+        return round(statistics.stdev(ensemble_members), 2), "ensemble"
 
     valid_forecasts = [f.max_temp_c for f in forecasts if f.max_temp_c is not None]
     if len(valid_forecasts) > 1:
-        return round(statistics.stdev(valid_forecasts), 2)
+        return round(statistics.stdev(valid_forecasts), 2), "forecast_variance"
 
     if observations and len(observations) > 1:
-        return round(statistics.stdev(o.max_temp_c for o in observations), 2)
+        return round(statistics.stdev(o.max_temp_c for o in observations), 2), "observed_variance"
 
     # Conservative MVP default: reflects the ~1-1.5C spread typically
     # seen in tropical daily-max readings across the stations tested so far.
-    return 1.2
+    # No real spread signal behind this number at all.
+    return 1.2, "fallback_default"
 
 
 def calibrate(
@@ -90,13 +99,15 @@ def calibrate(
 ) -> CalibratedEstimate:
     """Top-level entry point: build a CalibratedEstimate for one station/date."""
     central = blend_central_estimate(forecasts, observations, station.long_term_normal_max_c)
-    spread = estimate_std_dev(forecasts, observations, ensemble_members)
+    spread, spread_source = estimate_std_dev(forecasts, observations, ensemble_members)
 
     notes = []
     if not forecasts:
         notes.append("No live model forecasts available -- fell back to observed/normal.")
     if not observations:
         notes.append("No recent observed data for this station -- calibration is forecast-only.")
+    if spread_source == "fallback_default":
+        notes.append("Spread has no real signal behind it (flat 1.2C default) -- edge gate tightened accordingly.")
 
     return CalibratedEstimate(
         station_icao=station.icao,
@@ -106,4 +117,5 @@ def calibrate(
         monsoon_phase=_monsoon_phase(station, target_date),
         inputs_used=[f.source for f in forecasts if f.max_temp_c is not None],
         notes="; ".join(notes),
+        spread_source=spread_source,
     )

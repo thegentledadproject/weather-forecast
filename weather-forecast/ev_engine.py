@@ -39,11 +39,23 @@ already have one.
 
 FEE RATE
 --------
-DEFAULT_FEE_RATE_PCT is set to 0.0 because Polymarket's current fee
-structure was not verified against live documentation in this build.
-Confirm the actual fee schedule before trusting net_ev_per_dollar for
-a real capital decision -- this default should not be read as "fees
-are zero."
+Verified against https://docs.polymarket.com/polymarket-learn/trading/fees
+on 2026-08-05: makers pay nothing, but TAKERS pay a fee on every trade,
+computed as fee = shares * rate * p * (1 - p), where the rate for the
+Weather category is 0.05. This bot takes liquidity (it walks the book),
+so the taker schedule applies. Expressed as a fraction of the dollars
+spent buying at price p, the fee is rate * (1 - p) -- price-dependent,
+NOT flat: ~3.2% of notional at a 35c entry, ~4.5% at 10c. That is the
+same order of magnitude as MIN_ABS_RAW_EDGE, so ignoring it materially
+overstates EV on exactly the cheap long-shot entries this system likes.
+
+fee_rate_pct=None (the default) therefore computes the real schedule
+per candidate at that candidate's own price. Passing an explicit float
+retains the old flat-rate behavior -- the backtest engine does this so
+fee sensitivity stays an explicit, cache-keyed run parameter there.
+
+Exit-side taker fees (paying the schedule again when selling before
+resolution) are NOT modeled here; resolution redemptions are fee-free.
 
 DEPENDENCIES
 ------------
@@ -63,8 +75,28 @@ from clients import market_client
 import config
 import market_discovery
 
-DEFAULT_FEE_RATE_PCT = 0.0  # UNVERIFIED -- see module docstring
+# Weather-category taker fee rate, verified 2026-08-05 -- see the FEE RATE
+# section of the module docstring for the source and the full formula.
+POLYMARKET_WEATHER_TAKER_FEE_RATE = 0.05
+
+# None means "compute the real price-dependent taker schedule per candidate"
+# (taker_fee_pct_of_notional below). An explicit float is a flat override,
+# kept for the backtest engine's fee-sensitivity runs.
+DEFAULT_FEE_RATE_PCT = None
 DEFAULT_TRADE_SIZE_USD = 50.0
+
+
+def taker_fee_pct_of_notional(price: Optional[float]) -> float:
+    """
+    Polymarket taker fee as a fraction of the dollars spent buying at
+    `price`: fee = shares * rate * p * (1-p) and notional = shares * p,
+    so fee / notional = rate * (1 - p). Returns 0.0 for a missing or
+    non-positive price -- those candidates carry net_ev_per_dollar=None
+    and are never sized, so the fee number is informational there.
+    """
+    if price is None or price <= 0:
+        return 0.0
+    return POLYMARKET_WEATHER_TAKER_FEE_RATE * (1.0 - price)
 
 # Kill switch for piggybacked snapshot capture (see _capture_snapshots()
 # below): when True, every run_for_station() cycle also writes this
@@ -121,7 +153,7 @@ def compute_ev_table(
     estimate: CalibratedEstimate,
     token_map: Dict[int, dict],
     trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
-    fee_rate_pct: float = DEFAULT_FEE_RATE_PCT,
+    fee_rate_pct: Optional[float] = DEFAULT_FEE_RATE_PCT,
     quotes: Optional[Dict[int, MarketQuote]] = None,
 ) -> List[EVResult]:
     """
@@ -166,15 +198,21 @@ def compute_ev_table(
                     market_price=None,
                     raw_edge=None,
                     estimated_slippage_pct=0.0,
-                    fee_rate_pct=fee_rate_pct,
+                    fee_rate_pct=fee_rate_pct if fee_rate_pct is not None else 0.0,
                     net_ev_per_dollar=None,
+                    spread_source=estimate.spread_source,
                     notes="No live price available this cycle.",
                 ))
                 continue
 
             slippage = market_client.estimate_slippage(token_id, trade_size_usd)
             raw_edge = side_model_prob - price
-            net_ev = (raw_edge / price) - slippage - fee_rate_pct if price > 0 else None
+            # Flat override if the caller passed one; otherwise the real
+            # price-dependent taker schedule at THIS candidate's price.
+            # Stored on the EVResult, so entry_manager's at-size re-check
+            # deducts the same fee without recomputing it.
+            fee_pct = fee_rate_pct if fee_rate_pct is not None else taker_fee_pct_of_notional(price)
+            net_ev = (raw_edge / price) - slippage - fee_pct if price > 0 else None
 
             results.append(EVResult(
                 station_icao=estimate.station_icao,
@@ -185,8 +223,9 @@ def compute_ev_table(
                 market_price=price,
                 raw_edge=raw_edge,
                 estimated_slippage_pct=slippage,
-                fee_rate_pct=fee_rate_pct,
+                fee_rate_pct=fee_pct,
                 net_ev_per_dollar=net_ev,
+                spread_source=estimate.spread_source,
             ))
 
     return results
@@ -247,7 +286,7 @@ def best_opportunities(
 def run_for_station(
     estimate: CalibratedEstimate,
     trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
-    fee_rate_pct: float = DEFAULT_FEE_RATE_PCT,
+    fee_rate_pct: Optional[float] = DEFAULT_FEE_RATE_PCT,
 ) -> List[EVResult]:
     """
     Convenience wrapper: runs market_discovery automatically instead

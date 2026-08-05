@@ -199,9 +199,23 @@ def evaluate_entry(
     # the top of the ranking even though they sit inside the bid-ask noise
     # of a near-empty book. An edge must be worth at least MIN_ABS_RAW_EDGE
     # in absolute cents to be a tradeable disagreement rather than noise.
-    if raw_edge is not None and abs(raw_edge) < config.MIN_ABS_RAW_EDGE:
+    #
+    # The bar itself scales with how the edge was computed: an estimate
+    # whose spread came from calibration's flat fallback default (no real
+    # ensemble/forecast/observed spread behind it -- see
+    # CalibratedEstimate.spread_source) has an unmeasured probability
+    # underneath its edge, not just an unmeasured price. Requiring a
+    # bigger edge there isn't extra caution for its own sake -- it's the
+    # same "is this real or is this noise" question MIN_ABS_RAW_EDGE
+    # already asks, applied to a case where the noise floor is higher.
+    min_abs_edge = config.MIN_ABS_RAW_EDGE
+    if getattr(ev_result, "spread_source", None) == "fallback_default":
+        min_abs_edge *= config.LOW_CONFIDENCE_EDGE_MULTIPLIER
+
+    if raw_edge is not None and abs(raw_edge) < min_abs_edge:
+        low_conf_note = " (raised: spread_source=fallback_default)" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         return _rejected(
-            f"Absolute edge {raw_edge:+.3f} below MIN_ABS_RAW_EDGE ({config.MIN_ABS_RAW_EDGE:.2f}) "
+            f"Absolute edge {raw_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note} "
             f"-- inside book noise, not a tradeable disagreement."
         )
 

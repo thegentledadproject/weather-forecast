@@ -212,6 +212,16 @@ MAX_STOP_OUTS_PER_BUCKET_PER_DAY = 1
 # catches absurdly LARGE edges); this catches meaninglessly SMALL ones.
 MIN_ABS_RAW_EDGE = 0.03
 
+# When the edge was computed against a std_dev_c with NO real spread
+# signal behind it (CalibratedEstimate.spread_source == "fallback_default"
+# -- see calibration.estimate_std_dev()), the probability the edge itself
+# rests on is a guess, not a measurement. MIN_ABS_RAW_EDGE alone treats a
+# 3.5c edge on a real ensemble spread identically to a 3.5c edge on a flat
+# 1.2C default, even though only one of those is backed by real data.
+# This multiplier raises the bar for fallback-quality estimates instead of
+# silently trusting them at the same threshold as a properly-calibrated one.
+LOW_CONFIDENCE_EDGE_MULTIPLIER = 2.0  # fallback_default estimates need 2x the normal minimum edge
+
 # --- Exit-side price plausibility (position_manager.py) -------------------
 # A price at either extreme of the book is far more often a RESOLVED market
 # (or a broken quote) than a live one worth stop-lossing out of: a resolved
@@ -260,7 +270,16 @@ SCHEDULE_WINDOWS = [
     (4, 0, 4, 45, 15, "pre_poll", None, "Early watch -- checking if forecast posted ahead of schedule"),
     (4, 45, 5, 0, 2, "pre_poll", None, "Tight pre-poll -- waiting for the 05:00 forecast publish event"),
     (5, 0, 8, 0, 10, "primary", 0.15, "Primary edge window -- confirmed bias-correction edge, tightest scan interval"),
-    (8, 0, 10, 0, 30, "secondary", 0.25, "Edge decaying -- wider interval, higher EV bar required to act"),
+    # 08:00-10:00 used to tighten both the EV bar (0.15->0.25) AND the scan
+    # interval (10min->30min) in one step at 08:00 -- two independent
+    # "be more conservative" levers moving together meant real
+    # opportunities in the 08:00-09:00 hour could be missed to sparse
+    # polling on top of a stricter EV bar, which is a different failure
+    # mode than "rejected for insufficient EV." Split into two steps so
+    # the interval widens gradually instead of tripling in one jump:
+    # bar tightens first, interval widens second.
+    (8, 0, 9, 0, 15, "secondary", 0.20, "Edge decaying (early) -- EV bar raised, scan interval only modestly wider"),
+    (9, 0, 10, 0, 30, "secondary", 0.25, "Edge decaying (late) -- original wider interval, highest pre-close EV bar"),
     (10, 0, 12, 0, 120, "monitor_only", None, "Decision-closed -- no new entries, watching existing positions"),
     (12, 0, 16, 0, 60, "risk_only", None, "Afternoon peak-heat window -- nowcast-triggered risk checks only"),
     (16, 0, 22, 45, 180, "monitor_only", None, "Evening -- sparse position monitoring"),

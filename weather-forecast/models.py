@@ -79,6 +79,15 @@ class CalibratedEstimate:
     monsoon_phase: str
     inputs_used: list = field(default_factory=list)  # list of PointForecast.source strings
     notes: str = ""
+    # Where std_dev_c came from, in order of trustworthiness:
+    # "ensemble" (real spread across ensemble members) > "forecast_variance"
+    # (spread across point forecasts) > "observed_variance" (spread across
+    # recent observed readings) > "fallback_default" (no real spread data
+    # at all -- a flat 1.2C guess). Set by calibration.estimate_std_dev().
+    # Downstream (entry_manager.py) uses this to require a bigger edge
+    # before trading on a "fallback_default" estimate, since an edge that
+    # size is only as trustworthy as the spread it was computed against.
+    spread_source: str = "fallback_default"
 
 
 @dataclass
@@ -171,6 +180,8 @@ class EVResult:
     estimated_slippage_pct: float       # cost estimate from walking the book, as a fraction
     fee_rate_pct: float
     net_ev_per_dollar: Optional[float]  # (raw_edge / market_price) - slippage - fee, None if price unavailable
+    spread_source: str = "fallback_default"  # from CalibratedEstimate.spread_source -- see entry_manager's
+                                              # confidence-scaled MIN_ABS_RAW_EDGE gate
     notes: str = ""
 
 

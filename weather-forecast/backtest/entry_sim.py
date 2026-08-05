@@ -36,15 +36,20 @@ rejection carries different (mostly empty) sizing fields than a later
 one's, so a reordered replica would produce EntryDecisions that differ
 from live even when the approve/reject verdict matched.
 
-  1. Veto 0a  raw edge > config.MAX_PLAUSIBLE_RAW_EDGE  -> reject
-  2. Veto 0b  open-position count unreadable (None)      -> reject
-  3. Veto 0b  open count >= MAX_OPEN_POSITIONS_PER_BUCKET-> reject
-  4. Kelly fraction missing or <= 0                      -> reject
-  5. depth unknown (None)                                -> reject
-  6. depth-capped size < $1                              -> reject
-  7. slippage at size > MAX_ACCEPTABLE_SLIPPAGE_PCT      -> reject
-  8. net EV at size < min_net_ev                         -> reject
-  9. approve
+  1. Veto 0a   raw edge > config.MAX_PLAUSIBLE_RAW_EDGE  -> reject
+  2. Veto 0a2  |raw edge| < MIN_ABS_RAW_EDGE (doubled by
+               LOW_CONFIDENCE_EDGE_MULTIPLIER when the EVResult's
+               spread_source is "fallback_default")       -> reject
+  3. Veto 0b   open-position count unreadable (None)      -> reject
+  4. Veto 0b   open count >= MAX_OPEN_POSITIONS_PER_BUCKET-> reject
+  5. Veto 0c   stop-out count unreadable (None)           -> reject
+  6. Veto 0c   stop-outs >= MAX_STOP_OUTS_PER_BUCKET_PER_DAY -> reject
+  7. Kelly fraction missing or <= 0                       -> reject
+  8. depth unknown (None)                                 -> reject
+  9. depth-capped size < $1                               -> reject
+ 10. slippage at size > MAX_ACCEPTABLE_SLIPPAGE_PCT       -> reject
+ 11. net EV at size < min_net_ev                          -> reject
+ 12. approve
 
 LIVE QUIRKS REPLICATED, NOT FIXED
 ---------------------------------
@@ -92,11 +97,11 @@ from ev_engine import best_opportunities  # noqa: F401  (re-exported for tests)
 
 # Number of distinct decision/rejection sites replicated from
 # entry_manager.evaluate_entry(). Equals the number of decision-returning
-# statements in that function (its three `return _rejected(...)` calls
+# statements in that function (its six `return _rejected(...)` calls
 # plus its six direct `return EntryDecision(...)` statements). An AST
 # census over the live function must agree with this number; if it does
 # not, a gate was added or removed upstream and this replica is stale.
-GATE_COUNT = 9
+GATE_COUNT = 12
 
 
 def _maturity_for(station_icao: str, station_maturity: Optional[str]) -> str:
@@ -117,6 +122,7 @@ def evaluate_entry_sim(
     ev: EVResult,
     token_id: str,
     open_count_for_bucket: Optional[int],
+    stop_outs_for_bucket: Optional[int],
     depth_usd: Optional[float],
     slippage_fn: Callable[[float], float],
     min_net_ev: float,
@@ -131,6 +137,11 @@ def evaluate_entry_sim(
                                 None replicates the live "could not read
                                 open positions" case, which is a REJECT
                                 (refuse to open blind), not a zero.
+      stop_outs_for_bucket   <- entry_manager.count_stop_outs_for_bucket()'s
+                                storage.load_position_history() count of
+                                same-day closed_stop_loss exits on this
+                                bucket/side. None replicates "history
+                                unreadable", which is a REJECT, not a zero.
       depth_usd              <- market_client.get_available_depth_usd().
                                 None is a reject, same as live.
       slippage_fn(size_usd)  <- market_client.estimate_slippage(token, size).
@@ -163,18 +174,43 @@ def evaluate_entry_sim(
             f"({config.MAX_PLAUSIBLE_RAW_EDGE:.0%}) -- presumed data error, not alpha."
         )
 
-    # --- Gate 2: Veto 0b, open positions unreadable ----------------------
+    # --- Gate 2: Veto 0a2, edge materiality ------------------------------
+    # Bar doubles when the estimate's spread came from calibration's flat
+    # fallback default (no real spread signal) -- same arithmetic as live.
+    min_abs_edge = config.MIN_ABS_RAW_EDGE
+    if getattr(ev, "spread_source", None) == "fallback_default":
+        min_abs_edge *= config.LOW_CONFIDENCE_EDGE_MULTIPLIER
+
+    if raw_edge is not None and abs(raw_edge) < min_abs_edge:
+        low_conf_note = " (raised: spread_source=fallback_default)" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
+        return _rejected(
+            f"Absolute edge {raw_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note} "
+            f"-- inside book noise, not a tradeable disagreement."
+        )
+
+    # --- Gate 3: Veto 0b, open positions unreadable ----------------------
     if open_count_for_bucket is None:
         return _rejected("Open positions unreadable -- per-bucket cap unenforceable, refusing to open blind.")
 
-    # --- Gate 3: Veto 0b, per-bucket cap ---------------------------------
+    # --- Gate 4: Veto 0b, per-bucket cap ---------------------------------
     if open_count_for_bucket >= config.MAX_OPEN_POSITIONS_PER_BUCKET:
         return _rejected(
             f"Per-bucket cap: {open_count_for_bucket} position(s) already open on this bucket/side "
             f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET})."
         )
 
-    # --- Gate 4: Kelly fraction ------------------------------------------
+    # --- Gate 5: Veto 0c, position history unreadable --------------------
+    if stop_outs_for_bucket is None:
+        return _rejected("Position history unreadable -- stop-out cooldown unenforceable, refusing to open blind.")
+
+    # --- Gate 6: Veto 0c, stop-out cooldown ------------------------------
+    if stop_outs_for_bucket >= config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY:
+        return _rejected(
+            f"Stop-out cooldown: {stop_outs_for_bucket} stop-loss exit(s) on this bucket/side today "
+            f"(max {config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY})."
+        )
+
+    # --- Gate 7: Kelly fraction ------------------------------------------
     kelly_raw = compute_kelly_fraction(ev)
     if kelly_raw is None or kelly_raw <= 0:
         return EntryDecision(
@@ -199,7 +235,7 @@ def evaluate_entry_sim(
     if maturity == "exploratory":
         size_usd *= config.EXPLORATORY_SIZE_MULTIPLIER
 
-    # --- Gate 5: depth unknown -------------------------------------------
+    # --- Gate 8: depth unknown -------------------------------------------
     if depth_usd is None:
         return EntryDecision(
             station_icao=station_icao, target_date=ev.target_date,
@@ -216,7 +252,7 @@ def evaluate_entry_sim(
     # Cap 3: real order-book depth
     depth_capped_usd = min(size_usd, depth_usd * config.MAX_DEPTH_UTILIZATION_PCT)
 
-    # --- Gate 6: depth-capped size too small ------------------------------
+    # --- Gate 9: depth-capped size too small ------------------------------
     if depth_capped_usd < 1.0:
         return EntryDecision(
             station_icao=station_icao, target_date=ev.target_date,
@@ -235,7 +271,7 @@ def evaluate_entry_sim(
     slippage_at_size = slippage_fn(depth_capped_usd)
     net_ev_at_size = (ev.raw_edge / ev.market_price) - slippage_at_size - ev.fee_rate_pct
 
-    # --- Gate 7: hard slippage bar ----------------------------------------
+    # --- Gate 10: hard slippage bar ---------------------------------------
     if slippage_at_size > config.MAX_ACCEPTABLE_SLIPPAGE_PCT:
         return EntryDecision(
             station_icao=station_icao, target_date=ev.target_date,
@@ -250,7 +286,7 @@ def evaluate_entry_sim(
             token_id=token_id,
         )
 
-    # --- Gate 8: net EV at actual size ------------------------------------
+    # --- Gate 11: net EV at actual size -----------------------------------
     if net_ev_at_size < min_net_ev:
         return EntryDecision(
             station_icao=station_icao, target_date=ev.target_date,
@@ -265,7 +301,7 @@ def evaluate_entry_sim(
             token_id=token_id,
         )
 
-    # --- Gate 9: approve ---------------------------------------------------
+    # --- Gate 12: approve --------------------------------------------------
     return EntryDecision(
         station_icao=station_icao, target_date=ev.target_date,
         bucket_c=ev.bucket_c, side=ev.side,
@@ -299,6 +335,28 @@ def count_open_for_bucket_side(portfolio, station_icao: str, target_date, bucket
         and p.target_date == target_date
         and p.bucket_c == bucket_c
         and p.side.upper() == side_upper
+    )
+
+
+def count_stop_outs_for_bucket_side(portfolio, station_icao: str, target_date, bucket_c: int, side: str) -> int:
+    """
+    Same-day closed_stop_loss exits on this exact (station, target_date,
+    bucket, SIDE) in a replay portfolio -- the injected stand-in for
+    entry_manager.count_stop_outs_for_bucket()'s storage query.
+
+    Counts closed_stop_loss ONLY, matching live: a trailing stop is a
+    winner giving back its peak, not the market rejecting the entry, so
+    it does not trip the re-entry cooldown. Live's paper/real scoping
+    needs no equivalent because every replay position is paper.
+    """
+    side_upper = side.upper()
+    return sum(
+        1 for p in portfolio.closed
+        if p.station_icao == station_icao
+        and p.target_date == target_date
+        and p.bucket_c == bucket_c
+        and p.side.upper() == side_upper
+        and p.status == "closed_stop_loss"
     )
 
 
@@ -348,6 +406,9 @@ def decide_portfolio_entries_sim(
         open_count = count_open_for_bucket_side(
             portfolio, ev.station_icao, ev.target_date, ev.bucket_c, ev.side
         )
+        stop_outs = count_stop_outs_for_bucket_side(
+            portfolio, ev.station_icao, ev.target_date, ev.bucket_c, ev.side
+        )
 
         def _slippage_fn(size_usd: float, _depth=depth_usd) -> float:
             # _depth bound at definition time: a late-binding closure over
@@ -361,6 +422,7 @@ def decide_portfolio_entries_sim(
                 ev=ev,
                 token_id=token_id,
                 open_count_for_bucket=open_count,
+                stop_outs_for_bucket=stop_outs,
                 depth_usd=depth_usd,
                 slippage_fn=_slippage_fn,
                 min_net_ev=min_net_ev,
