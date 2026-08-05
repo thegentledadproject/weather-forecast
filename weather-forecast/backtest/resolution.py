@@ -44,22 +44,50 @@ import config
 from backtest import settings
 
 
-def bucket_for_temp(t: float) -> int:
+def bucket_for_temp(
+    t: float,
+    bucket_min: int = None,
+    bucket_max: int = None,
+    edge_mode: str = "half_up",
+) -> int:
     """
     The resolution bucket a max temperature of `t` degrees C falls in,
-    clamped into [config.BUCKET_MIN_C, config.BUCKET_MAX_C].
+    clamped into [bucket_min, bucket_max].
 
-    Half-UP rounding via math.floor(t + 0.5), deliberately NOT round() --
-    see the module docstring: round() is banker's rounding and would
-    disagree with probability.py's [b - 0.5, b + 0.5) bucket edges on
-    exactly the half-degree values.
+    bucket_min/bucket_max default to None, which falls back to the legacy
+    station-agnostic globals config.BUCKET_MIN_C/BUCKET_MAX_C -- so calling
+    this with no new args reproduces the exact pre-multi-station behavior.
+    Real multi-station callers (backtest/engine.py's resolution sweep,
+    backtest/report.py's Brier scoring) must pass the station's own
+    bucket_min_c/bucket_max_c instead: WSSS backtests would otherwise
+    settle on the 25/35 clamp while the live book trades 27/37.
 
-    The clamp mirrors the real market structure: the edge buckets are
-    catch-alls ("25 or below", "35 or above"), which is also how
-    probability.bucket_probabilities() folds the distribution's tails.
+    edge_mode picks how the raw reading maps onto a whole-degree bucket,
+    matching models.StationConfig.bucket_edge_mode:
+      "half_up" (default) -- source reports whole degrees C (METAR/
+                 Wunderground): bucket = math.floor(t + 0.5), deliberately
+                 NOT round() -- see the module docstring: round() is
+                 banker's rounding and would disagree with probability.py's
+                 [b - 0.5, b + 0.5) bucket edges on exactly the half-degree
+                 values. This is the ONLY mode this function supported
+                 before multi-station support, so it stays the default.
+      "floor"  -- source reports 0.1 C precision and the market resolves
+                 to the range that CONTAINS the reading (Hong Kong
+                 Observatory's climate extract, not a whole-degree
+                 rounding): bucket = math.floor(t), intervals [b, b + 1),
+                 so 33.9 C is bucket 33, never 34.
+
+    The clamp mirrors the real market structure in both modes: the edge
+    buckets are catch-alls ("25 or below", "35 or above"), which is also
+    how probability.bucket_probabilities() folds the distribution's tails.
     """
-    bucket = math.floor(t + 0.5)
-    return max(config.BUCKET_MIN_C, min(config.BUCKET_MAX_C, bucket))
+    lo = config.BUCKET_MIN_C if bucket_min is None else bucket_min
+    hi = config.BUCKET_MAX_C if bucket_max is None else bucket_max
+    if edge_mode == "floor":
+        bucket = math.floor(t)
+    else:
+        bucket = math.floor(t + 0.5)
+    return max(lo, min(hi, bucket))
 
 
 def observation_visible(obs_target_date: date, sim_local_dt: datetime) -> bool:

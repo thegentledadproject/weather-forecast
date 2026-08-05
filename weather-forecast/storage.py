@@ -119,21 +119,69 @@ def load_observations_since(station_icao: str, cutoff: date) -> List[ObservedRea
     ]
 
 
+def _resolution_grade_source_for(station_icao: str) -> str:
+    """
+    Which ObservedReading.source counts as settlement truth for THIS
+    station. Not a constant any more: Hong Kong settles on the HK
+    Observatory's climate extract ("hko_daily_max"), not on any airport
+    METAR, so ranking VHHH's rows by the METAR default would rank the
+    settlement source at 1 and let a lower-grade reading win the dedup.
+
+    Falls back to the global default for an unregistered station rather
+    than raising -- dedup is called on whatever rows storage holds,
+    including history for a station someone removed from the registry,
+    and a KeyError there would take down calibration for every station in
+    the batch.
+    """
+    try:
+        return config.get_station(station_icao).resolution_grade_source
+    except KeyError:
+        return config.RESOLUTION_GRADE_OBSERVATION_SOURCE
+
+
 def dedupe_observations(observations: List[ObservedReading]) -> List[ObservedReading]:
     """
     One reading per (station, target_date), keeping the best source per
-    config.observation_source_rank (METAR settlement-grade first, seed
-    constants last). The observations table's primary key allows one row
-    PER SOURCE per day, so any consumer that averages readings -- the
-    calibration blend above all -- must dedupe first or a day reported by
-    two sources counts twice. Output sorted by date for determinism.
+    config.observation_source_rank -- THE STATION'S OWN settlement source
+    first, seed constants last. The observations table's primary key
+    allows one row PER SOURCE per day, so any consumer that averages
+    readings -- the calibration blend above all -- must dedupe first or a
+    day reported by two sources counts twice. Output sorted by date for
+    determinism.
     """
     best: dict = {}
+    grade_source_cache: dict = {}
     for obs in observations:
         key = (obs.station_icao, obs.target_date)
-        if key not in best or config.observation_source_rank(obs.source) < config.observation_source_rank(best[key].source):
+        if obs.station_icao not in grade_source_cache:
+            grade_source_cache[obs.station_icao] = _resolution_grade_source_for(obs.station_icao)
+        grade_source = grade_source_cache[obs.station_icao]
+
+        if key not in best or (
+            config.observation_source_rank(obs.source, grade_source)
+            < config.observation_source_rank(best[key].source, grade_source)
+        ):
             best[key] = obs
     return sorted(best.values(), key=lambda o: (o.station_icao, o.target_date))
+
+
+def count_observations_from_source(station_icao: str, source: str) -> int:
+    """
+    How many stored observations a station has from ONE named source.
+
+    Feeds entry_manager's collection-first gate, which asks "does this
+    station have enough settlement-grade history for its model bias to be
+    a measurement rather than a guess" -- so it must count only rows from
+    the station's own resolution_grade_source. Counting every source
+    would let 30 days of Open-Meteo analysis backfill graduate a station
+    that has never once been compared against the record it settles on.
+    """
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM observations WHERE station_icao = ? AND source = ?",
+            (station_icao, source),
+        ).fetchone()
+    return int(row[0]) if row else 0
 
 
 def load_forecast_history(station_icao: str, source: str, limit: int = 90) -> List[PointForecast]:

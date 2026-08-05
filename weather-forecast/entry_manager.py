@@ -45,6 +45,15 @@ if depth is thin. If the re-checked net EV drops below the threshold,
 or slippage exceeds MAX_ACCEPTABLE_SLIPPAGE_PCT, the trade is rejected
 even though it passed ev_engine's initial screen.
 
+Two further gates are STATION-level rather than candidate-level, and so
+live in decide_portfolio_entries() rather than evaluate_entry():
+  - the collection-first gate (config.MIN_RESOLUTION_OBS_BEFORE_ENTRY):
+    a station without enough settlement-grade observations to have had
+    its bias measured opens nothing at all.
+  - the portfolio-wide daily budget
+    (config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD), applied alongside
+    the per-station one inside apply_portfolio_budget().
+
 This module still only RECOMMENDS -- nothing here places an order.
 executor.py's manual_review/auto gating still applies downstream.
 
@@ -55,7 +64,7 @@ clients/market_client.py (local)
 """
 
 from datetime import date
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import config
 import storage
@@ -71,6 +80,11 @@ _bucket_cap_vetoes_logged = set()
 
 # Same dedup pattern for the daily stop-out cooldown veto (0c).
 _cooldown_vetoes_logged = set()
+
+# And for the collection-first gate, which fires on EVERY cycle of a new
+# station's first days -- exactly the situation where a repeated line
+# would drown the journal for a week.
+_collection_only_logged = set()
 
 
 def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
@@ -146,6 +160,82 @@ def count_stop_outs_for_bucket(
         and p.bucket_c == bucket_c
         and p.side.upper() == side.upper()
         and p.status == "closed_stop_loss"
+    )
+
+
+def resolution_obs_count(station_icao: str) -> Optional[int]:
+    """
+    How many stored observations this station has from ITS OWN
+    resolution_grade_source -- the count the collection-first gate is
+    measured against. Returns None if it could not be read at all
+    (unregistered station, storage error), which callers must treat as
+    "unknown, therefore not yet graduated", never as a large number.
+    """
+    try:
+        station = config.get_station(station_icao)
+        return storage.count_observations_from_source(station_icao, station.resolution_grade_source)
+    except Exception as exc:  # noqa: BLE001 - KeyError (unregistered) or any storage failure
+        print(f"[entry_manager] could not count settlement-grade observations for {station_icao}: {exc}")
+        return None
+
+
+def collection_only_reason(station_icao: str, obs_count: Optional[int]) -> Optional[str]:
+    """
+    The collection-first gate, as a PURE function: None means this
+    station may open positions, any string is the reason it may not.
+
+    A station with fewer than config.MIN_RESOLUTION_OBS_BEFORE_ENTRY
+    settlement-grade observations has never had its model bias measured
+    against the record it actually settles on. Its calibration is running
+    on a placeholder climatological normal and (usually) a
+    fallback_default spread -- and a 2°C-wrong placeholder does not
+    produce absurd edges that MAX_PLAUSIBLE_RAW_EDGE would catch, it
+    produces edges of exactly the tradeable size, on every bucket, every
+    cycle, all wrong in the same direction. Eleven stations were added to
+    the registry at once; without this gate all eleven would have started
+    trading on day one off numbers nobody has checked. Collecting costs
+    nothing. Wrong entries cost money.
+
+    Kept pure (registry lookup only, no storage) so backtest/entry_sim.py
+    can reuse it verbatim and the two sides cannot drift in wording or in
+    the comparison itself.
+    """
+    try:
+        source = config.get_station(station_icao).resolution_grade_source
+    except KeyError:
+        source = config.RESOLUTION_GRADE_OBSERVATION_SOURCE
+
+    if obs_count is None:
+        return (
+            f"Collection-only: {station_icao}'s stored '{source}' observation count could not be read, "
+            f"so the collection-first gate cannot be enforced -- refusing to open blind."
+        )
+    if obs_count < config.MIN_RESOLUTION_OBS_BEFORE_ENTRY:
+        return (
+            f"Collection-only: {station_icao} has {obs_count} stored '{source}' observation(s), below the "
+            f"{config.MIN_RESOLUTION_OBS_BEFORE_ENTRY} required before any entry -- this station's model "
+            f"bias is unmeasured, so its 'edge' is a guess. Collecting, not trading."
+        )
+    return None
+
+
+def collection_only_decision(ev_result: EVResult, token_id: Optional[str], reason: str) -> EntryDecision:
+    """
+    The EntryDecision a collection-only station produces for one
+    candidate: rejected, nothing sized, reason intact so the funnel shows
+    WHY rather than silently dropping the candidate. Shared with
+    backtest/entry_sim.py so live and replay emit identical objects.
+    """
+    return EntryDecision(
+        station_icao=ev_result.station_icao, target_date=ev_result.target_date,
+        bucket_c=ev_result.bucket_c, side=ev_result.side,
+        kelly_fraction_raw=0.0, kelly_fraction_applied=0.0,
+        recommended_size_usd=0.0, available_depth_usd=None,
+        slippage_at_size_pct=None, net_ev_at_size=None,
+        approved=False, reason=reason,
+        station_maturity=config.STATION_MATURITY.get(ev_result.station_icao, "exploratory"),
+        entry_price=ev_result.market_price,
+        token_id=token_id,
     )
 
 
@@ -387,6 +477,28 @@ def evaluate_entry(
     )
 
 
+def candidates_with_token_ids(
+    ev_results: List[EVResult],
+    token_map: dict,
+) -> List[Tuple[EVResult, str]]:
+    """
+    Pair each candidate with the token id for its own side, dropping any
+    candidate whose bucket isn't in the map (it cannot be traded without
+    a token id). Factored out so the collection-first gate and the sizing
+    path agree exactly on which candidates exist -- and so the live
+    candidate list has the same (EVResult, token_id) shape
+    backtest/entry_sim.decide_portfolio_entries_sim() consumes.
+    """
+    candidates = []
+    for result in ev_results:
+        bucket_ids = token_map.get(result.bucket_c)
+        if not bucket_ids:
+            continue
+        token_id = bucket_ids["yes_token_id"] if result.side == "YES" else bucket_ids["no_token_id"]
+        candidates.append((result, token_id))
+    return candidates
+
+
 def decide_entries(
     ev_results: List[EVResult],
     token_map: dict,
@@ -399,14 +511,10 @@ def decide_entries(
     rejected alike, so callers (scheduler.py) can log WHY something
     was skipped, not just silently drop it.
     """
-    decisions = []
-    for result in ev_results:
-        bucket_ids = token_map.get(result.bucket_c)
-        if not bucket_ids:
-            continue
-        token_id = bucket_ids["yes_token_id"] if result.side == "YES" else bucket_ids["no_token_id"]
-        decisions.append(evaluate_entry(result, token_id, min_net_ev=min_net_ev))
-    return decisions
+    return [
+        evaluate_entry(result, token_id, min_net_ev=min_net_ev)
+        for result, token_id in candidates_with_token_ids(ev_results, token_map)
+    ]
 
 
 def veto_same_bucket_conflicts(decisions: List[EntryDecision]) -> List[EntryDecision]:
@@ -482,10 +590,43 @@ def station_day_exposure_usd(
     return sum(p.size_usd for p in positions if p.target_date == target_date)
 
 
+def portfolio_day_exposure_usd(is_paper: Optional[bool] = None) -> Optional[float]:
+    """
+    Dollars deployed across EVERY registered station for its own current
+    local trading day -- the figure the portfolio-wide cap is measured
+    against.
+
+    Each station is summed against ITS OWN config.local_today(): the
+    registry spans UTC+5 to UTC+9, so there is no single "today" to sum
+    over, and using one station's date would either miss a group that has
+    already rolled over or double-count one that hasn't.
+
+    Returns None if ANY station's exposure could not be read. Same
+    fail-closed rule as station_day_exposure_usd(): an unknown portion of
+    the portfolio's spend means the total is unknown, and an unknown
+    total must not be treated as a small one.
+
+    Cost note: this is 2 storage reads per registered station, but it
+    only runs on cycles that actually produced candidates clearing the EV
+    screen -- not on every scan.
+    """
+    total = 0.0
+    for icao in config.STATIONS:
+        station_total = station_day_exposure_usd(
+            icao, config.local_today(icao), is_paper=is_paper,
+        )
+        if station_total is None:
+            return None
+        total += station_total
+    return total
+
+
 def apply_portfolio_budget(
     decisions: List[EntryDecision],
     max_total_usd: float = None,
     existing_exposure_usd: float = 0.0,
+    max_portfolio_usd: float = None,
+    portfolio_exposure_usd: float = 0.0,
 ) -> List[EntryDecision]:
     """
     Caps the COMBINED size of all approved decisions (e.g. a YES leg on
@@ -505,6 +646,17 @@ def apply_portfolio_budget(
     single cycle in isolation (unit tests) keep the old behavior via the
     0.0 default.
 
+    portfolio_exposure_usd / max_portfolio_usd are the SAME arithmetic one
+    level up: dollars already deployed across every station today against
+    config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD (see
+    portfolio_day_exposure_usd). The per-station cap stopped meaning
+    anything the day the registry went from 2 stations to 13 -- 13 x $250
+    quietly authorizes $3,250/day against a $1,000 bankroll, and these
+    stations' errors are CORRELATED (shared placeholder normals, shared
+    fallback spreads), so the "diversification" that might excuse it does
+    not exist. Whichever budget binds tighter wins; the defaults leave
+    single-station behaviour unchanged.
+
     Scales every approved leg down PROPORTIONALLY if the combined total
     exceeds the remaining budget, preserving the relative sizing the
     Kelly/depth logic already decided rather than arbitrarily keeping
@@ -512,14 +664,32 @@ def apply_portfolio_budget(
     approved leg is rejected outright.
     """
     max_total_usd = max_total_usd if max_total_usd is not None else config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD
-    remaining_usd = max_total_usd - existing_exposure_usd
+    max_portfolio_usd = (
+        max_portfolio_usd if max_portfolio_usd is not None
+        else config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD
+    )
+
+    station_remaining_usd = max_total_usd - existing_exposure_usd
+    portfolio_remaining_usd = max_portfolio_usd - portfolio_exposure_usd
+
+    # The tighter of the two caps is the real budget this cycle. Reported
+    # by name so a log line says which ceiling actually stopped the trade
+    # -- "the station is full" and "the book is full" call for different
+    # responses from whoever reads the journal.
+    if station_remaining_usd <= portfolio_remaining_usd:
+        remaining_usd = station_remaining_usd
+        binding_label, binding_spent, binding_cap = "station/day", existing_exposure_usd, max_total_usd
+    else:
+        remaining_usd = portfolio_remaining_usd
+        binding_label, binding_spent, binding_cap = "portfolio/day", portfolio_exposure_usd, max_portfolio_usd
+
     approved = [d for d in decisions if d.approved]
     total_requested = sum(d.recommended_size_usd for d in approved)
 
     if approved and remaining_usd <= 0:
         print(
-            f"[entry_manager] station/day budget exhausted: ${existing_exposure_usd:.2f} already deployed "
-            f"against a ${max_total_usd:.2f} budget -- rejecting all {len(approved)} approved leg(s) this cycle."
+            f"[entry_manager] {binding_label} budget exhausted: ${binding_spent:.2f} already deployed "
+            f"against a ${binding_cap:.2f} budget -- rejecting all {len(approved)} approved leg(s) this cycle."
         )
         result = []
         for d in decisions:
@@ -528,8 +698,8 @@ def apply_portfolio_budget(
                     **{**d.__dict__,
                        "approved": False,
                        "recommended_size_usd": 0.0,
-                       "reason": d.reason + f" [rejected: station/day budget exhausted "
-                                            f"(${existing_exposure_usd:.2f} of ${max_total_usd:.2f} already deployed)]"}
+                       "reason": d.reason + f" [rejected: {binding_label} budget exhausted "
+                                            f"(${binding_spent:.2f} of ${binding_cap:.2f} already deployed)]"}
                 ))
             else:
                 result.append(d)
@@ -540,9 +710,9 @@ def apply_portfolio_budget(
 
     scale = remaining_usd / total_requested
     print(
-        f"[entry_manager] portfolio budget exceeded: {len(approved)} approved leg(s) "
+        f"[entry_manager] {binding_label} budget exceeded: {len(approved)} approved leg(s) "
         f"requesting ${total_requested:.2f} total, remaining budget is ${remaining_usd:.2f} "
-        f"(${existing_exposure_usd:.2f} of ${max_total_usd:.2f} already deployed) -- "
+        f"(${binding_spent:.2f} of ${binding_cap:.2f} already deployed) -- "
         f"scaling all approved legs by {scale:.2%}."
     )
 
@@ -569,29 +739,64 @@ def decide_portfolio_entries(
     decide_entries() directly when evaluating multiple buckets/sides
     together in one cycle (which is the normal case, since ev_engine
     typically surfaces several candidates at once). Runs, in order:
+      0. the collection-first gate -- a station without
+         config.MIN_RESOLUTION_OBS_BEFORE_ENTRY settlement-grade
+         observations opens NOTHING, whatever the EV table says (see
+         collection_only_reason). Placed before sizing because it is a
+         property of the STATION, not of any one candidate: no amount of
+         trading smaller fixes an unmeasured bias.
       1. decide_entries() -- per-leg Kelly/depth/maturity sizing (unchanged)
       2. veto_same_bucket_conflicts() -- kill any same-bucket YES+NO pair
       3. apply_portfolio_budget() -- scale down if the combined total
          exceeds what REMAINS of the shared per-station-per-day budget
-         after earlier cycles' entries (fail-closed if that can't be read)
+         after earlier cycles' entries, or of the portfolio-wide daily
+         budget across all 13 stations (fail-closed if either can't be read)
     """
+    if not ev_results:
+        return []
+
+    station_icao = ev_results[0].station_icao
+    candidate_is_paper = executor.EXECUTION_MODE.get(station_icao, "manual_review") == "paper"
+
+    # --- Stage 0: collection-first gate ----------------------------------
+    gate_reason = collection_only_reason(station_icao, resolution_obs_count(station_icao))
+    if gate_reason is not None:
+        # Logged once per station/day: a brand-new station trips this on
+        # every cycle for days, and the repeat lines would bury real events.
+        log_key = (station_icao, ev_results[0].target_date)
+        if log_key not in _collection_only_logged:
+            _collection_only_logged.add(log_key)
+            print(
+                f"[entry_manager] {gate_reason} "
+                f"({len(ev_results)} candidate(s) this cycle get no entry. Further collection-only "
+                f"notices for this station today will not be logged.)"
+            )
+        return [
+            collection_only_decision(result, token_id, gate_reason)
+            for result, token_id in candidates_with_token_ids(ev_results, token_map)
+        ]
+
     decisions = decide_entries(ev_results, token_map, min_net_ev=min_net_ev)
     decisions = veto_same_bucket_conflicts(decisions)
 
-    existing_usd = 0.0
-    if ev_results:
-        station_icao = ev_results[0].station_icao
-        candidate_is_paper = executor.EXECUTION_MODE.get(station_icao, "manual_review") == "paper"
-        existing_usd = station_day_exposure_usd(
-            station_icao, ev_results[0].target_date, is_paper=candidate_is_paper,
-        )
-        if existing_usd is None:
-            # Same fail-closed stance as the per-bucket cap: unknown spend
-            # means unknown remaining budget -- treat it as exhausted
-            # rather than as a fresh budget.
-            existing_usd = config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD
+    existing_usd = station_day_exposure_usd(
+        station_icao, ev_results[0].target_date, is_paper=candidate_is_paper,
+    )
+    if existing_usd is None:
+        # Same fail-closed stance as the per-bucket cap: unknown spend
+        # means unknown remaining budget -- treat it as exhausted
+        # rather than as a fresh budget.
+        existing_usd = config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD
 
-    decisions = apply_portfolio_budget(decisions, existing_exposure_usd=existing_usd)
+    portfolio_usd = portfolio_day_exposure_usd(is_paper=candidate_is_paper)
+    if portfolio_usd is None:
+        portfolio_usd = config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD
+
+    decisions = apply_portfolio_budget(
+        decisions,
+        existing_exposure_usd=existing_usd,
+        portfolio_exposure_usd=portfolio_usd,
+    )
     return decisions
 
 

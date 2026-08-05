@@ -165,7 +165,11 @@ def check_and_exit_positions(station_icao: Optional[str] = None) -> List[ExitDec
         # A bucket whose date has passed is resolved by definition, whatever
         # the book still prints -- a stale but plausible last-traded quote
         # would otherwise never trip the extreme-price check at all.
-        is_past_dated = position.target_date < config.local_today()
+        # "Passed" is measured on the POSITION'S OWN market day: Tokyo's
+        # date rolls over an hour before Singapore's and four hours before
+        # Karachi's, and a UTC+8 "today" would call a Karachi position
+        # past-dated while its market is still trading.
+        is_past_dated = position.target_date < _local_today_for(position)
 
         if is_extreme or is_big_move or is_past_dated:
             # None of these is acted on off a single quote. Confirm the
@@ -248,7 +252,16 @@ def check_and_exit_positions(station_icao: Optional[str] = None) -> List[ExitDec
             storage.update_high_water_mark(position.position_id, new_hwm)
             position.high_water_mark = new_hwm
 
-        decision = risk_manager.evaluate_exit(position, current_price)
+        # local_hour is passed EXPLICITLY, from this position's own station
+        # offset. risk_manager._local_hour()'s default is UTC+8 and stays
+        # that way (a station-agnostic fallback the parity tests pin), so
+        # leaving this argument off would apply Singapore's edge-decay
+        # tightening hour to Tokyo and Karachi -- an hour early for +9, three
+        # hours late for +5. Fixing the default alone would have been a
+        # no-op precisely because this call site never passed one.
+        decision = risk_manager.evaluate_exit(
+            position, current_price, local_hour=_local_hour_for(position),
+        )
         decisions.append(decision)
 
         if decision.should_exit:
@@ -256,6 +269,37 @@ def check_and_exit_positions(station_icao: Optional[str] = None) -> List[ExitDec
             _forget_position(position.position_id)
 
     return decisions
+
+
+def _station_for(position: Position):
+    """
+    This position's StationConfig, or None if its station is no longer
+    registered. Returning None rather than raising is deliberate: the
+    exit loop runs over every open position, and one orphaned row must
+    not take down monitoring for all the others -- that would strand
+    real money behind a KeyError.
+    """
+    try:
+        return config.get_station(position.station_icao)
+    except KeyError as exc:
+        print(f"[position_manager] {position.position_id}: {exc} -- falling back to the default UTC+8 clock.")
+        return None
+
+
+def _local_today_for(position: Position) -> date:
+    """Today's date in the position's own market timezone (see _station_for for the fallback)."""
+    return config.local_today(_station_for(position))
+
+
+def _local_hour_for(position: Position) -> int:
+    """
+    Current hour (0-23) in the position's own market timezone -- what
+    risk_manager's edge-decay tightening must be evaluated against, since
+    "10:00 local" is a different instant in Tokyo, Singapore and Karachi.
+    """
+    station = _station_for(position)
+    offset = station.utc_offset_hours if station is not None else config.LOCAL_UTC_OFFSET_HOURS
+    return (datetime.now(timezone.utc).hour + offset) % 24
 
 
 def _is_extreme(price: float) -> bool:
@@ -308,8 +352,14 @@ def _market_reported_closed(position: Position) -> Optional[bool]:
         station,
         position.target_date,
         bucket_c=position.bucket_c,
-        bucket_min=config.BUCKET_MIN_C,
-        bucket_max=config.BUCKET_MAX_C,
+        # The station's OWN cross-check bounds, not the frozen module
+        # globals: these only feed parse_bucket_label's last-resort
+        # edge-label fallback (every real label carries its own degree
+        # number), but pointing a Beijing lookup at Singapore's old 25-35
+        # window is the kind of leftover that eventually decides
+        # something. Nothing here should reference the globals any more.
+        bucket_min=station.bucket_min_c,
+        bucket_max=station.bucket_max_c,
     )
     if state is None:
         print(

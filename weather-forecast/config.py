@@ -22,41 +22,60 @@ None besides models.py (standard library otherwise).
 
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional, Union
 
 from models import StationConfig
 
 # --- Trading-day clock ----------------------------------------------------
-# Both registered stations (and the markets they trade) live in UTC+8
-# (SGT/MYT). The deployment box runs on UTC, where date.today() is still
-# YESTERDAY for the first eight hours of the local day -- including the
-# entire 05:00-08:00 primary entry window. Every forecast fetched in that
-# window was being labeled with the previous day's date, and the trading
-# cycle was calibrating for (and discovering the market of) a day that had
-# already ended. Any code that needs "today" in the trading sense MUST use
-# local_today(), never date.today().
+# Every station's market day is LOCAL to that station. The deployment box
+# runs on UTC, where date.today() is still YESTERDAY for the first hours of
+# the local day -- including the entire 05:00-08:00 primary entry window.
+# Every forecast fetched in that window was being labeled with the previous
+# day's date, and the trading cycle was calibrating for (and discovering the
+# market of) a day that had already ended. Any code that needs "today" in
+# the trading sense MUST use local_today(), never date.today() -- and any
+# code that KNOWS which station it is working for must pass that station,
+# because the registry now spans UTC+5 (Karachi) through UTC+9 (Japan/Korea).
+# The zero-arg form keeps the legacy UTC+8 behaviour for station-agnostic
+# callers and old tests.
 LOCAL_UTC_OFFSET_HOURS = 8
 
 
-def local_today() -> date:
-    """The current calendar date in the market's timezone (UTC+8)."""
-    return (datetime.now(timezone.utc) + timedelta(hours=LOCAL_UTC_OFFSET_HOURS)).date()
+def local_today(station: Optional[Union[str, StationConfig]] = None) -> date:
+    """
+    The current calendar date in a station's market timezone. Accepts a
+    StationConfig, an ICAO string, or None (legacy UTC+8 default -- only
+    for genuinely station-agnostic contexts).
+    """
+    if station is None:
+        offset = LOCAL_UTC_OFFSET_HOURS
+    elif isinstance(station, str):
+        offset = get_station(station).utc_offset_hours
+    else:
+        offset = station.utc_offset_hours
+    return (datetime.now(timezone.utc) + timedelta(hours=offset)).date()
 
 
 # --- Observation source ranking -------------------------------------------
-# Polymarket settles these markets on Wunderground's station history, which
-# is the airport METAR record. clients/metar_client.py ingests exactly that
-# (source below), so when several sources report the same day, settlement-
-# grade truth must win: METAR first, then any other fetched reading (e.g.
-# the Open-Meteo analysis backfill, "openmeteo_recent_actual"), with the
+# Most markets settle on Wunderground's station history, which is the
+# airport METAR record ("metar_daily_max", ingested by clients/metar_client
+# .py) -- but not all: Hong Kong settles on the HK Observatory's climate
+# extract ("hko_daily_max"). Settlement-grade truth for THE STATION AT HAND
+# must win, so ranking is parameterized by the station's own
+# resolution_grade_source: that source first, then any other fetched reading
+# (e.g. the Open-Meteo analysis backfill, or a proxy METAR), with the
 # hand-maintained seed constants last. Used by resolution picking in the
 # backtest AND by dedup before calibration blending -- two rows for one day
 # would otherwise double-count it in the observed mean.
 RESOLUTION_GRADE_OBSERVATION_SOURCE = "metar_daily_max"
 
 
-def observation_source_rank(source: str) -> tuple:
+def observation_source_rank(
+    source: str,
+    resolution_grade_source: str = RESOLUTION_GRADE_OBSERVATION_SOURCE,
+) -> tuple:
     """Sort key: lower ranks win. Deterministic across ties via the name."""
-    if source == RESOLUTION_GRADE_OBSERVATION_SOURCE:
+    if source == resolution_grade_source:
         return (0, source)
     if source == "seed_data":
         return (2, source)
@@ -73,6 +92,12 @@ _SEA_MONSOON_PHASE_BY_MONTH = {
 }
 
 # --- Station registry -----------------------------------------------------
+# Every Asian city with a live Polymarket "highest temperature" market as of
+# 2026-08-05, verified against the Gamma API (event date 2026-08-06). Each
+# entry's wunderground_slug, polymarket_city_slug, and bucket bounds were
+# read from that city's real event; bounds DRIFT seasonally (see the
+# bucket_min_c note on models.StationConfig), so the live token map remains
+# authoritative on the trading path.
 STATIONS = {
     "WSSS": StationConfig(
         icao="WSSS",
@@ -94,6 +119,11 @@ STATIONS = {
             ("2026-07-10", 32.9), ("2026-07-11", 31.5), ("2026-07-12", 30.7),
             ("2026-07-13", 32.0), ("2026-07-14", 32.7),
         ],
+        # Was 25/35 ("confirmed" July 2026); the live August event runs 27-37.
+        # Polymarket re-centers the window seasonally -- these are cross-checks,
+        # the discovered token map decides at trade time.
+        bucket_min_c=27,
+        bucket_max_c=37,
     ),
     "WMKK": StationConfig(
         icao="WMKK",
@@ -110,6 +140,212 @@ STATIONS = {
         polymarket_city_slug="kuala-lumpur",
         monsoon_phase_by_month=_SEA_MONSOON_PHASE_BY_MONTH,
         seed_observations=[],  # not yet populated -- see clients/official/met_malaysia.py
+        bucket_min_c=27,  # live August 2026 event range (same drift caveat as WSSS)
+        bucket_max_c=37,
+    ),
+    # --- Northeast Asia (UTC+9) -------------------------------------------
+    # monsoon_phase_by_month deliberately {} for every station below: the
+    # field feeds no calculation (it only annotates CalibratedEstimate), and
+    # inventing regional season maps would manufacture authority the data
+    # doesn't have. "unknown" is the honest value until someone does the work.
+    "RJTT": StationConfig(
+        icao="RJTT",
+        display_name="Tokyo Haneda Airport",
+        country="Japan",
+        lat=35.5533,
+        lon=139.7811,
+        wunderground_slug="jp/tokyo/RJTT",
+        long_term_normal_max_c=31.3,  # placeholder (Tokyo Aug 1991-2020 normal) --
+                                       # confirm against JMA's published normals for
+                                       # Haneda itself before trusting for calibration
+        official_client_key="wwis",
+        polymarket_city_slug="tokyo",
+        utc_offset_hours=9,
+        bucket_min_c=26,  # live 2026-08-06 event: 26 "or below" .. 36 "or higher"
+        bucket_max_c=36,
+        wwis_city_name="Tokyo",
+    ),
+    "RKSI": StationConfig(
+        icao="RKSI",
+        display_name="Incheon International Airport",
+        country="South Korea",
+        lat=37.4691,
+        lon=126.4505,
+        wunderground_slug="kr/incheon/RKSI",
+        long_term_normal_max_c=29.1,  # placeholder (Incheon Aug normal) -- confirm
+                                       # against KMA's published normals before trusting
+        official_client_key="wwis",
+        polymarket_city_slug="seoul",  # Polymarket titles this "Seoul (Incheon)"
+        utc_offset_hours=9,
+        bucket_min_c=27,  # live 2026-08-06 event: 27..37
+        bucket_max_c=37,
+        # WWIS lists "Seoul", not Incheon -- the city forecast is a PROXY for
+        # the airport station ~50 km west on the coast. Documented gap, not a
+        # silent equivalence; Open-Meteo runs at the airport's own lat/lon.
+        wwis_city_name="Seoul",
+    ),
+    "RKPK": StationConfig(
+        icao="RKPK",
+        display_name="Busan Gimhae International Airport",
+        country="South Korea",
+        lat=35.1795,
+        lon=128.9382,
+        wunderground_slug="kr/busan/RKPK",
+        long_term_normal_max_c=30.8,  # placeholder (Busan Aug normal) -- confirm
+                                       # against KMA's published normals before trusting
+        official_client_key="wwis",
+        polymarket_city_slug="busan",
+        utc_offset_hours=9,
+        bucket_min_c=30,  # live 2026-08-06 event: 30..40
+        bucket_max_c=40,
+        wwis_city_name="Busan",
+    ),
+    # --- Greater China + Southeast Asia (UTC+8) ---------------------------
+    "VHHH": StationConfig(
+        icao="VHHH",
+        # Deliberately the OBSERVATORY, not the airport: this market settles
+        # on the HK Observatory's own climate extract ("Absolute Daily Max",
+        # 0.1 C precision), NOT on any Wunderground airport page. lat/lon
+        # therefore point at the Observatory (urban Tsim Sha Tsui) so every
+        # forecast targets the settlement site; the VHHH ICAO is kept only as
+        # the registry key and for reference. The airport (Chek Lap Kok,
+        # marine-exposed) reads systematically cooler than the Observatory's
+        # heat island -- which is why metar_ingest_mode="skip": one biased
+        # proxy reading in the 60%-weight observation blend shifts the
+        # central estimate by whole buckets.
+        display_name="Hong Kong Observatory",
+        country="Hong Kong",
+        lat=22.3020,
+        lon=114.1741,
+        wunderground_slug="hk/hong-kong/VHHH",  # proxy page only -- NOT the resolution source
+        long_term_normal_max_c=31.6,  # placeholder (HKO Aug 1991-2020 normal) --
+                                       # confirm against HKO's published normals
+        official_client_key="hko",
+        polymarket_city_slug="hong-kong",
+        bucket_min_c=27,  # live 2026-08-06 event: 27..37
+        bucket_max_c=37,
+        # 0.1 C settlement precision + "range that contains" resolution text
+        # means floor semantics, not whole-degree rounding: 33.9 C is bucket
+        # 33, never 34.
+        bucket_edge_mode="floor",
+        resolution_grade_source="hko_daily_max",
+        metar_ingest_mode="skip",
+    ),
+    "RPLL": StationConfig(
+        icao="RPLL",
+        display_name="Manila Ninoy Aquino International Airport",
+        country="Philippines",
+        lat=14.5086,
+        lon=121.0198,
+        wunderground_slug="ph/manila/RPLL",
+        long_term_normal_max_c=30.9,  # placeholder (Manila Aug normal) -- confirm
+                                       # against PAGASA's published normals
+        official_client_key="wwis",
+        polymarket_city_slug="manila",
+        bucket_min_c=25,  # live 2026-08-06 event: 25..35
+        bucket_max_c=35,
+        wwis_city_name="Metro Manila",  # WWIS's exact listing (not "Manila")
+    ),
+    "RCSS": StationConfig(
+        icao="RCSS",
+        display_name="Taipei Songshan Airport",
+        country="Taiwan",
+        lat=25.0694,
+        lon=121.5525,
+        wunderground_slug="tw/taipei/RCSS",
+        long_term_normal_max_c=34.3,  # placeholder (Taipei Aug normal) -- confirm
+                                       # against CWA's published normals
+        official_client_key="wwis",
+        polymarket_city_slug="taipei",
+        bucket_min_c=28,  # live 2026-08-06 event: 28..38
+        bucket_max_c=38,
+        # Taiwan is absent from the WMO WWIS index (UN service), so there is
+        # no official-source city to name -- the wwis client returns None
+        # honestly and calibration runs on Open-Meteo + METAR alone. A CWA
+        # (cwa.gov.tw) adapter is the documented next step if Taipei earns
+        # real sizing.
+        wwis_city_name="",
+    ),
+    "ZSPD": StationConfig(
+        icao="ZSPD",
+        display_name="Shanghai Pudong International Airport",
+        country="China",
+        lat=31.1443,
+        lon=121.8083,
+        wunderground_slug="cn/shanghai/ZSPD",
+        long_term_normal_max_c=32.2,  # placeholder (Shanghai Aug normal; Pudong's
+                                       # coastal site may run cooler) -- confirm
+        official_client_key="wwis",
+        polymarket_city_slug="shanghai",
+        bucket_min_c=27,  # live 2026-08-06 event: 27..37
+        bucket_max_c=37,
+        wwis_city_name="Shanghai",
+    ),
+    "ZBAA": StationConfig(
+        icao="ZBAA",
+        display_name="Beijing Capital International Airport",
+        country="China",
+        lat=40.0801,
+        lon=116.5846,
+        wunderground_slug="cn/beijing/ZBAA",
+        long_term_normal_max_c=30.3,  # placeholder (Beijing Aug normal) -- confirm
+        official_client_key="wwis",
+        polymarket_city_slug="beijing",
+        bucket_min_c=30,  # live 2026-08-06 event: 30..40
+        bucket_max_c=40,
+        wwis_city_name="Beijing",
+    ),
+    "ZGGG": StationConfig(
+        icao="ZGGG",
+        display_name="Guangzhou Baiyun International Airport",
+        country="China",
+        lat=23.3924,
+        lon=113.2988,
+        wunderground_slug="cn/guangzhou/ZGGG",
+        long_term_normal_max_c=33.4,  # placeholder (Guangzhou Aug normal) -- confirm
+        official_client_key="wwis",
+        polymarket_city_slug="guangzhou",
+        bucket_min_c=29,  # live 2026-08-06 event: 29..39
+        bucket_max_c=39,
+        wwis_city_name="Guangzhou",
+    ),
+    "ZGSZ": StationConfig(
+        icao="ZGSZ",
+        display_name="Shenzhen Bao'an International Airport",
+        country="China",
+        lat=22.6393,
+        lon=113.8108,
+        wunderground_slug="cn/shenzhen/ZGSZ",
+        long_term_normal_max_c=32.5,  # placeholder (Shenzhen Aug normal) -- confirm
+        official_client_key="wwis",
+        polymarket_city_slug="shenzhen",
+        bucket_min_c=28,  # live 2026-08-06 event: 28..38
+        bucket_max_c=38,
+        wwis_city_name="Shenzhen",
+    ),
+    # --- South Asia (UTC+5) -----------------------------------------------
+    "OPKC": StationConfig(
+        icao="OPKC",
+        display_name="Karachi Jinnah International Airport",
+        country="Pakistan",
+        lat=24.9065,
+        lon=67.1608,
+        wunderground_slug="pk/karachi/OPKC",
+        long_term_normal_max_c=31.7,  # placeholder (Karachi Aug monsoon normal) -- confirm
+        official_client_key="wwis",
+        polymarket_city_slug="karachi",
+        utc_offset_hours=5,
+        bucket_min_c=27,  # live 2026-08-06 event: 27..37
+        bucket_max_c=37,
+        wwis_city_name="Karachi",
+        # The market's own resolution text names "Masroor Airbase Station"
+        # (OPMR, ~15 km west across Karachi's sea-breeze gradient) while
+        # linking Wunderground's OPKC page. Until someone confirms which
+        # record Wunderground actually displays there, OPKC METAR is ingested
+        # as PROXY grade only: usable as a rank-1 calibration input, never as
+        # settlement truth -- so the backtest reports resolution-pending
+        # instead of settling Karachi P&L on a maybe-wrong station.
+        metar_ingest_mode="proxy",
     ),
 }
 
@@ -134,16 +370,19 @@ OPEN_METEO_GFS_URL = "https://api.open-meteo.com/v1/gfs"
 OPEN_METEO_ENSEMBLE_URL = "https://ensemble-api.open-meteo.com/v1/ensemble"
 
 # --- Polymarket-style resolution buckets --------------------------------
-# CONFIRMED against real Polymarket data (multiple live pulls across this
-# project): Singapore/KL temperature-bracket markets consistently list 11
-# outcomes -- "25 or below", 26 through 34 individually, then "35 or above".
-# BUCKET_MIN_C/MAX_C represent the two EDGE buckets themselves (25 and 35),
-# not the lowest/highest explicit numbers -- range(BUCKET_MIN_C, BUCKET_MAX_C+1)
-# must yield exactly 11 values to match the real market structure.
-# Previously set to 27/36 (10 buckets, shifted and wrong on both ends) --
-# corrected after rechecking against live order-book data.
+# Every city's temperature event lists 11 outcomes -- "X or below", nine
+# individual degrees, "Y or higher" -- but X/Y are PER-CITY and drift
+# seasonally (verified 2026-08-05: Manila 25-35, Beijing 30-40, and
+# Singapore itself moved 25-35 -> 27-37 since July). Per-station cross-check
+# bounds live on StationConfig.bucket_min_c/max_c; the trading path derives
+# the authoritative bounds from each cycle's discovered token map. These two
+# globals remain ONLY as legacy defaults for station-agnostic signatures and
+# old tests -- do not add new call sites.
 BUCKET_MIN_C = 25
 BUCKET_MAX_C = 35
+# range(min, max+1) must yield exactly this many values for a well-formed
+# event; discovery vetoes a station-day whose parsed map violates it.
+EXPECTED_BUCKET_COUNT = 11
 
 # --- Local storage --------------------------------------------------
 DATA_DIR = Path(__file__).parent / "data"
@@ -244,9 +483,12 @@ MIN_EXIT_PRICE = 0.03
 MAX_SINGLE_CYCLE_MOVE = 0.5
 
 # --- Scheduler windows ----------------------------------------------------
-# All times are LOCAL (SGT/MYT, UTC+8 -- both registered stations share this
-# offset). Defined as (start_hour, start_min, end_hour, end_min, interval_min,
-# mode, min_net_ev, description).
+# All times are LOCAL to each station's own market day. The registry spans
+# UTC+5 (Karachi) through UTC+9 (Japan/Korea), so scheduler.py groups
+# stations by utc_offset_hours and evaluates these windows against each
+# group's OWN local clock -- Tokyo's 05:00 primary window opens an hour
+# before Singapore's. Defined as (start_hour, start_min, end_hour, end_min,
+# interval_min, mode, min_net_ev, description).
 #
 # Hard floor: nothing runs before 04:00 local, by explicit design decision --
 # not a technical limitation, a deliberate choice. The 23:00-ish "market
@@ -347,14 +589,38 @@ MAX_PLAUSIBLE_RAW_EDGE = 0.25
 MAX_OPEN_POSITIONS_PER_BUCKET = 1
 
 # Station maturity gating, per the edge analysis: WSSS has a confirmed,
-# measured bias-correction edge (14+ days of observed history). WMKK does
-# not yet -- any WMKK trade is exploratory until it earns the same status,
-# so it's sized down hard rather than treated as equivalent-confidence.
+# measured bias-correction edge (14+ days of observed history). No other
+# station has earned that status -- every trade there is exploratory and
+# sized down hard rather than treated as equivalent-confidence.
+# entry_manager defaults unlisted stations to "exploratory" anyway; the
+# explicit entries below exist so a promotion is a deliberate, greppable
+# one-line edit, never an accident of a missing key.
 STATION_MATURITY = {
     "WSSS": "mature",
     "WMKK": "exploratory",
+    "RJTT": "exploratory",
+    "RKSI": "exploratory",
+    "RKPK": "exploratory",
+    "VHHH": "exploratory",
+    "RPLL": "exploratory",
+    "RCSS": "exploratory",
+    "ZSPD": "exploratory",
+    "ZBAA": "exploratory",
+    "ZGGG": "exploratory",
+    "ZGSZ": "exploratory",
+    "OPKC": "exploratory",
 }
 EXPLORATORY_SIZE_MULTIPLIER = 0.20  # exploratory stations get 20% of what mature-station sizing would suggest
+
+# A station may not open ANY position until this many stored observations
+# exist whose source is its own resolution_grade_source. A brand-new station
+# has an unmeasured model bias, a placeholder climatological normal, and
+# (usually) spread_source="fallback_default" -- a 2C-wrong placeholder
+# produces "edges" squarely inside the tradeable band, and every one of
+# those trades is wrong. Collection costs nothing; wrong entries don't.
+# New stations therefore start collection-only automatically and graduate
+# by simply existing for a few days.
+MIN_RESOLUTION_OBS_BEFORE_ENTRY = 5
 
 # Shared budget across ALL approved legs for one station on one day -- e.g.
 # a YES leg on the top bucket plus NO legs hedging tail buckets, opened
@@ -364,3 +630,12 @@ EXPLORATORY_SIZE_MULTIPLIER = 0.20  # exploratory stations get 20% of what matur
 # MAX_POSITION_USD to allow a real multi-leg basket, but still capped well
 # below "every leg at max size simultaneously."
 MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD = 250.0
+
+# Hard ceiling across EVERY station for one day. The per-station cap alone
+# stopped meaning anything the day the registry grew from 2 stations to 13:
+# 13 x $250 would quietly authorize $3,250/day of exposure against a $1,000
+# bankroll -- and the new stations' edges are CORRELATED wrong-way bets
+# (shared placeholder normals, shared fallback spreads), not independent
+# ones, so diversification arguments don't apply. Sized at 40% of bankroll:
+# room for a couple of real multi-leg baskets, never most of the roll.
+MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD = 400.0

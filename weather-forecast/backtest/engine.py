@@ -132,6 +132,13 @@ OPEN_METEO_SOURCES = ("open_meteo_ecmwf", "open_meteo_gfs")
 OFFICIAL_SOURCE_BY_CLIENT_KEY = {
     "nea": "nea_24hr",
     "met_malaysia": "wwis_met_malaysia",
+    # The 11 new Asia-expansion stations register these two client keys
+    # (clients/official/wwis.py, clients/official/hko.py). A station whose
+    # key is missing here silently drops its official forecast out of
+    # _forecast_sources() -- the replay would run without it and nobody
+    # would be told, rather than raising or logging the gap.
+    "wwis": "wwis",
+    "hko": "hko_fnd",
 }
 
 # How far back calibration looks, mirroring the live call sites:
@@ -329,17 +336,34 @@ def _seed_observations(station) -> List[ObservedReading]:
     return readings
 
 
-def _pick_observation(candidates: List[ObservedReading]) -> Optional[ObservedReading]:
+def _pick_observation(candidates: List[ObservedReading], station) -> Optional[ObservedReading]:
     """
     One observation from possibly several for the same date, by
-    config.observation_source_rank: METAR settlement-grade first (the
-    same record Polymarket's Wunderground source displays), then any
-    other fetched reading, seed constants last. Deterministic by
+    config.observation_source_rank(source, station.resolution_grade_source):
+    the station's OWN settlement-grade source first (METAR for most
+    stations, but "hko_daily_max" for Hong Kong -- see StationConfig),
+    then any other fetched reading, seed constants last. Deterministic by
     construction -- resolution must never depend on row order.
+
+    If the best-ranked candidate's source is NOT the station's
+    resolution_grade_source, return None even though a candidate exists.
+    Callers then take the existing n_resolution_pending path instead of
+    settling (or Brier-scoring) a day against a lower-tier reading -- e.g.
+    Karachi's proxy-grade METAR (identity unconfirmed, see config.py) or
+    Hong Kong's skipped/absent airport METAR. This is what keeps
+    Hong Kong/Karachi honest rather than quietly settling on a maybe-wrong
+    station's numbers.
     """
     if not candidates:
         return None
-    return sorted(candidates, key=lambda o: config.observation_source_rank(o.source))[0]
+    ranked = sorted(
+        candidates,
+        key=lambda o: config.observation_source_rank(o.source, station.resolution_grade_source),
+    )
+    best = ranked[0]
+    if best.source != station.resolution_grade_source:
+        return None
+    return best
 
 
 # --------------------------------------------------------------------------
@@ -371,6 +395,28 @@ def run(
 
     station = config.get_station(station_icao)
     station_icao = station.icao
+
+    # C5 guard. backtest/simclock.py's LOCAL_TZ is a single fixed
+    # timezone (timezone(timedelta(hours=settings.LOCAL_UTC_OFFSET_HOURS)))
+    # shared by EVERY simulated instant in a run -- it drives window replay
+    # (simclock.generate_ticks -> scheduler.determine_window), edge-decay
+    # tightening (risk_manager.evaluate_exit's local_hour), and observation-
+    # visibility boundaries (resolution.observation_visible's local-date
+    # comparison). None of that is parameterized per-station yet (a
+    # deliberate, reviewed decision: guard now, thread a real per-station tz
+    # through simclock later -- not an oversight). Running a station whose
+    # utc_offset_hours does not match the clock therefore replays the
+    # entire trading thesis at the wrong local hour: RJTT (+9) an hour off,
+    # OPKC (+5) three hours off. Refuse outright rather than produce a
+    # result that looks complete but is silently mistimed.
+    if station.utc_offset_hours != settings.LOCAL_UTC_OFFSET_HOURS:
+        raise ValueError(
+            f"Station {station.icao} has utc_offset_hours={station.utc_offset_hours}, "
+            f"but backtest/simclock.py's LOCAL_TZ is fixed to "
+            f"settings.LOCAL_UTC_OFFSET_HOURS={settings.LOCAL_UTC_OFFSET_HOURS}. "
+            f"backtest/simclock.py's LOCAL_TZ must be parameterized per-station "
+            f"before this station can be backtested -- see design doc section C5."
+        )
 
     run_id = run_id or _make_run_id(
         station_icao, start_date, end_date, depth_regime, fee_rate_pct, bankroll_mode
@@ -628,6 +674,25 @@ def run(
             "SIM_DAY_START_HOUR_LOCAL": settings.SIM_DAY_START_HOUR_LOCAL,
             "MIN_DEPTH_COVERAGE": settings.MIN_DEPTH_COVERAGE,
         },
+        # The block above is a single global that every run has always
+        # recorded, regardless of which station it replayed -- fine when
+        # only WSSS/WMKK (both UTC+8) existed, but misleading now that the
+        # registry spans UTC+5..+9: a reader skimming
+        # backtest_settings.LOCAL_UTC_OFFSET_HOURS=8 could wrongly conclude
+        # THIS run traded at UTC+8. The run() guard above (C5) already
+        # refuses any station whose utc_offset_hours disagrees with that
+        # global, so today the two can never actually diverge -- but this
+        # section records the station's own values explicitly anyway, so
+        # the manifest stays honest on its own once simclock is
+        # parameterized per-station and the guard is lifted.
+        "station_config": {
+            "icao": station.icao,
+            "utc_offset_hours": station.utc_offset_hours,
+            "bucket_min_c": station.bucket_min_c,
+            "bucket_max_c": station.bucket_max_c,
+            "bucket_edge_mode": station.bucket_edge_mode,
+            "resolution_grade_source": station.resolution_grade_source,
+        },
         "gate_count": entry_sim.GATE_COUNT,
         "coverage": coverage,
     }
@@ -779,7 +844,20 @@ def _entry_pass(
         ensemble_members=None,  # no historical ensemble spread exists -- see manifest
     )
 
-    model_probs = {b.bucket_c: b.probability for b in probability.bucket_probabilities(estimate)}
+    # Station's own bucket bounds + edge mode (B4): the legacy
+    # config.BUCKET_MIN_C/MAX_C globals are Singapore/KL-era defaults and
+    # would compute probability mass over the wrong bucket range/intervals
+    # for every other station (and, per B1, over WSSS/WMKK's own stale
+    # cross-check bounds too now that the live event has drifted to 27-37).
+    model_probs = {
+        b.bucket_c: b.probability
+        for b in probability.bucket_probabilities(
+            estimate,
+            bucket_min=station.bucket_min_c,
+            bucket_max=station.bucket_max_c,
+            edge_mode=station.bucket_edge_mode,
+        )
+    }
 
     # --- EV table: ev_engine.compute_ev_table's arithmetic, verbatim -----
     # Buckets in sorted order and YES before NO, matching live's
@@ -869,6 +947,33 @@ def _entry_pass(
         if p.station_icao == station.icao and p.target_date == day
     )
 
+    # Portfolio-wide (ALL stations) same-day exposure, mirroring
+    # entry_manager.portfolio_day_exposure_usd() -- what makes
+    # config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD actually bind in a
+    # replay instead of only the per-station cap. station_icao=None so
+    # total_open_exposure sums every station's open positions, not just
+    # this one. A single-station run() only ever holds this one station's
+    # positions in `portfolio` anyway (see the C5 guard above), so this
+    # collapses to existing_exposure_usd in practice -- but it's computed
+    # honestly rather than assumed, so a future multi-station replay
+    # doesn't silently under-count the cap.
+    portfolio_exposure_usd = portfolio.total_open_exposure(None, day) + sum(
+        p.size_usd for p in portfolio.closed if p.target_date == day
+    )
+
+    # Point-in-time count of this station's OWN settlement-grade
+    # observations (D1/D2's resolution_grade_source), for the
+    # collection-first gate (F2). Reuses `observations` -- the same
+    # _visible_observations() list _entry_pass already built above for
+    # calibration -- rather than a fresh, wider query: that list is
+    # already scoped to what THIS simulated instant could legitimately
+    # know (no lookahead), which is exactly the count the live gate reads
+    # from storage as of "now". Counting anything broader would let a
+    # replay see observations its own sim clock hasn't reached yet.
+    resolution_obs_count = sum(
+        1 for o in observations if o.source == station.resolution_grade_source
+    )
+
     decisions = entry_sim.decide_portfolio_entries_sim(
         candidates=candidates,
         portfolio=portfolio,
@@ -877,6 +982,9 @@ def _entry_pass(
         min_net_ev=tick.min_net_ev,
         sizing_bankroll=portfolio.sizing_bankroll(),
         existing_exposure_usd=existing_exposure_usd,
+        portfolio_exposure_usd=portfolio_exposure_usd,
+        resolution_obs_count=resolution_obs_count,
+        enforce_collection_gate=True,
     )
     counters["n_decisions"] = int(counters["n_decisions"]) + len(decisions)
 
@@ -1022,12 +1130,19 @@ def _resolution_sweep(station, clock, portfolio, all_observations, counters, las
             if o.target_date == position.target_date
             and resolution.observation_visible(o.target_date, local_dt)
         ]
-        observation = _pick_observation(visible)
+        # station.resolution_grade_source-aware pick (D1/D2): if the best
+        # candidate isn't the station's own settlement-grade source, this
+        # returns None and the day falls through to n_resolution_pending
+        # instead of settling on a lower-tier reading -- see
+        # _pick_observation's docstring.
+        observation = _pick_observation(visible, station)
         if observation is None:
             counters["n_resolution_pending"] = int(counters["n_resolution_pending"]) + 1
             continue
 
-        winning_bucket = resolution.bucket_for_temp(observation.max_temp_c)
+        winning_bucket = resolution.bucket_for_temp(
+            observation.max_temp_c, station.bucket_min_c, station.bucket_max_c, station.bucket_edge_mode
+        )
         exit_price = resolution.resolution_exit_price(
             position.side, position.bucket_c, winning_bucket
         )

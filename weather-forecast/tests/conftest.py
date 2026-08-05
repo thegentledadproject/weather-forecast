@@ -229,15 +229,25 @@ def build_scenario(
     # --- observations ------------------------------------------------------
     # Stable recent history, then the two outcome days. D1 and D2 both land
     # in bucket 32, so D2's bucket-32 YES wins and its bucket-31 YES loses.
+    #
+    # Source is the STATION'S OWN resolution_grade_source (config.py), not an
+    # arbitrary "synthetic_actual" string: entry_manager's collection-first
+    # gate (config.MIN_RESOLUTION_OBS_BEFORE_ENTRY) and the backtest engine's
+    # _pick_observation() both key off observation_source_rank against that
+    # exact source string -- an observation under any other source neither
+    # counts toward graduating the gate nor settles a position. Using a
+    # made-up source would make every entry collection-only and nothing
+    # would ever resolve.
+    resolution_source = config.get_station(STATION_ICAO).resolution_grade_source
     for dom in range(1, 10):
         storage.save_observation(ObservedReading(
             station_icao=STATION_ICAO, target_date=date(2026, 8, dom),
-            max_temp_c=32.0, source="synthetic_actual",
+            max_temp_c=32.0, source=resolution_source,
         ))
     for day in (D1, D2):
         storage.save_observation(ObservedReading(
             station_icao=STATION_ICAO, target_date=day,
-            max_temp_c=32.0, source="synthetic_actual",
+            max_temp_c=32.0, source=resolution_source,
         ))
 
     # FUTURE OBSERVATIONS: dated after the window. Only resolution.
@@ -247,7 +257,7 @@ def build_scenario(
         storage.save_observation(ObservedReading(
             station_icao=STATION_ICAO, target_date=future_day,
             max_temp_c=32.0 + (POISON_SHIFT_C if poison_future else 0.0),
-            source="synthetic_actual",
+            source=resolution_source,
         ))
 
     return SyntheticScenario(

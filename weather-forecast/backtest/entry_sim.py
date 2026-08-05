@@ -24,7 +24,10 @@ seam explicit and testable.
 Reused verbatim from entry_manager (imported, never copied):
   - compute_kelly_fraction()
   - veto_same_bucket_conflicts()
-  - apply_portfolio_budget()
+  - apply_portfolio_budget()      (both the per-station and the
+                                   portfolio-wide daily caps live inside it)
+  - collection_only_reason()      (pure station-level gate)
+  - collection_only_decision()    (its EntryDecision shape)
 and from ev_engine:
   - best_opportunities()   (used by the engine, re-exported here for the
                             parity test's convenience)
@@ -92,6 +95,8 @@ from entry_manager import (
     compute_kelly_fraction,
     veto_same_bucket_conflicts,
     apply_portfolio_budget,
+    collection_only_reason,
+    collection_only_decision,
 )
 from ev_engine import best_opportunities  # noqa: F401  (re-exported for tests)
 
@@ -101,6 +106,12 @@ from ev_engine import best_opportunities  # noqa: F401  (re-exported for tests)
 # plus its six direct `return EntryDecision(...)` statements). An AST
 # census over the live function must agree with this number; if it does
 # not, a gate was added or removed upstream and this replica is stale.
+#
+# STILL 12 after the 2026-08-05 station expansion: the collection-first
+# gate added then is a STATION-level precondition, not a per-candidate
+# one, so it lives in decide_portfolio_entries()/_sim() beside the
+# portfolio budget rather than inside evaluate_entry(). Nothing was added
+# to or removed from the per-candidate sequence below.
 GATE_COUNT = 12
 
 
@@ -369,17 +380,35 @@ def decide_portfolio_entries_sim(
     sizing_bankroll: float,
     station_maturity: Optional[str] = None,
     existing_exposure_usd: float = 0.0,
+    portfolio_exposure_usd: float = 0.0,
+    resolution_obs_count: Optional[int] = None,
+    enforce_collection_gate: bool = False,
 ) -> List[EntryDecision]:
     """
-    Replica of entry_manager.decide_portfolio_entries(), in the same three
+    Replica of entry_manager.decide_portfolio_entries(), in the same
     stages and the same order:
 
+      0. the collection-first gate     (live function, reused -- see
+         enforce_collection_gate below)
       1. per-leg evaluate_entry_sim()   (replicated)
       2. veto_same_bucket_conflicts()   (live function, reused)
       3. apply_portfolio_budget()       (live function, reused, fed the
          dollars this station/day already spent -- the engine computes it
          from PortfolioState exactly as live computes it from storage via
-         entry_manager.station_day_exposure_usd())
+         entry_manager.station_day_exposure_usd() -- plus, through
+         portfolio_exposure_usd, the dollars spent across ALL stations
+         that day, which live reads via
+         entry_manager.portfolio_day_exposure_usd())
+
+    enforce_collection_gate is OFF by default, and deliberately explicit
+    rather than inferred from resolution_obs_count being None. Live reads
+    the count from storage as of NOW; a replay would need it as of the
+    SIMULATED instant, which only the engine can reconstruct. Defaulting
+    the gate on with an unknown count would fail closed and silently
+    return zero entries for every replay ever run -- a change that looks
+    like a strategy result rather than a missing input. Defaulting it off
+    keeps existing replays honest about what they model, and the engine
+    turns it on by passing the point-in-time count it reconstructed.
 
     candidates are (EVResult, token_id) pairs, already screened by
     ev_engine.best_opportunities() exactly as the live scheduler does.
@@ -399,6 +428,12 @@ def decide_portfolio_entries_sim(
     dropping candidates.
     """
     decisions: List[EntryDecision] = []
+
+    # --- Stage 0: collection-first gate (station-level, not per-candidate) ---
+    if enforce_collection_gate and candidates:
+        gate_reason = collection_only_reason(candidates[0][0].station_icao, resolution_obs_count)
+        if gate_reason is not None:
+            return [collection_only_decision(ev, token_id, gate_reason) for ev, token_id in candidates]
 
     for ev, token_id in candidates:
         snapshot = price_lookup(token_id)
@@ -432,5 +467,9 @@ def decide_portfolio_entries_sim(
         )
 
     decisions = veto_same_bucket_conflicts(decisions)
-    decisions = apply_portfolio_budget(decisions, existing_exposure_usd=existing_exposure_usd)
+    decisions = apply_portfolio_budget(
+        decisions,
+        existing_exposure_usd=existing_exposure_usd,
+        portfolio_exposure_usd=portfolio_exposure_usd,
+    )
     return decisions

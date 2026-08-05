@@ -44,7 +44,12 @@ def _fetch_daily_max(url: str, station: StationConfig, source_label: str, timeou
 
         dates = payload["daily"]["time"]
         maxes = payload["daily"]["temperature_2m_max"]
-        today_str = config.local_today().isoformat()
+        # timezone="auto" makes Open-Meteo return dates already in the
+        # STATION's own local calendar (per its lat/lon) -- indexing
+        # with the global UTC+8 local_today() would silently mismatch
+        # for +9 (Japan/Korea) and +5 (Karachi) stations for part of
+        # each day, losing the Tier-1 forecast exactly when it's needed.
+        today_str = config.local_today(station).isoformat()
 
         if today_str not in dates:
             return None
@@ -53,7 +58,7 @@ def _fetch_daily_max(url: str, station: StationConfig, source_label: str, timeou
         return PointForecast(
             station_icao=station.icao,
             source=source_label,
-            target_date=config.local_today(),
+            target_date=config.local_today(station),
             max_temp_c=float(maxes[idx]),
             fetched_at=_now_iso(),
         )

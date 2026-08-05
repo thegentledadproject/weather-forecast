@@ -12,7 +12,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import date, datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 PKG = "/home/ubuntu/weather-forecast/weather-forecast"
 OUT = "/var/www/html/index.html"
@@ -70,6 +70,12 @@ except Exception as exc:  # noqa: BLE001
     open_positions, closed_positions = [], []
     warnings.append(f"position read failed: {exc}")
 
+# Registry size, computed once and reused everywhere the page used to say
+# "both stations" or hardcode "WSSS & WMKK" -- the count (and every string
+# built from it) now tracks config.STATIONS instead of silently going stale
+# the next time a station is added or retired from the registry.
+station_count = len(config.STATIONS)
+
 if closed_n:
     try:
         import paper_trading_report as ptr  # noqa: E402
@@ -106,28 +112,92 @@ def _probe(name, url, ok_when=None, timeout=6):
         return {"name": name, "state": "down", "detail": html.escape(type(exc).__name__)}
 
 
+# WWIS (worldweather.wmo.int) numeric city ids for stations that use the
+# generic "wwis" official client. config.py deliberately only stores the
+# city NAME (wwis_city_name) -- that's all the live client needs -- so this
+# small lookup exists purely to let the live-feed probe below ping one real
+# WWIS city endpoint instead of the old hardcoded "city 82" (Kuala Lumpur),
+# which isn't even a wwis-client station (WMKK uses "met_malaysia"). Ids
+# verified live against worldweather.wmo.int 2026-08-05 (see the Asia
+# expansion design doc); a station whose city isn't listed here just means
+# the probe below falls through to the next wwis-client station instead.
+_WWIS_CITY_ID_BY_NAME = {
+    "Tokyo": 183, "Seoul": 231, "Busan": 336, "Hong Kong": 1,
+    "Metro Manila": 92, "Shanghai": 240, "Beijing": 237,
+    "Guangzhou": 241, "Shenzhen": 1854, "Karachi": 892,
+    "Kuala Lumpur": 82, "Singapore": 234,
+}
+
+
 def _run_probes():
     try:
         import market_discovery
 
-        wsss = config.get_station("WSSS")
-        slug = market_discovery.build_event_slug(wsss, date.today())
-        om = f"?latitude={wsss.lat}&longitude={wsss.lon}&daily=temperature_2m_max&timezone=auto&forecast_days=1"
-        return [
-            _probe("NEA (data.gov.sg)", "https://api.data.gov.sg/v1/environment/24-hour-weather-forecast"),
-            _probe("WWIS / MET Malaysia", "https://worldweather.wmo.int/en/json/82_en.json"),
+        # Cheap representative sample, not all 13 stations: one station per
+        # distinct utc_offset_hours group is enough to answer "is each
+        # timezone's data path alive right now" without tripling probe
+        # latency for stations that share an offset -- and therefore share
+        # the same upstream failure modes for the offset-generic checks
+        # below (Open-Meteo, Wunderground, CLOB don't care WHICH station in
+        # a timezone group you ask, only the Gamma per-event check does).
+        offset_reps = {}
+        for icao, st in config.STATIONS.items():
+            offset_reps.setdefault(st.utc_offset_hours, st)
+        rep_stations = list(offset_reps.values())
+        primary = rep_stations[0]  # arbitrary anchor for the station-agnostic probes below
+
+        om = (f"?latitude={primary.lat}&longitude={primary.lon}"
+              "&daily=temperature_2m_max&timezone=auto&forecast_days=1")
+
+        probes = [
             _probe("Open-Meteo ECMWF", config.OPEN_METEO_ECMWF_URL + om),
             _probe("Open-Meteo ensemble", config.OPEN_METEO_ENSEMBLE_URL + om + "&models=ecmwf_ifs025"),
-            _probe("Wunderground", wsss.wunderground_history_url, timeout=8),
-            # Gamma: 200 with a non-empty list means today's event is actually listed;
-            # 200-but-empty is degraded (API up, market not found), not ok.
-            _probe("Gamma API (today's event)", f"https://gamma-api.polymarket.com/events?slug={slug}",
-                   ok_when=lambda r: r.status_code == 200 and r.json()),
+            _probe("Wunderground", primary.wunderground_history_url, timeout=8),
             # CLOB: reachability only -- a garbage token id SHOULD 404/400; any
             # HTTP answer < 500 proves the trading API is up and talking.
             _probe("CLOB price API", "https://clob.polymarket.com/price?token_id=1&side=buy",
                    ok_when=lambda r: r.status_code < 500),
         ]
+
+        # NEA is Singapore's own government feed, tied to whichever station
+        # actually uses the "nea" official client (WSSS today) -- probe it
+        # only if such a station is registered, instead of assuming WSSS.
+        nea_station = next((s for s in config.STATIONS.values() if s.official_client_key == "nea"), None)
+        if nea_station is not None:
+            probes.append(_probe("NEA (data.gov.sg)", "https://api.data.gov.sg/v1/environment/24-hour-weather-forecast"))
+
+        # At most ONE WWIS probe -- most of the 13-station registry uses the
+        # "wwis" client, and pinging all of them on every 5-minute
+        # regeneration would be neither cheap nor informative (one WWIS
+        # outage looks like every WWIS station going down at once anyway).
+        wwis_station = next(
+            (s for s in config.STATIONS.values()
+             if s.official_client_key == "wwis" and s.wwis_city_name in _WWIS_CITY_ID_BY_NAME),
+            None,
+        )
+        if wwis_station is not None:
+            city_id = _WWIS_CITY_ID_BY_NAME[wwis_station.wwis_city_name]
+            probes.append(_probe(f"WWIS ({wwis_station.wwis_city_name})",
+                                  f"https://worldweather.wmo.int/en/json/{city_id}_en.json"))
+
+        # Gamma event-existence probe per representative station -- this is
+        # the one check that's genuinely per-timezone-group: a station's
+        # local calendar date (hence its event slug) can already read
+        # "tomorrow" in one offset group while another is still "today",
+        # which is exactly the bug class config.local_today() exists to
+        # prevent (see config.py's local_today docstring).
+        # Gamma: 200 with a non-empty list means today's event is actually
+        # listed; 200-but-empty is degraded (API up, market not found).
+        for st in rep_stations:
+            local_date = config.local_today(st)
+            slug = market_discovery.build_event_slug(st, local_date)
+            probes.append(_probe(
+                f"Gamma API ({st.icao} event)",
+                f"https://gamma-api.polymarket.com/events?slug={slug}",
+                ok_when=lambda r: r.status_code == 200 and r.json(),
+            ))
+
+        return probes
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"probes failed to run: {exc}")
         return []
@@ -191,34 +261,50 @@ def _ev_rows(snap):
 try:
     ev_snaps = _load_ev_snapshots()
     if ev_snaps:
-        all_rows, total_unpriced = [], 0
         ages = []
-        for snap in ev_snaps:
+        section_blocks = []
+        total_unpriced = 0
+        # Grouped by station, each under its own subheading, instead of one
+        # flat table spanning all 13 stations sorted purely by net EV -- at
+        # 2-station scale a flat ranking was fine, but at 13 it buries a
+        # station's own picture next to whichever other station happened to
+        # have a hotter EV that cycle, making "what does Tokyo actually look
+        # like right now" a scroll-and-squint exercise. Sorted alphabetically
+        # by ICAO for a stable page layout (not by "best EV station first",
+        # which would reorder the whole page every regeneration).
+        for snap in sorted(ev_snaps, key=lambda s: s.get("station_icao", "")):
             rows, unpriced = _ev_rows(snap)
-            all_rows.extend(rows)
             total_unpriced += unpriced
             ages.append(snap.get("generated_at", ""))
-        newest = max(ages) if ages else ""
-        age_note = f"as of {html.escape(newest[11:16])} UTC" if len(newest) >= 16 else ""
-        if all_rows:
-            ev_html = (
+            if not rows:
+                continue
+            icao = snap.get("station_icao", "?")
+            station = config.STATIONS.get(icao)
+            station_label = (f"{html.escape(icao)} &middot; {html.escape(station.display_name)}"
+                              if station else html.escape(icao))
+            section_blocks.append(
+                f"<h3 class='evstation'>{station_label}</h3>"
                 "<div class='tablewrap'><table class='ptable'>"
                 "<thead><tr><th>Station</th><th>Bucket</th><th>Side</th>"
                 "<th class='num'>Model p</th><th class='num'>Mkt price</th>"
                 "<th class='num'>Raw edge</th><th class='num'>Net EV/$</th></tr></thead>"
-                f"<tbody>{''.join(all_rows)}</tbody></table></div>"
+                f"<tbody>{''.join(rows)}</tbody></table></div>"
             )
+        newest = max(ages) if ages else ""
+        age_note = f"as of {html.escape(newest[11:16])} UTC" if len(newest) >= 16 else ""
+        if section_blocks:
+            ev_html = "".join(section_blocks)
             if total_unpriced:
-                ev_html += (f"<p class='cap' style='margin:10px 0 0'>{total_unpriced} bucket/side rows "
+                ev_html += (f"<p class='cap' style='margin:14px 0 0'>{total_unpriced} bucket/side rows "
                             "had no live quote (unseeded far-tail books).</p>")
         else:
             ev_html = "<div class='empty'>Latest EV computation found no priceable buckets.</div>"
-        ev_cap = (f"latest computation {age_note} &middot; rows at or above the "
+        ev_cap = (f"latest computation {age_note} &middot; grouped by station &middot; rows at or above the "
                   f"{EV_ENTRY_SCREEN:.0%} net-EV entry screen highlighted")
     else:
         ev_html = ("<div class='empty'>No EV snapshot yet &mdash; the engine computes during the morning "
-                   "entry windows (05:00&ndash;10:00 SGT) and saves its table here from then on.</div>")
-        ev_cap = "model edge vs. market, per bucket and side"
+                   "entry windows (05:00&ndash;10:00 local) and saves its table here from then on.</div>")
+        ev_cap = "model edge vs. market, per bucket and side, grouped by station"
 except Exception as exc:  # noqa: BLE001
     warnings.append(f"EV card failed: {exc}")
     ev_html, ev_cap = "<div class='empty'>EV view unavailable</div>", ""
@@ -243,15 +329,17 @@ def status_label(status):
     return s.replace("_", " "), "st-neutral"
 
 
-def _hm(iso_ts):
-    """ISO timestamp -> compact 'dd MMM HH:MM' SGT string."""
+def _hm(iso_ts, utc_offset_hours=8):
+    """ISO timestamp -> compact 'dd MMM HH:MM' LOCAL string, in the given
+    utc_offset_hours (defaults to +8 -- the legacy SGT behaviour -- for any
+    caller that can't name a specific station's offset)."""
     if not iso_ts:
         return "&mdash;"
     try:
         dt = datetime.fromisoformat(str(iso_ts))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        secs = dt.timestamp() + 8 * 3600
+        secs = dt.timestamp() + utc_offset_hours * 3600
         d = datetime.fromtimestamp(secs, tz=timezone.utc)
         return d.strftime("%d %b %H:%M")
     except ValueError:
@@ -261,12 +349,22 @@ def _hm(iso_ts):
 def _pos_row(p):
     is_open = p.status == "open"
     label, cls = status_label(p.status)
+    # Entered/exited times render in THIS position's own station's local
+    # time, not a blanket SGT -- a Tokyo (UTC+9) position timestamped in
+    # Singapore (UTC+8) time would print an hour off, which is exactly the
+    # kind of cross-timezone mislabeling the rest of this expansion (see
+    # config.local_today) exists to avoid. Falls back to the legacy +8 if
+    # the station isn't (or is no longer) registered.
+    try:
+        station_offset = config.get_station(p.station_icao).utc_offset_hours
+    except KeyError:
+        station_offset = 8
     if is_open:
         mark = p.high_water_mark if p.high_water_mark is not None else p.entry_price
         last_price = f"{mark:.2f}<span class='sub'>hwm</span>"
         ret = "&mdash;"
         ret_cls = ""
-        when = _hm(p.entry_time)
+        when = _hm(p.entry_time, station_offset)
     else:
         last_price = f"{p.exit_price:.2f}" if p.exit_price is not None else "&mdash;"
         if p.exit_price is not None and p.entry_price:
@@ -275,7 +373,7 @@ def _pos_row(p):
             ret_cls = "pos" if r >= 0 else "neg"
         else:
             ret, ret_cls = "&mdash;", ""
-        when = _hm(p.exit_time)
+        when = _hm(p.exit_time, station_offset)
     return (
         "<tr>"
         f"<td class='mono'>{html.escape(p.station_icao)}</td>"
@@ -316,9 +414,9 @@ try:
     else:
         positions_html = (
             "<div class='empty'>No paper positions yet &mdash; the first candidates appear in the"
-            " 05:00&ndash;08:00 SGT entry window, and only if the EV engine finds edge worth taking.</div>"
+            " 05:00&ndash;08:00 local entry window, and only if the EV engine finds edge worth taking.</div>"
         )
-        positions_cap = "paper positions, both stations"
+        positions_cap = f"paper positions, {station_count} stations"
 except Exception as exc:  # noqa: BLE001
     warnings.append(f"positions table failed: {exc}")
     positions_html = "<div class='empty'>positions table unavailable</div>"
@@ -344,6 +442,117 @@ if warnings:
 def tile_val(v):
     return "&mdash;" if v is None else str(v)
 
+
+# --- station cards ---------------------------------------------------------
+# One card per registered station instead of two hand-written WSSS/WMKK
+# blocks. Layout/CSS untouched -- only the per-station facts (display name,
+# country, maturity from config.STATION_MATURITY, official client) vary.
+def _station_card(icao, st):
+    maturity = config.STATION_MATURITY.get(icao, "exploratory")
+    badge_cls = "mature" if maturity == "mature" else "immature"
+    if maturity == "mature":
+        history = "confirmed, real station readings"
+        calibration = "bias-correction confirmed"
+        sizing = "full Kelly path (capped)"
+    else:
+        # Every non-mature station starts collection-only automatically
+        # (config.MIN_RESOLUTION_OBS_BEFORE_ENTRY) and graduates by simply
+        # existing for a few days -- described here rather than claiming a
+        # confirmed edge the maturity gate itself says doesn't exist yet.
+        history = "accumulating -- collection-only until proven"
+        calibration = "unverified -- exploratory sizing until proven"
+        sizing = "maturity-gated, reduced"
+    if st.resolution_grade_source == "metar_daily_max":
+        resolution = f"Wunderground {html.escape(icao)} history"
+    else:
+        # e.g. Hong Kong settles on "hko_daily_max" (the HKO climate
+        # extract), not any Wunderground page -- say so plainly rather than
+        # implying a Wunderground resolution source that isn't the real one.
+        resolution = html.escape(st.resolution_grade_source.replace("_", " "))
+    return (
+        "<div class='card station'>"
+        f"<h3><span class='icao'>{html.escape(icao)}</span> {html.escape(st.display_name)} "
+        f"<span class='badge {badge_cls}'>{html.escape(maturity)}</span></h3>"
+        "<dl>"
+        f"<dt>Country</dt><dd>{html.escape(st.country)}</dd>"
+        f"<dt>Observed history</dt><dd>{history}</dd>"
+        f"<dt>Calibration</dt><dd>{calibration} ({html.escape(st.official_client_key)})</dd>"
+        f"<dt>Sizing</dt><dd>{sizing}</dd>"
+        f"<dt>Resolution source</dt><dd>{resolution}</dd>"
+        "</dl>"
+        "</div>"
+    )
+
+
+station_cards_html = "".join(_station_card(icao, st) for icao, st in config.STATIONS.items())
+
+# --- per-timezone-group time strips -----------------------------------------
+# The registry spans UTC+5 (Karachi) through UTC+9 (Tokyo/Seoul/Busan) --
+# scheduler.py already runs each offset group's primary/secondary/monitor
+# cycle against that group's OWN local clock (config.SCHEDULE_WINDOWS), so a
+# single "Singapore time" strip stopped being an honest picture of the whole
+# system's trading day the moment a station outside UTC+8 was registered.
+# Group stations by utc_offset_hours -- derived from the live registry, never
+# hardcoded, so a future station on a not-yet-seen offset gets its own strip
+# automatically -- and render one strip per group.
+_offset_groups = {}
+for _icao, _st in config.STATIONS.items():
+    _offset_groups.setdefault(_st.utc_offset_hours, []).append(_icao)
+
+_now_for_strips = datetime.now(timezone.utc)
+
+
+def _next_local_5am_utc_ms(offset_hours, now_utc):
+    """UTC epoch ms of this offset's next upcoming 05:00 local -- today's
+    05:00 if that hasn't passed yet local-side, otherwise tomorrow's."""
+    local_now = now_utc + timedelta(hours=offset_hours)
+    target_local = local_now.replace(hour=5, minute=0, second=0, microsecond=0)
+    if local_now >= target_local:
+        target_local += timedelta(days=1)
+    target_utc = target_local - timedelta(hours=offset_hours)
+    return int(target_utc.timestamp() * 1000)
+
+
+_strip_blocks = []
+_nowmark_groups = []  # -> JS as JSON: [{offset, markId, clockId}, ...] so tick()
+                       # can position + label each group's own "now" client-side
+_group_next5am_ms = []
+for _idx, _offset in enumerate(sorted(_offset_groups)):
+    _stations_in_group = _offset_groups[_offset]
+    _mark_id = f"nowmark-{_idx}"
+    _clock_id = f"localclock-{_idx}"
+    _nowmark_groups.append({"offset": _offset, "markId": _mark_id, "clockId": _clock_id})
+    _group_next5am_ms.append(_next_local_5am_utc_ms(_offset, _now_for_strips))
+    _sign = "+" if _offset >= 0 else ""
+    _strip_blocks.append(f"""
+    <div class="strip">
+      <div class="striphead"><b>UTC{_sign}{_offset}</b>
+        <span class="stripstations">{html.escape(", ".join(_stations_in_group))}</span>
+        <span class="stripclock mono" id="{_clock_id}">&mdash;</span></div>
+      <div class="segments">
+        <div class="seg closed" style="flex:4"></div>
+        <div class="seg closed" style="flex:1;opacity:.55"></div>
+        <div class="seg primary" style="flex:3"></div>
+        <div class="seg decay" style="flex:2"></div>
+        <div class="seg monitor" style="flex:14"></div>
+      </div>
+      <div class="nowmark" id="{_mark_id}"></div>
+      <div class="seglabels">
+        <div class="seglabel" style="flex:4"><b>00&ndash;04</b>closed &mdash; hard floor</div>
+        <div class="seglabel" style="flex:1"><b>04</b>warm-up</div>
+        <div class="seglabel" style="flex:3"><b>05&ndash;08</b>primary entries</div>
+        <div class="seglabel" style="flex:2"><b>08&ndash;10</b>edge decay</div>
+        <div class="seglabel" style="flex:14"><b>10&ndash;24</b>position monitoring only</div>
+      </div>
+      <div class="hours"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
+    </div>""")
+
+time_strips_html = "".join(_strip_blocks)
+# Countdown target = the SOONEST upcoming 05:00 local across every group, not
+# just one -- on any given UTC instant, Tokyo's (UTC+9) primary window opens
+# before Singapore's (UTC+8), which opens before Karachi's (UTC+5).
+countdown_target_ms = min(_group_next5am_ms) if _group_next5am_ms else 0
+nowmark_groups_json = json.dumps(_nowmark_groups)
 
 page = """<!doctype html>
 <html lang="en">
@@ -399,6 +608,10 @@ page = """<!doctype html>
   .card h2 { font-size:15px; margin:0 0 2px; }
   .card .cap { font-size:12.5px; color:var(--muted); margin:0 0 14px; }
   .strip { position:relative; margin-top:26px; }
+  .striphead { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:8px; }
+  .striphead b { font-family:var(--mono); color:var(--teal); font-size:12.5px; }
+  .stripstations { font-size:12px; color:var(--ink-2); }
+  .stripclock { margin-left:auto; font-size:13px; color:var(--ink); font-variant-numeric:tabular-nums; }
   .segments { display:flex; height:44px; border-radius:6px; overflow:hidden; gap:2px; background:var(--paper); }
   .seg.closed { background:var(--line); } .seg.primary { background:var(--teal); }
   .seg.decay { background:var(--teal-soft); } .seg.monitor { background:var(--teal-faint); }
@@ -406,8 +619,11 @@ page = """<!doctype html>
   .seglabel { font-size:11.5px; color:var(--ink-2); line-height:1.3; min-width:0; }
   .seglabel b { display:block; font-family:var(--mono); font-size:11px; color:var(--ink); }
   .hours { display:flex; justify-content:space-between; font-family:var(--mono); font-size:10.5px; color:var(--muted); margin-top:10px; }
-  #nowmark { position:absolute; top:-22px; height:78px; width:2px; background:var(--heat); border-radius:1px; }
-  #nowmark::after { content:"now"; position:absolute; top:-2px; left:6px; font-family:var(--mono);
+  /* .nowmark was a single #nowmark id when there was one Singapore-time
+     strip; now there's one marker per timezone group, so it's a class and
+     each strip's marker gets its own generated id (see _nowmark_groups). */
+  .nowmark { position:absolute; top:-22px; height:78px; width:2px; background:var(--heat); border-radius:1px; }
+  .nowmark::after { content:"now"; position:absolute; top:-2px; left:6px; font-family:var(--mono);
     font-size:10.5px; color:var(--heat); white-space:nowrap; }
   .countdown { margin-top:16px; font-size:13.5px; color:var(--ink-2); }
   .countdown b { font-family:var(--mono); color:var(--heat); font-variant-numeric:tabular-nums; }
@@ -432,6 +648,9 @@ page = """<!doctype html>
   .pdetail { font-family:var(--mono); font-size:10.5px; color:var(--muted); margin-left:auto;
     white-space:nowrap; }
   .tablewrap { overflow-x:auto; }
+  .evstation { font-family:var(--mono); font-size:12px; letter-spacing:.03em; color:var(--ink-2);
+    margin:16px 0 6px; }
+  .evstation:first-child { margin-top:0; }
   .ptable { border-collapse:collapse; width:100%; font-size:12.5px; }
   .ptable th { text-align:left; font-size:10.5px; letter-spacing:.08em; text-transform:uppercase;
     color:var(--muted); font-weight:600; padding:6px 12px 6px 0; border-bottom:1px solid var(--line);
@@ -470,7 +689,7 @@ page = """<!doctype html>
       <div>
         <div class="eyebrow">polyweather &middot; EC2 ap-southeast-5</div>
         <h1>Paper trading monitor</h1>
-        <p class="sub">Polymarket temperature brackets &middot; WSSS Changi &amp; WMKK KLIA &middot; generated @@SNAP@@</p>
+        <p class="sub">Polymarket temperature brackets &middot; @@STATIONCOUNT@@ stations across Asia &middot; generated @@SNAP@@</p>
       </div>
       <div class="pills">
         <span class="pill @@PILLCLS@@"><span class="dot"></span>@@PILLTXT@@</span>
@@ -486,7 +705,7 @@ page = """<!doctype html>
     <div class="tile"><div class="label">Restarts</div><div class="value">@@RESTARTS@@</div>
       <div class="note">systemd, auto-restart armed</div></div>
     <div class="tile"><div class="label">Open positions</div><div class="value">@@OPEN@@</div>
-      <div class="note">paper, both stations</div></div>
+      <div class="note">paper, @@STATIONCOUNT@@ stations</div></div>
     <div class="tile"><div class="label">Closed positions</div><div class="value">@@CLOSED@@</div>
       <div class="note">what the report scores</div></div>
     <div class="tile"><div class="label">Paper P&amp;L</div><div class="value @@PNLDIM@@">@@PNL@@</div>
@@ -500,49 +719,16 @@ page = """<!doctype html>
   </div>
 
   <div class="card">
-    <h2>Trading day &mdash; Singapore time (UTC+8)</h2>
-    <p class="cap">Simplified view of the scheduler&rsquo;s windows. The edge lives in the morning:
-      entries 05:00&ndash;08:00, decaying to nothing by 10:00.</p>
-    <div class="strip">
-      <div class="segments">
-        <div class="seg closed" style="flex:4"></div>
-        <div class="seg closed" style="flex:1;opacity:.55"></div>
-        <div class="seg primary" style="flex:3"></div>
-        <div class="seg decay" style="flex:2"></div>
-        <div class="seg monitor" style="flex:14"></div>
-      </div>
-      <div id="nowmark"></div>
-      <div class="seglabels">
-        <div class="seglabel" style="flex:4"><b>00&ndash;04</b>closed &mdash; hard floor</div>
-        <div class="seglabel" style="flex:1"><b>04</b>warm-up</div>
-        <div class="seglabel" style="flex:3"><b>05&ndash;08</b>primary entries</div>
-        <div class="seglabel" style="flex:2"><b>08&ndash;10</b>edge decay</div>
-        <div class="seglabel" style="flex:14"><b>10&ndash;24</b>position monitoring only</div>
-      </div>
-      <div class="hours"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
-    </div>
-    <p class="countdown">Next entry window opens in <b id="countdown">&mdash;</b> (05:00 SGT).</p>
+    <h2>Trading day &mdash; by timezone group</h2>
+    <p class="cap">Simplified view of the scheduler&rsquo;s windows, one strip per distinct
+      utc_offset_hours in the registry (currently spans UTC+5 through UTC+9). Same local
+      pattern in every group: entries 05:00&ndash;08:00, decaying to nothing by 10:00.</p>
+    @@TIMESTRIPS@@
+    <p class="countdown">Next entry window opens in <b id="countdown">&mdash;</b> (soonest 05:00 across all groups).</p>
   </div>
 
   <div class="stations">
-    <div class="card station">
-      <h3><span class="icao">WSSS</span> Singapore Changi <span class="badge mature">mature</span></h3>
-      <dl>
-        <dt>Observed history</dt><dd>14+ days, real station readings</dd>
-        <dt>Calibration</dt><dd>NEA hot-bias confirmed, 60/40 blend</dd>
-        <dt>Sizing</dt><dd>full Kelly path (capped)</dd>
-        <dt>Resolution source</dt><dd>Wunderground WSSS history</dd>
-      </dl>
-    </div>
-    <div class="card station">
-      <h3><span class="icao">WMKK</span> Kuala Lumpur Intl <span class="badge immature">immature</span></h3>
-      <dl>
-        <dt>Observed history</dt><dd>accumulating since 31 Jul 2026</dd>
-        <dt>Calibration</dt><dd>unverified; MET Malaysia partial stub</dd>
-        <dt>Sizing</dt><dd>maturity-gated, reduced</dd>
-        <dt>Resolution source</dt><dd>Wunderground WMKK history</dd>
-      </dl>
-    </div>
+    @@STATIONCARDS@@
   </div>
 
   <div class="card">
@@ -571,20 +757,34 @@ page = """<!doctype html>
 
 <script>
   var DEPLOY_UTC = @@DEPLOYMS@@;
+  // One entry per distinct utc_offset_hours group in config.STATIONS (see
+  // the Python _nowmark_groups build above) -- replaces the single
+  // hardcoded "+8 hours" assumption that only ever matched Singapore/KL.
+  var NOWMARK_GROUPS = @@NOWMARKGROUPS@@;
+  // Soonest upcoming 05:00 local across ALL groups, computed once
+  // server-side at generation time (Tokyo's UTC+9 window opens before
+  // Singapore's UTC+8, which opens before Karachi's UTC+5) -- the client
+  // just counts down to this fixed instant instead of re-deriving "today's
+  // 5am" from a single assumed offset.
+  var COUNTDOWN_TARGET_MS = @@COUNTDOWNMS@@;
   function fmt(n) { return String(n).padStart(2, "0"); }
   function tick() {
-    var now = new Date(Date.now() + 8 * 3600e3);
-    var frac = (now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600) / 24;
-    document.getElementById("nowmark").style.left = "calc(" + (frac * 100).toFixed(3) + "% - 1px)";
+    var nowMs = Date.now();
+    NOWMARK_GROUPS.forEach(function (g) {
+      var local = new Date(nowMs + g.offset * 3600e3);
+      var frac = (local.getUTCHours() + local.getUTCMinutes() / 60 + local.getUTCSeconds() / 3600) / 24;
+      var markEl = document.getElementById(g.markId);
+      if (markEl) markEl.style.left = "calc(" + (frac * 100).toFixed(3) + "% - 1px)";
+      var clockEl = document.getElementById(g.clockId);
+      if (clockEl) clockEl.textContent = fmt(local.getUTCHours()) + ":" + fmt(local.getUTCMinutes());
+    });
     if (DEPLOY_UTC > 0) {
-      var up = Math.max(0, Date.now() - DEPLOY_UTC);
+      var up = Math.max(0, nowMs - DEPLOY_UTC);
       var uh = Math.floor(up / 3600e3), um = Math.floor(up / 60e3) % 60;
       document.getElementById("uptime").textContent =
         uh >= 48 ? Math.floor(uh / 24) + "d " + (uh % 24) + "h" : uh + "h " + fmt(um) + "m";
     }
-    var target = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 5, 0, 0);
-    if (now.getTime() >= target) target += 24 * 3600e3;
-    var dt = target - now.getTime();
+    var dt = Math.max(0, COUNTDOWN_TARGET_MS - nowMs);
     document.getElementById("countdown").textContent =
       Math.floor(dt / 3600e3) + "h " + fmt(Math.floor(dt / 60e3) % 60) + "m";
   }
@@ -615,6 +815,11 @@ page = (
     .replace("@@WARNINGS@@", warn_html)
     .replace("@@JOURNAL@@", html.escape(journal))
     .replace("@@DEPLOYMS@@", str(deploy_epoch_ms))
+    .replace("@@STATIONCOUNT@@", str(station_count))
+    .replace("@@STATIONCARDS@@", station_cards_html)
+    .replace("@@TIMESTRIPS@@", time_strips_html)
+    .replace("@@NOWMARKGROUPS@@", nowmark_groups_json)
+    .replace("@@COUNTDOWNMS@@", str(countdown_target_ms))
 )
 
 tmp = OUT + ".tmp"

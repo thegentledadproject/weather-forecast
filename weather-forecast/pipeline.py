@@ -87,7 +87,9 @@ def gather_observations(station, target_date: date) -> list:
 def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
     """Run the full pipeline for one station/date. Returns a summary dict."""
     station = config.get_station(station_icao)
-    target_date = target_date or config.local_today()
+    # This station's own market day -- the registry spans UTC+5 to UTC+9,
+    # so "today" is a per-station fact, not a process-wide one.
+    target_date = target_date or config.local_today(station)
 
     forecasts = gather_forecasts(station)
     ensemble = openmeteo_client.get_ensemble_spread(station)
@@ -101,7 +103,20 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
         ensemble_members=ensemble,
     )
 
-    buckets = bucket_probabilities(estimate)
+    # The STATION's cross-check bounds and edge mode. Unlike the trading
+    # path (ev_engine.run_for_station_with_map), this function has no live
+    # token map to derive bounds from -- and that is fine here, because
+    # pipeline.run() reports a forecast rather than pricing a book. The
+    # bounds only decide which buckets the printed table spans; the edge
+    # mode decides what each bucket MEANS, and that is a property of the
+    # settlement source (0.1°C floor semantics for Hong Kong), not of the
+    # event, so it must be passed even in this offline context.
+    buckets = bucket_probabilities(
+        estimate,
+        station.bucket_min_c,
+        station.bucket_max_c,
+        edge_mode=station.bucket_edge_mode,
+    )
     top_bucket = most_likely_bucket(buckets)
     same_day_signal = gather_same_day_signal(station)
 
@@ -119,6 +134,14 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
         "all_buckets": buckets,
         "same_day_signal": same_day_signal,
         "resolution_source_url": wunderground_client.get_resolution_url(station),
+        # Whether that Wunderground page is actually what the market
+        # settles on. For Hong Kong it is NOT -- VHHH resolves on the HK
+        # Observatory's own climate extract, and the airport page it links
+        # reads systematically cooler. Printing a URL under the words
+        # "verify against resolution source" while that URL is a proxy is
+        # how someone confirms a trade against the wrong number.
+        "resolution_source_is_settlement": station.resolution_grade_source == "metar_daily_max",
+        "resolution_grade_source": station.resolution_grade_source,
         "run_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -137,4 +160,17 @@ def print_summary(result: dict) -> None:
     for b in result["all_buckets"]:
         bar = "#" * int(b.probability * 50)
         print(f"  {b.bucket_c:>3}°C  {b.probability:>6.2%}  {bar}")
-    print(f"\nVerify against resolution source before trading: {result['resolution_source_url']}\n")
+    # .get() with a True default so an older/hand-built result dict still
+    # prints the original line rather than crashing on a missing key.
+    if result.get("resolution_source_is_settlement", True):
+        print(f"\nVerify against resolution source before trading: {result['resolution_source_url']}\n")
+    else:
+        print(
+            f"\nWunderground reference page (NOT the settlement source): "
+            f"{result['resolution_source_url']}"
+        )
+        print(
+            f"This market settles on '{result.get('resolution_grade_source', 'a different source')}', "
+            f"not on the Wunderground page above -- that page is a nearby-station proxy and can differ "
+            f"by whole buckets. Verify against the actual settlement record before trading.\n"
+        )

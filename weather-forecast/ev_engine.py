@@ -66,7 +66,8 @@ clients/market_client.py (local)
 import json
 import os
 import time
-from datetime import datetime, timezone
+from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
 from models import CalibratedEstimate, MarketQuote, EVResult
@@ -118,8 +119,16 @@ ENABLE_SNAPSHOT_CAPTURE = True
 # path -- which kept the backtest's observed_median depth regime
 # permanently non-viable. Counter is per-process; a daemon restart just
 # makes the next pass a depth pass.
+#
+# Counted PER STATION, not globally. With one shared counter and 13
+# registered stations, "every 3rd pass" stops meaning "every 3rd pass for
+# this station" and starts meaning "every 3rd station" -- the depth pass
+# rotates around the registry, so any individual token gets depth on
+# roughly 1-in-3-of-1-in-13 passes. That drops per-token depth coverage
+# far below backtest MIN_DEPTH_COVERAGE=0.5 and quietly regresses commit
+# 421cd52, which existed precisely to fix zero-depth capture.
 DEPTH_CAPTURE_EVERY_N_PASSES = 3
-_capture_pass_count = 0
+_capture_pass_count_by_station: Dict[str, int] = {}
 
 
 def _now_iso() -> str:
@@ -168,6 +177,7 @@ def compute_ev_table(
     trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
     fee_rate_pct: Optional[float] = DEFAULT_FEE_RATE_PCT,
     quotes: Optional[Dict[int, MarketQuote]] = None,
+    model_probs: Optional[Dict[int, float]] = None,
 ) -> List[EVResult]:
     """
     Core entry point. For every bucket with a token_map entry, compute
@@ -181,12 +191,22 @@ def compute_ev_table(
     avoid re-hitting the market client a second time. If omitted,
     quotes are fetched here as before.
 
+    model_probs: optional pre-computed {bucket_c: probability}. The
+    trading path passes this because the model's support must match the
+    LIVE event's bucket range and the station's edge mode (see
+    run_for_station_with_map) -- computing it here from the module-level
+    default bounds would price a 27-37 book against a 25-35 model and
+    hand every bucket outside the overlap a phantom edge. Omitted, the
+    legacy default-bounds computation runs exactly as before, which is
+    what station-agnostic callers and old tests expect.
+
     Returns one EVResult per (bucket, side) -- 2x len(token_map)
     entries. Buckets with no live price available get an EVResult
     with net_ev_per_dollar=None rather than being silently skipped,
     so callers can see what couldn't be evaluated this cycle.
     """
-    model_probs = {b.bucket_c: b.probability for b in bucket_probabilities(estimate)}
+    if model_probs is None:
+        model_probs = {b.bucket_c: b.probability for b in bucket_probabilities(estimate)}
     if quotes is None:
         quotes = fetch_market_quotes(token_map)
 
@@ -296,6 +316,126 @@ def best_opportunities(
     return sorted(viable, key=lambda r: r.net_ev_per_dollar, reverse=True)
 
 
+@dataclass
+class StationEVRun:
+    """
+    Everything one station's EV cycle produced, kept together on purpose.
+
+    The token map and the bounds derived from it are OUTPUTS of the cycle,
+    not incidental scratch data: whatever else acts on this cycle's EV
+    table (entry sizing needs each candidate's token id) must use the SAME
+    map the probabilities were computed against. Re-discovering it
+    downstream is how the two silently disagree -- a second Gamma call can
+    land after the event updates, or be seeded with different fallback
+    bounds, and then the EV table and the tokens it is sized against
+    describe different books.
+
+    veto_reason is non-empty exactly when the station-day was refused
+    (no map, or a malformed one); ev_results is then empty by construction.
+    """
+    station_icao: str
+    target_date: date
+    token_map: Dict[int, dict] = field(default_factory=dict)
+    bucket_min_c: Optional[int] = None
+    bucket_max_c: Optional[int] = None
+    ev_results: List[EVResult] = field(default_factory=list)
+    veto_reason: str = ""
+
+
+def run_for_station_with_map(
+    estimate: CalibratedEstimate,
+    trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
+    fee_rate_pct: Optional[float] = DEFAULT_FEE_RATE_PCT,
+) -> StationEVRun:
+    """
+    One station's full EV cycle, returning the token map and live bucket
+    bounds alongside the EV table (see StationEVRun for why they travel
+    together). run_for_station() below is this function's ev_results.
+
+    ORDER MATTERS, AND IT IS DISCOVERY FIRST. The event's real bucket
+    window is a live fact that drifts seasonally (Singapore moved 25-35
+    -> 27-37 between July and August 2026 while config still said 25/35),
+    so the model's support is derived from the discovered map rather than
+    asserted from config:
+
+      1. discover the token map (station bounds seed only the edge-label
+         fallback in parse_bucket_label -- they filter nothing)
+      2. derive live bounds; a missing or malformed map VETOES the
+         station-day outright. No trading on a book we can't enumerate:
+         every bucket absent from the map would otherwise carry
+         model_prob 0.0 and hand its NO side a ~0.20 phantom edge that
+         clears MAX_PLAUSIBLE_RAW_EDGE and both EV windows.
+      3. log loudly on drift -- config is the stale side, the live event
+         is the market being traded -- and PROCEED on the live bounds
+      4. compute bucket probabilities on those bounds and the station's
+         own bucket_edge_mode, then price them against the book
+    """
+    station = config.get_station(estimate.station_icao)
+
+    token_map = market_discovery.discover_token_map(
+        station, estimate.target_date, station.bucket_min_c, station.bucket_max_c
+    )
+    if not token_map:
+        print(
+            f"[ev_engine] no token map discovered for {station.icao} on {estimate.target_date} "
+            f"-- cannot compute EV, skipping this station-day."
+        )
+        return StationEVRun(
+            station_icao=station.icao,
+            target_date=estimate.target_date,
+            veto_reason="no token map discovered",
+        )
+
+    bounds = market_discovery.derive_bucket_bounds(token_map)
+    if bounds is None:
+        discovered = sorted(token_map)
+        print(
+            f"[ev_engine] VETOED {station.icao} on {estimate.target_date}: discovered bucket map is "
+            f"MALFORMED -- {len(discovered)} bucket(s) {discovered} (expected "
+            f"{config.EXPECTED_BUCKET_COUNT} contiguous). A partial or gappy map is not a smaller "
+            f"opportunity set, it is a fabricated one: every bucket the event lists but the map "
+            f"lacks gets model_prob 0.0, whose NO side shows a ~20c edge that clears every risk "
+            f"gate. Not trading this station today; check parse_bucket_label against the live event."
+        )
+        return StationEVRun(
+            station_icao=station.icao,
+            target_date=estimate.target_date,
+            token_map=token_map,
+            veto_reason=f"malformed bucket map ({len(discovered)} bucket(s): {discovered})",
+        )
+
+    bucket_min, bucket_max = bounds
+    if (bucket_min, bucket_max) != (station.bucket_min_c, station.bucket_max_c):
+        print(
+            f"[ev_engine] BOUNDS DRIFT for {station.icao}: live event lists {bucket_min}-{bucket_max}°C, "
+            f"config.STATIONS says {station.bucket_min_c}-{station.bucket_max_c}°C. The LIVE event is "
+            f"what is being traded, so pricing proceeds on {bucket_min}-{bucket_max}; config is the "
+            f"stale side and its cross-check bounds want updating."
+        )
+
+    model_probs = {
+        b.bucket_c: b.probability
+        for b in bucket_probabilities(
+            estimate, bucket_min, bucket_max, edge_mode=station.bucket_edge_mode
+        )
+    }
+
+    quotes = fetch_market_quotes(token_map)
+    _capture_snapshots(station.icao, estimate.target_date, token_map, quotes)
+    ev_results = compute_ev_table(
+        estimate, token_map, trade_size_usd, fee_rate_pct,
+        quotes=quotes, model_probs=model_probs,
+    )
+    return StationEVRun(
+        station_icao=station.icao,
+        target_date=estimate.target_date,
+        token_map=token_map,
+        bucket_min_c=bucket_min,
+        bucket_max_c=bucket_max,
+        ev_results=ev_results,
+    )
+
+
 def run_for_station(
     estimate: CalibratedEstimate,
     trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
@@ -308,17 +448,14 @@ def run_for_station(
     directly for callers who already have a token_map (e.g. cached
     from a previous discovery run, to avoid re-hitting Gamma every
     scan cycle).
+
+    Returns only the EV table, unchanged for every existing caller.
+    Anything that ALSO needs this cycle's token map -- entry sizing does,
+    since it must size against the same book the EV was computed on --
+    should call run_for_station_with_map() and read both off the result
+    rather than re-discovering the map for itself.
     """
-    station = config.get_station(estimate.station_icao)
-    token_map = market_discovery.discover_token_map(
-        station, estimate.target_date, config.BUCKET_MIN_C, config.BUCKET_MAX_C
-    )
-    if not token_map:
-        print(f"[ev_engine] no token map discovered for {station.icao} on {estimate.target_date} -- cannot compute EV.")
-        return []
-    quotes = fetch_market_quotes(token_map)
-    _capture_snapshots(station.icao, estimate.target_date, token_map, quotes)
-    return compute_ev_table(estimate, token_map, trade_size_usd, fee_rate_pct, quotes=quotes)
+    return run_for_station_with_map(estimate, trade_size_usd, fee_rate_pct).ev_results
 
 
 def _capture_snapshots(
@@ -349,9 +486,12 @@ def _capture_snapshots(
         import backtest.price_store as price_store
         import backtest.settings as settings
 
-        global _capture_pass_count
-        depth_pass = (_capture_pass_count % DEPTH_CAPTURE_EVERY_N_PASSES) == 0
-        _capture_pass_count += 1
+        # Per-station counter: see DEPTH_CAPTURE_EVERY_N_PASSES above for
+        # why a single global one silently starves depth coverage now the
+        # registry spans 13 stations.
+        pass_count = _capture_pass_count_by_station.get(station_icao, 0)
+        depth_pass = (pass_count % DEPTH_CAPTURE_EVERY_N_PASSES) == 0
+        _capture_pass_count_by_station[station_icao] = pass_count + 1
 
         target_date_iso = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
         discovered_at = _now_iso()

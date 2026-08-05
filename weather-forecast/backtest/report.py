@@ -139,7 +139,11 @@ def _observations_by_date(run) -> Dict[date, float]:
 
     picked: Dict[date, float] = {}
     for target_date, readings in candidates.items():
-        chosen = engine._pick_observation(readings)
+        # station's own resolution_grade_source, same D1/D2 reasoning as
+        # engine._pick_observation's other caller: a score built on a
+        # lower-tier reading (e.g. a proxy METAR for Karachi) is not a
+        # score of the settlement truth, so it must not be scoreable at all.
+        chosen = engine._pick_observation(readings, station)
         if chosen is not None:
             picked[target_date] = chosen.max_temp_c
     return picked
@@ -177,6 +181,13 @@ def _brier_scores(run) -> Dict[str, Optional[float]]:
     0.0: a Brier of 0.0 is a perfect score, and an empty run must not be
     able to print one.
     """
+    # Station's own bucket bounds/edge mode, not the legacy config globals --
+    # same reasoning as engine._resolution_sweep: scoring Hong Kong's 0.1C
+    # "floor" readings with half-up whole-degree rounding (or WSSS's 27/37
+    # book against the stale 25/35 clamp) would silently score against the
+    # wrong bucket, which corrupts the Brier number this report leads with.
+    station = config.get_station(run.station_icao)
+
     observations = _observations_by_date(run)
     positions = _positions_by_id(run)
 
@@ -193,7 +204,9 @@ def _brier_scores(run) -> Dict[str, Optional[float]]:
         if observed_c is None:
             continue  # not yet published (or never recorded) -- unscorable
 
-        winning_bucket = resolution.bucket_for_temp(observed_c)
+        winning_bucket = resolution.bucket_for_temp(
+            observed_c, station.bucket_min_c, station.bucket_max_c, station.bucket_edge_mode
+        )
         outcome = resolution.resolution_exit_price(
             position.side, position.bucket_c, winning_bucket
         )

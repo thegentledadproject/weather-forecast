@@ -38,7 +38,7 @@ def load_recent_observations(station: StationConfig, days: int = 30) -> List[Obs
     Returns an empty list for stations with no seed data yet (e.g.
     WMKK) -- calibration.py already handles that gracefully.
     """
-    cutoff = config.local_today() - timedelta(days=days)
+    cutoff = config.local_today(station) - timedelta(days=days)
     results = []
     for date_iso, temp_c in station.seed_observations:
         d = date.fromisoformat(date_iso)

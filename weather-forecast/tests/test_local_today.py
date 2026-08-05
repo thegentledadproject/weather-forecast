@@ -16,6 +16,20 @@ Two layers of protection:
      grep-the-source guardrail style as the backtest's gate census,
      because this bug pattern (someone reaching for the "obvious"
      stdlib call) will otherwise creep back in.
+
+A third layer was added for the 2026-08-05 station expansion:
+config.local_today() now ALSO accepts a station (StationConfig or ICAO
+str), and every station-context caller on the trading path must pass
+its own station -- the registry spans UTC+5 (Karachi) through UTC+9
+(Japan/Korea), so the zero-arg legacy UTC+8 default is silently wrong
+for eleven of the thirteen registered stations. test_no_module_calls_date_today
+below therefore also flags a bare `config.local_today()` call (no
+arguments at all) in a trading-path module. An EXPLICIT `None` argument
+(or any other argument -- a station variable, a fallback expression) is
+not a violation: position_manager.py's fallback path passes
+`_station_for(position)`, which legitimately evaluates to None for an
+orphaned/unregistered station and is a deliberate, visible choice, not
+someone forgetting to pass a station at all.
 """
 
 import ast
@@ -65,6 +79,11 @@ def test_afternoon_agrees_with_utc(monkeypatch):
 # Modules whose notion of "today" is the trading day. models/storage are
 # excluded (no clock); backtest/ has its own SimClock discipline and an
 # equivalent determinism guard in its own test files.
+#
+# wwis.py/hko.py (generic + HK official-source adapters) and
+# snapshot_collector.py were added alongside the 2026-08-05 station
+# expansion; generate_dashboard.py lives one level up, in deploy/ next to
+# (not inside) the weather-forecast/ package -- see PKG below.
 TRADING_PATH_FILES = [
     "scheduler.py",
     "pipeline.py",
@@ -78,6 +97,10 @@ TRADING_PATH_FILES = [
     "clients/climate_monitor_client.py",
     "clients/official/nea.py",
     "clients/official/met_malaysia.py",
+    "clients/official/wwis.py",
+    "clients/official/hko.py",
+    "backtest/snapshot_collector.py",
+    "../deploy/generate_dashboard.py",
 ]
 
 
@@ -95,6 +118,38 @@ def test_no_module_calls_date_today():
     assert not offenders, (
         "date.today() (or *.today()) found in trading-path modules -- on a "
         f"UTC host this is yesterday during the morning entry window: {offenders}"
+    )
+
+
+def test_no_module_calls_zero_arg_local_today():
+    """
+    config.local_today() with NO arguments at all defaults to the legacy
+    UTC+8 offset -- silently wrong for the 11 non-Singapore/KL stations
+    now in the registry (UTC+9 Japan/Korea, UTC+5 Karachi). Every
+    station-context call on the trading path must pass its station
+    (a StationConfig, an ICAO string, or an explicit fallback expression
+    that MAY evaluate to None -- see position_manager.py's
+    `config.local_today(_station_for(position))`). Only the bare,
+    argument-free call is the violation this guards against.
+    """
+    offenders = []
+    for rel in TRADING_PATH_FILES:
+        src = (PKG / rel).read_text(encoding="utf-8")
+        for node in ast.walk(ast.parse(src)):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "local_today"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "config"
+                and not node.args
+                and not node.keywords
+            ):
+                offenders.append(f"{rel}:{node.lineno}")
+    assert not offenders, (
+        "zero-arg config.local_today() found in trading-path modules -- this "
+        "silently keeps the legacy UTC+8 default for stations that are not "
+        f"UTC+8, mislabeling their target date for hours every day: {offenders}"
     )
 
 

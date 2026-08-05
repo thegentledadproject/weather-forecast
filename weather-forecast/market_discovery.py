@@ -49,10 +49,11 @@ config.py, models.py (local)
 import json
 import re
 from datetime import date
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import requests
 
+import config
 from models import StationConfig
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
@@ -93,15 +94,40 @@ def fetch_event(slug: str, timeout: int = 10) -> Optional[dict]:
         return None
 
 
-# Matches bucket labels like "31°C", "31", "25 or below", "35 or above",
-# "25° or below". Deliberately permissive -- real label formatting has
-# not been confirmed against a live response (see module docstring).
-_BUCKET_NUM_RE = re.compile(r"(\d+)\s*°?\s*C?")
+# A bucket number, and ONLY a number that is explicitly marked as degrees:
+# "31°C", "31 °C", "36°". The degree marker is not decoration here, it is
+# the entire guard. The old pattern made the marker optional and took the
+# FIRST match, which is catastrophic on the question-text fallback: "Will
+# the highest temperature in Tokyo on August 6, 2026 be 27°C or below?"
+# parsed as bucket 6 (the calendar day). Requiring "°" throws out dates,
+# years and stray digits; taking the LAST match throws out anything that
+# still sneaks past (a label that mentions the date after the degrees).
+_BUCKET_NUM_RE = re.compile(r"(\d+)\s*°")
 _OR_BELOW_RE = re.compile(r"or\s+(below|lower|less)", re.IGNORECASE)
 _OR_ABOVE_RE = re.compile(r"or\s+(above|higher|more)", re.IGNORECASE)
 
+# Plausibility band for a parsed bucket, in whole degrees C. Every
+# registered city's live window sits inside 25..40, and Polymarket only
+# drifts it a few degrees seasonally, so 5..50 never vetoes a real bucket
+# while still rejecting a year ("2026°"? never seen, but the cost of
+# allowing it is a silently wrong map) or any other numeric artifact.
+MIN_PLAUSIBLE_BUCKET_C = 5
+MAX_PLAUSIBLE_BUCKET_C = 50
 
-def parse_bucket_label(market: dict, bucket_min: int, bucket_max: int) -> Optional[int]:
+
+def _degree_numbers(label: str) -> list:
+    """Every plausible degree-marked number in a label, in order of appearance."""
+    return [
+        n for n in (int(m) for m in _BUCKET_NUM_RE.findall(label))
+        if MIN_PLAUSIBLE_BUCKET_C <= n <= MAX_PLAUSIBLE_BUCKET_C
+    ]
+
+
+def parse_bucket_label(
+    market: dict,
+    bucket_min: Optional[int] = None,
+    bucket_max: Optional[int] = None,
+) -> Optional[int]:
     """
     Extract the whole-degree-C bucket this market represents, from
     whichever field actually carries it. Tries groupItemTitle first
@@ -109,19 +135,74 @@ def parse_bucket_label(market: dict, bucket_min: int, bucket_max: int) -> Option
     a grouped event), then falls back to parsing the "question" text.
     Returns None if neither yields a parseable bucket -- callers skip
     that market rather than guessing.
+
+    THE EDGE BUCKETS PARSE THEMSELVES. "27°C or below" and "37°C or
+    higher" both carry their own bucket number, and that number IS the
+    bucket -- it is not a synonym for "whatever the caller thinks the
+    range floor/ceiling is". bucket_min/bucket_max are therefore only a
+    LAST-RESORT fallback for an edge label that carries no parseable
+    number at all, and default to None (no fallback) for callers that
+    would rather see a honest miss.
+
+    WHY THIS IS WORTH BEING FUSSY ABOUT: a mis-parsed or unparseable
+    label doesn't just lose one bucket, it manufactures a trade. A bucket
+    missing from the token map gets model_prob 0.0 in ev_engine's
+    lookup, so its NO side shows raw_edge ~ 1.0 - 0.0 - 0.80 ~ 0.20 --
+    under MAX_PLAUSIBLE_RAW_EDGE (0.25), over MIN_ABS_RAW_EDGE, and
+    through both EV windows. Every guard in entry_manager passes, and
+    the system confidently sizes a "20-cent edge" that exists only
+    because a regex read a date. Discovery correctness is a risk
+    control, not a convenience.
     """
-    label = market.get("groupItemTitle") or market.get("question") or ""
+    # groupItemTitle first (the short, authoritative label); the question
+    # text is a fallback because it is prose and prose contains dates.
+    labels = [market.get("groupItemTitle") or "", market.get("question") or ""]
 
-    if _OR_BELOW_RE.search(label):
-        return bucket_min
-    if _OR_ABOVE_RE.search(label):
-        return bucket_max
+    for label in labels:
+        numbers = _degree_numbers(label)
+        if numbers:
+            return numbers[-1]
 
-    match = _BUCKET_NUM_RE.search(label)
-    if match:
-        return int(match.group(1))
+    # Nothing degree-marked anywhere. An edge label can still be PLACED
+    # from the caller's bounds if it supplied any -- strictly a fallback,
+    # never the primary path.
+    for label in labels:
+        if _OR_BELOW_RE.search(label) and bucket_min is not None:
+            return bucket_min
+        if _OR_ABOVE_RE.search(label) and bucket_max is not None:
+            return bucket_max
 
     return None
+
+
+def derive_bucket_bounds(token_map: Dict[int, dict]) -> Optional[Tuple[int, int]]:
+    """
+    The (min, max) bucket bounds implied by a DISCOVERED token map --
+    the authoritative bounds for the trading path, since Polymarket
+    re-centers a city's window seasonally and StationConfig's
+    bucket_min_c/max_c are only a cross-check (Singapore moved 25-35 ->
+    27-37 between July and August 2026 while config still said 25/35).
+
+    Returns None -- meaning "this map is not a well-formed event, do not
+    trade it" -- unless the keys are CONTIGUOUS and number exactly
+    config.EXPECTED_BUCKET_COUNT. Both conditions matter for the same
+    reason: a gap in the middle (one market whose label failed to parse)
+    or a short map (discovery only found 9 of 11) leaves buckets the
+    event really lists absent from the model's support, and every absent
+    bucket becomes a phantom ~0.20 NO-side edge that clears every risk
+    gate (see parse_bucket_label). A partial map is worse than no map,
+    because no map merely skips the cycle.
+    """
+    if not token_map:
+        return None
+
+    keys = sorted(token_map)
+    lo, hi = keys[0], keys[-1]
+    if len(keys) != hi - lo + 1:
+        return None  # non-contiguous: at least one bucket is missing from the middle
+    if len(keys) != config.EXPECTED_BUCKET_COUNT:
+        return None  # right shape, wrong size: not the 11-outcome event we know how to price
+    return lo, hi
 
 
 def parse_token_ids(market: dict) -> Optional[Dict[str, str]]:
@@ -176,17 +257,19 @@ def get_market_state(
     station: StationConfig,
     target_date: date,
     bucket_c: Optional[int] = None,
-    bucket_min: int = 0,
-    bucket_max: int = 0,
+    bucket_min: Optional[int] = None,
+    bucket_max: Optional[int] = None,
     timeout: int = 10,
 ) -> Optional[dict]:
     """
     Report whether a station's market is closed/resolved, per Gamma.
 
-    Pass bucket_c to ask about ONE bucket's market (bucket_min/bucket_max
-    are then needed so the "or below"/"or above" edge labels resolve to
-    real bucket numbers, same as discover_token_map). Omit it to ask
-    about the event as a whole.
+    Pass bucket_c to ask about ONE bucket's market. bucket_min/bucket_max
+    are the same last-resort fallback parse_bucket_label uses for an edge
+    label carrying no degree number -- pass the STATION's own cross-check
+    bounds, never the frozen module-level globals, so a station whose
+    window has drifted isn't matched against Singapore's old range. Omit
+    bucket_c to ask about the event as a whole.
 
     Returns:
         {"slug": str, "bucket_c": Optional[int], "closed": bool,
@@ -235,16 +318,22 @@ def get_market_state(
 def discover_token_map(
     station: StationConfig,
     target_date: date,
-    bucket_min: int,
-    bucket_max: int,
+    bucket_min: Optional[int] = None,
+    bucket_max: Optional[int] = None,
 ) -> Dict[int, Dict[str, str]]:
     """
     Top-level entry point. Returns whatever subset of
     {bucket_c: {"yes_token_id":, "no_token_id":}} could be discovered
     and parsed -- may be a partial map if some buckets fail to parse
     or the event isn't found at all (empty dict in that case).
-    Callers (ev_engine.py, position_manager.py) should treat a smaller
-    -than-expected map as a signal to log and investigate, not crash.
+
+    A partial map is NOT tradeable: run it through derive_bucket_bounds()
+    before pricing anything off it, and skip the station-day if that
+    returns None. bucket_min/bucket_max are only parse_bucket_label's
+    edge-label fallback (pass the station's own cross-check bounds), not
+    a filter -- a discovered bucket outside them is real and is kept, and
+    the bounds mismatch is what derive_bucket_bounds surfaces to the
+    caller as config drift.
     """
     slug = build_event_slug(station, target_date)
     event = fetch_event(slug)

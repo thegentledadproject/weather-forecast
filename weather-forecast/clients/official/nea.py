@@ -52,7 +52,7 @@ class NEAClient(OfficialClient):
             return PointForecast(
                 station_icao=station.icao,
                 source="nea_24hr",
-                target_date=config.local_today(),
+                target_date=config.local_today(station),
                 max_temp_c=float(max_c) if max_c is not None else None,
                 fetched_at=_now_iso(),
                 raw_note=forecast_text,

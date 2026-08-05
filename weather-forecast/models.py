@@ -44,6 +44,50 @@ class StationConfig:
     monsoon_phase_by_month: Dict[int, str] = field(default_factory=dict)
     seed_observations: list = field(default_factory=list)  # list of (date, temp_c) tuples
 
+    # Fixed UTC offset of the station's market-local calendar day. A plain
+    # integer, not a tz database entry, because NONE of the registered cities
+    # observes DST -- that is an assumption that happens to hold for every
+    # Asian market listed so far, not a general truth; re-check before
+    # registering a station in a DST region.
+    utc_offset_hours: int = 8
+
+    # Sanity CROSS-CHECK bounds for this station's Polymarket bucket range.
+    # NOT the source of truth on the trading path: Polymarket shifts a city's
+    # 11-bucket window seasonally (Singapore moved 25-35 -> 27-37 between July
+    # and August 2026), so live trading derives the real bounds from the
+    # discovered token map each cycle and only logs when these drift.
+    bucket_min_c: int = 25
+    bucket_max_c: int = 35
+
+    # How a raw settlement reading maps to a bucket:
+    #   "half_up" -- source reports whole degrees C (METAR/Wunderground);
+    #                bucket = round-half-up(temp), intervals [b-0.5, b+0.5).
+    #   "floor"   -- source reports 0.1 C precision and the market resolves to
+    #                the range that CONTAINS the reading (Hong Kong Observatory);
+    #                bucket = floor(temp), intervals [b, b+1).
+    bucket_edge_mode: str = "half_up"
+
+    # City name in the WMO WWIS index (worldweather.wmo.int) for the generic
+    # "wwis" official client. Empty string = city not listed there (e.g.
+    # Taipei -- WWIS is a UN service); the client then returns None honestly.
+    wwis_city_name: str = ""
+
+    # ObservedReading.source string that counts as settlement-grade truth for
+    # THIS station. METAR is only resolution-grade where the market actually
+    # settles on the airport's Wunderground record; Hong Kong settles on the
+    # HK Observatory's climate extract instead ("hko_daily_max").
+    resolution_grade_source: str = "metar_daily_max"
+
+    # What the METAR ingest is allowed to do for this station:
+    #   "resolution" -- save daily maxima as "metar_daily_max" (settlement grade)
+    #   "proxy"      -- save as "metar_daily_max_proxy" (rank 1, never settles;
+    #                   Karachi: the market names "Masroor Airbase" but links
+    #                   OPKC -- unconfirmed station identity)
+    #   "skip"       -- do not ingest METAR at all (Hong Kong: the airport
+    #                   reading is systematically cooler than the urban HKO
+    #                   settlement station and would bias the observation blend)
+    metar_ingest_mode: str = "resolution"
+
     @property
     def wunderground_history_url(self) -> str:
         return f"https://www.wunderground.com/history/daily/{self.wunderground_slug}"

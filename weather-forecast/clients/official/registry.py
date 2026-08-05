@@ -13,15 +13,20 @@ line to _CLIENTS.
 
 DEPENDENCIES
 ------------
-clients/official/nea.py, clients/official/met_malaysia.py (local)
+clients/official/nea.py, clients/official/met_malaysia.py,
+clients/official/wwis.py, clients/official/hko.py (local)
 """
 
 from clients.official.nea import NEAClient
 from clients.official.met_malaysia import METMalaysiaClient
+from clients.official.wwis import WWISClient
+from clients.official.hko import HKOClient
 
 _CLIENTS = {
     "nea": NEAClient(),
     "met_malaysia": METMalaysiaClient(),
+    "wwis": WWISClient(),
+    "hko": HKOClient(),
 }
 
 

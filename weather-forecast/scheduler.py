@@ -15,13 +15,28 @@ directly -- tight intervals (10 min) during the confirmed-edge
 05:00-08:00 window, widening through the day, closed entirely outside
 04:00-22:45.
 
-Two entry points:
+EVERY WINDOW IS LOCAL, AND "LOCAL" IS NOW PLURAL
+------------------------------------------------
+The registry spans UTC+5 (Karachi) through UTC+9 (Japan/Korea), so there
+is no single local clock to evaluate the schedule against. Stations are
+grouped by utc_offset_hours and each group gets its own clock, its own
+window and its own next-run time: Tokyo's primary window opens an hour
+before Singapore's and four hours before Karachi's.
+
+Per-group next_run_ts bookkeeping is what makes that honest. Sleeping
+until the earliest group's next run and then re-running EVERY group
+would silently promote each group to the shortest interval in play --
+a group in a 3-hour monitor_only window would scan every 10 minutes
+because some other timezone is in its primary window. Only groups whose
+time has actually arrived are dispatched.
+
+Entry points:
   - determine_window(): pure function, local-time -> active window.
     No I/O, fully unit-testable without waiting for real clock time.
   - run_cycle(): does the actual work for one scan, dispatched by the
-    active window's mode.
-  - run_forever(): the actual daemon loop, thin wrapper around the
-    two functions above plus time.sleep.
+    active window's mode, over one group's stations.
+  - run_forever(): the actual daemon loop -- group the registry, run
+    whichever groups are due, sleep until the earliest next run.
 
 HONEST GAP
 ----------
@@ -50,7 +65,7 @@ clients/official/registry.py (local)
 import argparse
 import time
 from datetime import datetime, timezone
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import config
 import pipeline
@@ -59,16 +74,48 @@ import position_manager
 import executor
 from clients.official.registry import get_official_client
 
+# Floor on how long the daemon loop may sleep between wake-ups. With 13
+# stations across three timezone groups the next-run times interleave, and
+# without a floor a group whose boundary is seconds away would spin the
+# loop at near-zero intervals. 30s is short enough that no window boundary
+# is ever missed by a meaningful margin.
+MIN_SLEEP_SECONDS = 30
+
 
 def local_now(tz_offset_hours: int = 8) -> Tuple[int, int]:
     """
-    Current local (hour, minute) for SGT/MYT (UTC+8). Same fixed
-    offset used by risk_manager.py -- both registered stations share
-    this timezone; revisit if a station elsewhere is added.
+    Current local (hour, minute) at a fixed UTC offset. The default is
+    UTC+8 (SGT/MYT), which is what a station-agnostic caller means by
+    "local" and what config.LOCAL_UTC_OFFSET_HOURS still says -- but the
+    daemon loop passes each timezone group's OWN offset, because the
+    schedule windows are local to the station, not to the deployment box.
     """
     utc_now = datetime.now(timezone.utc)
     total_minutes = (utc_now.hour * 60 + utc_now.minute + tz_offset_hours * 60) % (24 * 60)
     return total_minutes // 60, total_minutes % 60
+
+
+def stations_by_utc_offset(station_icaos: Optional[list] = None) -> Dict[int, List[str]]:
+    """
+    Group stations by their market timezone -- the unit the daemon loop
+    schedules on, since every station sharing an offset also shares a
+    window, a next-run time and a cycle.
+
+    Returns {utc_offset_hours: [icao, ...]}, ordered by offset so logs read
+    east-to-west in the order the trading day actually opens. An
+    unregistered ICAO is logged and skipped rather than raising: one bad
+    name on the command line must not stop the other twelve stations from
+    trading.
+    """
+    groups: Dict[int, List[str]] = {}
+    for icao in (station_icaos or list(config.STATIONS.keys())):
+        try:
+            offset = config.get_station(icao).utc_offset_hours
+        except KeyError as exc:
+            print(f"[scheduler] skipping unknown station: {exc}")
+            continue
+        groups.setdefault(offset, []).append(icao)
+    return dict(sorted(groups.items()))
 
 
 def determine_window(hour: int, minute: int) -> Optional[dict]:
@@ -134,15 +181,7 @@ def run_cycle(window: dict, station_icaos: Optional[list] = None) -> None:
         print("[scheduler] closed window -- nothing to do.")
         return
 
-    # Resolution-grade observation ingest: pull any missing recent METAR
-    # daily maxima (the settlement-source record) into storage. Runs at
-    # most once per local day (the client self-throttles) and must never
-    # break a cycle.
-    try:
-        from clients import metar_client
-        metar_client.ingest_missing_recent(station_icaos)
-    except Exception as exc:  # noqa: BLE001 - ingest is auxiliary to trading
-        print(f"[scheduler] METAR observation ingest skipped: {exc}")
+    _ingest_resolution_observations(station_icaos)
 
     if mode == "pre_poll":
         for icao in station_icaos:
@@ -170,6 +209,44 @@ def run_cycle(window: dict, station_icaos: Optional[list] = None) -> None:
     print(f"[scheduler] unrecognized mode '{mode}' -- skipping this cycle.")
 
 
+def _ingest_resolution_observations(station_icaos: list) -> None:
+    """
+    Pull any missing recent settlement-grade daily maxima into storage,
+    from whichever record each station actually settles on. Both ingests
+    self-throttle (at most once per station per local day) and BOTH are
+    wrapped so a failure can never break a trading cycle -- observation
+    ingest feeds calibration and the collection-first gate, it does not
+    gate this cycle's exits.
+
+    Separately guarded on purpose: a METAR outage must not also starve
+    Hong Kong's HKO ingest (and vice versa), which is exactly what one
+    shared try/except would do -- and starving HKO would hold VHHH in
+    collection-only indefinitely while looking like a METAR problem.
+    """
+    try:
+        from clients import metar_client
+        metar_client.ingest_missing_recent(station_icaos)
+    except Exception as exc:  # noqa: BLE001 - ingest is auxiliary to trading
+        print(f"[scheduler] METAR observation ingest skipped: {exc}")
+
+    # Hong Kong settles on the HK Observatory's climate extract, not on any
+    # airport METAR (VHHH's metar_ingest_mode is "skip" for that reason), so
+    # without this call VHHH would never accumulate a single settlement-grade
+    # observation. The import is lazy and the whole block fail-soft because
+    # clients/official/hko.py is landing alongside this change -- absence
+    # must degrade to "no HK observations yet", never to a broken cycle.
+    try:
+        hko_icaos = [
+            icao for icao in station_icaos
+            if config.get_station(icao).resolution_grade_source == "hko_daily_max"
+        ]
+        if hko_icaos:
+            from clients.official import hko
+            hko.ingest_missing_recent(hko_icaos)
+    except Exception as exc:  # noqa: BLE001 - ingest is auxiliary to trading
+        print(f"[scheduler] HKO observation ingest skipped: {exc}")
+
+
 def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
     """Forecast -> calibration -> EV -> surfaced opportunities -> exit checks, for one station."""
     try:
@@ -180,14 +257,13 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
         return
 
     try:
-        from datetime import date
         from calibration import calibrate
-        from clients import openmeteo_client, climate_monitor_client
-        import market_discovery
+        from clients import openmeteo_client
         import entry_manager
 
         station = config.get_station(station_icao)
-        target_date = config.local_today()
+        # This station's own market day, not the box's UTC+8 notion of one.
+        target_date = config.local_today(station)
         estimate = calibrate(
             station=station,
             target_date=target_date,
@@ -199,26 +275,37 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
             forecasts=pipeline.gather_forecasts(station),
             ensemble_members=openmeteo_client.get_ensemble_spread(station),
         )
-        ev_results = ev_engine.run_for_station(estimate)
+        # ONE discovery per station-cycle. The EV table, the bucket bounds
+        # the model probabilities were computed on, and the token ids entry
+        # sizing trades against all come out of the same StationEVRun --
+        # re-discovering the map here (as this used to, with the frozen
+        # config globals as fallback bounds) is how the prices in the EV
+        # table and the tokens being sized end up describing different
+        # books, and how a station whose window has drifted gets priced
+        # against Singapore's old 25-35 range.
+        ev_run = ev_engine.run_for_station_with_map(estimate)
+        ev_results = ev_run.ev_results
         # Snapshot every computation -- including empty ones -- so the
         # status dashboard can show the latest EV table and its age.
         ev_engine.save_ev_snapshot(station_icao, ev_results)
-        if ev_results:
+
+        if ev_run.veto_reason:
+            print(
+                f"[scheduler] {station_icao}: station-day VETOED by discovery "
+                f"({ev_run.veto_reason}) -- no entries this cycle, exits still checked below."
+            )
+        elif ev_results:
             best = ev_engine.best_opportunities(ev_results, min_net_ev=min_net_ev)
             if best:
                 print(f"[scheduler] {station_icao}: {len(best)} candidate(s) clearing {min_net_ev:.0%} net EV screen -- running entry_manager sizing/gating:")
                 ev_engine.print_ev_table(best)
 
-                token_map = market_discovery.discover_token_map(
-                    station, estimate.target_date, config.BUCKET_MIN_C, config.BUCKET_MAX_C
+                entry_decisions = entry_manager.decide_portfolio_entries(
+                    best, ev_run.token_map, min_net_ev=min_net_ev,
                 )
-                if token_map:
-                    entry_decisions = entry_manager.decide_portfolio_entries(best, token_map, min_net_ev=min_net_ev)
-                    entry_manager.print_entry_decisions(entry_decisions)
-                    for decision in entry_decisions:
-                        executor.open_position(decision)
-                else:
-                    print(f"[scheduler] {station_icao}: no token map available for entry sizing this cycle.")
+                entry_manager.print_entry_decisions(entry_decisions)
+                for decision in entry_decisions:
+                    executor.open_position(decision)
             else:
                 print(f"[scheduler] {station_icao}: no opportunities clearing {min_net_ev:.0%} net EV threshold this cycle.")
     except Exception as exc:
@@ -243,27 +330,83 @@ def _check_same_day_signal(station_icao: str) -> None:
         print(f"[scheduler] {station_icao}: same-day signal check failed: {exc}")
 
 
+def _schedule_next_run(offset: int) -> float:
+    """
+    Absolute wall-clock timestamp for one timezone group's next cycle,
+    computed from a FRESH reading of the clock.
+
+    Fresh matters: a cycle over several stations can take minutes (network
+    calls to Gamma, the CLOB, and every forecast source), and scheduling
+    the next run off the pre-cycle time would hand back an interval that
+    has already partly elapsed -- at the primary window's 10-minute
+    cadence, a slow cycle would leave near-zero sleep and effectively
+    free-run the loop.
+    """
+    hour, minute = local_now(offset)
+    window = determine_window(hour, minute)
+    if window is None:
+        print(
+            f"[scheduler] WARNING: no schedule window matched {hour:02d}:{minute:02d} "
+            f"local at UTC+{offset} -- retrying that group in 5 min."
+        )
+        return time.time() + 5 * 60
+    return time.time() + seconds_until_next_boundary(window, hour, minute)
+
+
 def run_forever(station_icaos: Optional[list] = None) -> None:
     """
     The actual daemon loop. Runs indefinitely, dispatching run_cycle()
-    on the schedule defined by config.SCHEDULE_WINDOWS. Intended to be
-    the process entry point for continuous operation (e.g. under a
-    process supervisor), not something you run inline in a notebook.
+    per TIMEZONE GROUP on the schedule defined by config.SCHEDULE_WINDOWS.
+    Intended to be the process entry point for continuous operation (e.g.
+    under a process supervisor), not something you run inline in a notebook.
+
+    Each group owns a next_run_ts and is dispatched only when that time has
+    arrived. The loop then sleeps until the EARLIEST next_run_ts across
+    groups -- waking for one group never re-runs the others, which is the
+    whole point: a shared sleep with a shared dispatch would run every
+    group at whatever the shortest interval in play happens to be.
     """
+    groups = stations_by_utc_offset(station_icaos)
+    if not groups:
+        print("[scheduler] no registered stations to run -- nothing to do.")
+        return
+
     print("[scheduler] starting -- floor is 04:00 local, nothing runs before that by design.")
+    for offset, icaos in groups.items():
+        print(f"[scheduler]   UTC+{offset}: {', '.join(icaos)}")
+
+    # 0.0 = due immediately, so every group runs once at startup.
+    next_run_ts: Dict[int, float] = {offset: 0.0 for offset in groups}
+
     while True:
-        hour, minute = local_now()
-        window = determine_window(hour, minute)
+        now = time.time()
+        due = [offset for offset in groups if next_run_ts[offset] <= now]
 
-        if window is None:
-            print(f"[scheduler] WARNING: no schedule window matched {hour:02d}:{minute:02d} local -- sleeping 5 min and retrying.")
-            time.sleep(5 * 60)
-            continue
+        for offset in due:
+            hour, minute = local_now(offset)
+            window = determine_window(hour, minute)
+            if window is None:
+                print(
+                    f"[scheduler] WARNING: no schedule window matched {hour:02d}:{minute:02d} "
+                    f"local at UTC+{offset} -- skipping that group, retrying in 5 min."
+                )
+                next_run_ts[offset] = time.time() + 5 * 60
+                continue
 
-        run_cycle(window, station_icaos=station_icaos)
+            print(
+                f"[scheduler] UTC+{offset} group due at {hour:02d}:{minute:02d} local "
+                f"({len(groups[offset])} station(s))."
+            )
+            run_cycle(window, station_icaos=groups[offset])
+            next_run_ts[offset] = _schedule_next_run(offset)
 
-        sleep_seconds = seconds_until_next_boundary(window, hour, minute)
-        print(f"[scheduler] sleeping {sleep_seconds // 60} min until next check.")
+        # Recomputed AFTER the cycles ran, from the current wall clock.
+        sleep_seconds = max(MIN_SLEEP_SECONDS, min(next_run_ts.values()) - time.time())
+        next_offset = min(next_run_ts, key=next_run_ts.get)
+        print(
+            f"[scheduler] sleeping {sleep_seconds / 60:.1f} min -- next group due is "
+            f"UTC+{next_offset}."
+        )
         time.sleep(sleep_seconds)
 
 

@@ -78,7 +78,7 @@ class TestSourceRanking:
 
 class TestIngest:
     def test_skips_days_already_ingested_and_throttles(self, monkeypatch):
-        monkeypatch.setattr(metar_client, "_last_ingest_local_date", None)
+        monkeypatch.setattr(metar_client, "_last_ingest_by_station", {})
         today = config.local_today()
         yesterday = today - timedelta(days=1)
         two_ago = today - timedelta(days=2)

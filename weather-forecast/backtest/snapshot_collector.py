@@ -45,7 +45,6 @@ def collect_once(station_icaos: List[str], days_ahead: int = 1, db_path=None) ->
     stops the rest of the run. Returns the total number of snapshots
     saved.
     """
-    today = date.today()
     total_saved = 0
 
     for station_icao in station_icaos:
@@ -55,11 +54,23 @@ def collect_once(station_icaos: List[str], days_ahead: int = 1, db_path=None) ->
             print(f"[snapshot_collector] collect_once: {exc}")
             continue
 
+        # Station-local "today" (C6), not raw date.today(): the registry
+        # spans UTC+5..+9, so a box running on UTC (or any single fixed
+        # offset) reading date.today() mislabels the target date for the
+        # entire first several hours of a station's local day -- exactly
+        # the bug config.local_today() exists to close everywhere else on
+        # the trading path.
+        today = config.local_today(station)
+
         for offset in range(days_ahead + 1):
             target_date = today + timedelta(days=offset)
 
+            # Station's own live-derived cross-check bounds (B3), not the
+            # legacy config.BUCKET_MIN_C/MAX_C globals -- those are
+            # WSSS/WMKK-era defaults and would ask discover_token_map for
+            # the wrong bucket range on every other station.
             token_map = market_discovery.discover_token_map(
-                station, target_date, config.BUCKET_MIN_C, config.BUCKET_MAX_C
+                station, target_date, station.bucket_min_c, station.bucket_max_c
             )
             if not token_map:
                 print(f"[snapshot_collector] no token map for {station_icao} on {target_date} -- skipping")

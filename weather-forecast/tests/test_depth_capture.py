@@ -8,6 +8,14 @@ so every captured row had depth NULL and the backtest's observed_median
 depth regime could never become viable. The hook now fetches real book
 depth via market_client.get_available_depth_usd on every Nth capture
 pass (depth passes), fail-soft per token.
+
+The pass counter is keyed PER STATION (_capture_pass_count_by_station),
+not a single shared global -- with 13 registered stations, one shared
+counter would rotate depth capture ACROSS stations instead of counting
+each station's own Nth pass, dropping per-token depth coverage far
+below backtest MIN_DEPTH_COVERAGE=0.5 (see ev_engine.py's
+DEPTH_CAPTURE_EVERY_N_PASSES docstring). test_two_stations_rotate_independently
+covers that directly.
 """
 
 from datetime import date
@@ -25,7 +33,7 @@ QUOTES = {32: MarketQuote(bucket_c=32, yes_price=0.30, no_price=0.70)}
 
 def _run_captures(monkeypatch, n_passes, depth_fn):
     saved = []
-    monkeypatch.setattr(ev_engine, "_capture_pass_count", 0)
+    monkeypatch.setattr(ev_engine, "_capture_pass_count_by_station", {})
     monkeypatch.setattr(price_store, "upsert_token", lambda **kw: None)
     monkeypatch.setattr(price_store, "save_snapshot", lambda **kw: saved.append(kw))
     monkeypatch.setattr(market_client, "get_available_depth_usd", depth_fn)
@@ -63,3 +71,34 @@ def test_depth_fetch_failure_never_breaks_capture(monkeypatch):
     # Depth pass with a dead book endpoint: prices still saved, depth NULL.
     assert len(saved) == 2
     assert all(r["depth_usd"] is None for r in saved)
+
+
+def test_two_stations_rotate_independently(monkeypatch):
+    """
+    A shared global counter would treat "pass 0 for WSSS, pass 1 for
+    WMKK" as passes 0 and 1 of one rotation -- only one of the two
+    stations would ever land on a depth pass. Per-station counters mean
+    EVERY station gets its own depth pass on ITS OWN first (and every
+    Nth) capture, regardless of what other stations did in between.
+    """
+    saved = []
+    calls = []
+    monkeypatch.setattr(ev_engine, "_capture_pass_count_by_station", {})
+    monkeypatch.setattr(price_store, "upsert_token", lambda **kw: None)
+    monkeypatch.setattr(price_store, "save_snapshot", lambda **kw: saved.append(kw))
+    monkeypatch.setattr(
+        market_client, "get_available_depth_usd",
+        lambda token_id, **kw: (calls.append(token_id), 480.0)[1],
+    )
+
+    # Interleave: WSSS pass 0, WMKK pass 0, WSSS pass 1, WMKK pass 1.
+    # Both stations' pass 0 is a depth pass under per-station counting.
+    ev_engine._capture_snapshots("WSSS", date(2026, 8, 5), TOKEN_MAP, QUOTES)
+    ev_engine._capture_snapshots("WMKK", date(2026, 8, 5), TOKEN_MAP, QUOTES)
+    ev_engine._capture_snapshots("WSSS", date(2026, 8, 5), TOKEN_MAP, QUOTES)
+    ev_engine._capture_snapshots("WMKK", date(2026, 8, 5), TOKEN_MAP, QUOTES)
+
+    # Each station's own pass 0 (2 sides) fetched depth -> 4 calls total,
+    # not the 2 a shared/rotating counter would produce.
+    assert len(calls) == 4
+    assert ev_engine._capture_pass_count_by_station == {"WSSS": 2, "WMKK": 2}
