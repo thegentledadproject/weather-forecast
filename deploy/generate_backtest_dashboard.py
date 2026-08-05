@@ -361,8 +361,16 @@ try:
         positions = _load_positions(run["dir"])
 
         depth_regime = html.escape(str(params.get("depth_regime") or "&mdash;"))
+        # fee_rate_pct is a FRACTION when a flat override was used, or the
+        # string "auto" (engine default since 6644bfb) meaning the
+        # price-dependent Polymarket weather taker fee, 0.05 x (1 - price).
         fee_rate = params.get("fee_rate_pct")
-        fee_disp = f"{float(fee_rate):.2f}%" if fee_rate is not None else "&mdash;"
+        if isinstance(fee_rate, (int, float)):
+            fee_disp = f"{float(fee_rate) * 100:.1f}% flat"
+        elif fee_rate is None:
+            fee_disp = "&mdash;"
+        else:
+            fee_disp = "auto taker"
         bankroll_mode = html.escape(str(params.get("bankroll_mode") or "&mdash;"))
 
         pct_live = provenance.get("pct_live_snapshot")
