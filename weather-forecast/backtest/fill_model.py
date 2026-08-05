@@ -183,7 +183,9 @@ class FillModel:
                 f"{settings.DEPTH_REGIMES}. See backtest/settings.py for what each means."
             )
         self.depth_regime = depth_regime
-        self.fee_rate_pct = float(fee_rate_pct)
+        # None = price-dependent weather taker fee (the live default since
+        # ca42555); a float is a flat override. Stored for provenance only.
+        self.fee_rate_pct = None if fee_rate_pct is None else float(fee_rate_pct)
         self.station_icao = station_icao
         self.market_db_path = market_db_path
 

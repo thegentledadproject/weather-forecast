@@ -115,7 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["strict", "observed_median", "pessimistic", "unconstrained"],
         default="strict",
     )
-    p_run.add_argument("--fee", dest="fee", type=float, default=0.0, help="Fee rate (fraction)")
+    p_run.add_argument(
+        "--fee", dest="fee", type=float, default=None,
+        help="Flat fee-rate override (fraction). Default: the price-dependent "
+             "Polymarket weather taker fee, matching live (0.05 x (1 - price)).",
+    )
     p_run.add_argument(
         "--bankroll-mode",
         dest="bankroll_mode",

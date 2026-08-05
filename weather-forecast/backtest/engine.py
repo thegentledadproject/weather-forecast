@@ -245,7 +245,7 @@ def _make_run_id(
             start_date.isoformat(),
             end_date.isoformat(),
             depth_regime,
-            f"{float(fee_rate_pct):.10g}",
+            "auto" if fee_rate_pct is None else f"{float(fee_rate_pct):.10g}",
             bankroll_mode,
         ]
     )
@@ -352,7 +352,7 @@ def run(
     start_date: date,
     end_date: date,
     depth_regime: str = "strict",
-    fee_rate_pct: float = 0.0,
+    fee_rate_pct: Optional[float] = None,
     bankroll_mode: str = "static",
     market_db_path=None,
     run_id: str = None,
@@ -381,7 +381,10 @@ def run(
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
         "depth_regime": depth_regime,
-        "fee_rate_pct": float(fee_rate_pct),
+        # None = the live default since ca42555: the price-dependent
+        # Polymarket weather taker fee, ev_engine.taker_fee_pct_of_notional.
+        # A float is a flat override, exactly as in compute_ev_table.
+        "fee_rate_pct": "auto" if fee_rate_pct is None else float(fee_rate_pct),
         "bankroll_mode": bankroll_mode,
         "trade_size_screen_usd": ev_engine.DEFAULT_TRADE_SIZE_USD,
     }
@@ -389,7 +392,7 @@ def run(
     portfolio = PortfolioState(bankroll_usd=config.BANKROLL_USD, bankroll_mode=bankroll_mode)
     fill_model = fill_model_mod.FillModel(
         depth_regime=depth_regime,
-        fee_rate_pct=float(fee_rate_pct),
+        fee_rate_pct=fee_rate_pct,
         station_icao=station_icao,
         market_db_path=market_db_path,
     )
@@ -508,7 +511,7 @@ def run(
                     prices=prices,
                     forecast_history=forecast_history,
                     all_observations=all_observations,
-                    fee_rate_pct=float(fee_rate_pct),
+                    fee_rate_pct=fee_rate_pct,
                     counters=counters,
                     rejections=rejections,
                     entry_records=entry_records,
@@ -738,7 +741,7 @@ def _entry_pass(
     prices,
     forecast_history,
     all_observations,
-    fee_rate_pct: float,
+    fee_rate_pct: Optional[float],
     counters,
     rejections,
     entry_records,
@@ -808,7 +811,8 @@ def _entry_pass(
                     market_price=None,
                     raw_edge=None,
                     estimated_slippage_pct=0.0,
-                    fee_rate_pct=fee_rate_pct,
+                    fee_rate_pct=fee_rate_pct if fee_rate_pct is not None
+                    else ev_engine.taker_fee_pct_of_notional(None),
                     net_ev_per_dollar=None,
                     notes="No live price available this cycle.",
                 ))
@@ -819,8 +823,15 @@ def _entry_pass(
             slippage = fill_model.slippage(
                 ev_engine.DEFAULT_TRADE_SIZE_USD, fill_model.depth_at(snapshot)
             )
+            # Fee exactly as compute_ev_table since ca42555: flat override
+            # if given, else the price-dependent weather taker fee.
+            fee_pct = (
+                fee_rate_pct
+                if fee_rate_pct is not None
+                else ev_engine.taker_fee_pct_of_notional(price)
+            )
             raw_edge = side_model_prob - price
-            net_ev = (raw_edge / price) - slippage - fee_rate_pct if price > 0 else None
+            net_ev = (raw_edge / price) - slippage - fee_pct if price > 0 else None
 
             rows.append(EVResult(
                 station_icao=estimate.station_icao,
@@ -831,7 +842,7 @@ def _entry_pass(
                 market_price=price,
                 raw_edge=raw_edge,
                 estimated_slippage_pct=slippage,
-                fee_rate_pct=fee_rate_pct,
+                fee_rate_pct=fee_pct,
                 net_ev_per_dollar=net_ev,
             ))
 
