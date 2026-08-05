@@ -29,10 +29,24 @@ cd "$PKG_DIR"
 "$VENV/bin/python" scheduler.py --help >/dev/null
 "$VENV/bin/python" paper_trading_report.py --help >/dev/null
 
+echo "== dashboard generators into place =="
+# The dashboard timer (see setup_dashboard.sh) runs FROZEN COPIES in
+# /usr/local/bin, not the repo files -- a git pull alone leaves the live
+# page rendering old code. Bit us on the 13-station expansion deploy
+# (2026-08-05): the box served the two-station page from new code for a
+# render cycle. Refresh the copies on every deploy; skip silently if the
+# dashboard was never set up on this box.
+if [ -f /usr/local/bin/generate_dashboard.py ]; then
+    sudo cp "$APP_DIR/deploy/generate_dashboard.py" /usr/local/bin/generate_dashboard.py
+    sudo cp "$APP_DIR/deploy/generate_backtest_dashboard.py" /usr/local/bin/generate_backtest_dashboard.py
+    sudo chmod 644 /usr/local/bin/generate_dashboard.py /usr/local/bin/generate_backtest_dashboard.py
+    sudo systemctl start polyweather-dashboard.service 2>/dev/null || true
+fi
+
 echo "== systemd service =="
 sudo tee /etc/systemd/system/$SERVICE.service >/dev/null <<UNIT
 [Unit]
-Description=polyweather paper-trading scheduler (WSSS/WMKK)
+Description=polyweather paper-trading scheduler (all registered stations)
 After=network-online.target
 Wants=network-online.target
 
