@@ -62,7 +62,10 @@ WantedBy=multi-user.target
 UNIT
 
 sudo systemctl daemon-reload
-sudo systemctl enable --now $SERVICE
+sudo systemctl enable $SERVICE
+# restart, not `enable --now`: --now is a no-op on an already-running service,
+# which left every redeploy onto a live box running the OLD code (bit us 2026-08-07).
+sudo systemctl restart $SERVICE
 
 sleep 5
 echo "== Service status =="
