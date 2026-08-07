@@ -76,6 +76,7 @@ except Exception as exc:  # noqa: BLE001
 # the next time a station is added or retired from the registry.
 station_count = len(config.STATIONS)
 
+station_summaries = {}  # icao -> summarize_paper_performance dict; reused by the station table
 if closed_n:
     try:
         import paper_trading_report as ptr  # noqa: E402
@@ -85,6 +86,7 @@ if closed_n:
         for icao in config.STATIONS:
             summary = ptr.summarize_paper_performance(icao)
             if isinstance(summary, dict):
+                station_summaries[icao] = summary
                 pnl_usd += float(summary.get("total_pnl_usd") or 0.0)
                 staked_usd += float(summary.get("total_staked_usd") or 0.0)
         # Dollar-weighted: what the bankroll actually experienced, not the
@@ -241,9 +243,14 @@ def _ev_rows(snap):
     rows = []
     priced = [r for r in snap.get("results", []) if r.get("net_ev_per_dollar") is not None]
     unpriced = len(snap.get("results", [])) - len(priced)
+    # Only rows that clear the entry screen are shown -- the sub-screen rows
+    # are noise on a page whose question is "is there anything to take", and
+    # at 13 stations they dominated the table.
     for r in sorted(priced, key=lambda x: x["net_ev_per_dollar"], reverse=True):
         ev = r["net_ev_per_dollar"]
-        cls = "pos" if ev >= EV_ENTRY_SCREEN else ""
+        if ev < EV_ENTRY_SCREEN:
+            continue
+        cls = "pos"
         rows.append(
             "<tr>"
             f"<td class='mono'>{html.escape(snap['station_icao'])}</td>"
@@ -298,9 +305,10 @@ try:
                 ev_html += (f"<p class='cap' style='margin:14px 0 0'>{total_unpriced} bucket/side rows "
                             "had no live quote (unseeded far-tail books).</p>")
         else:
-            ev_html = "<div class='empty'>Latest EV computation found no priceable buckets.</div>"
-        ev_cap = (f"latest computation {age_note} &middot; grouped by station &middot; rows at or above the "
-                  f"{EV_ENTRY_SCREEN:.0%} net-EV entry screen highlighted")
+            ev_html = ("<div class='empty'>No bucket/side cleared the "
+                       f"{EV_ENTRY_SCREEN:.0%} net-EV entry screen in the latest computation.</div>")
+        ev_cap = (f"latest computation {age_note} &middot; grouped by station &middot; only rows at or "
+                  f"above the {EV_ENTRY_SCREEN:.0%} net-EV entry screen shown")
     else:
         ev_html = ("<div class='empty'>No EV snapshot yet &mdash; the engine computes during the morning "
                    "entry windows (05:00&ndash;10:00 local) and saves its table here from then on.</div>")
@@ -443,48 +451,71 @@ def tile_val(v):
     return "&mdash;" if v is None else str(v)
 
 
-# --- station cards ---------------------------------------------------------
-# One card per registered station instead of two hand-written WSSS/WMKK
-# blocks. Layout/CSS untouched -- only the per-station facts (display name,
-# country, maturity from config.STATION_MATURITY, official client) vary.
-def _station_card(icao, st):
-    maturity = config.STATION_MATURITY.get(icao, "exploratory")
-    badge_cls = "mature" if maturity == "mature" else "immature"
-    if maturity == "mature":
-        history = "confirmed, real station readings"
-        calibration = "bias-correction confirmed"
-        sizing = "full Kelly path (capped)"
-    else:
-        # Every non-mature station starts collection-only automatically
-        # (config.MIN_RESOLUTION_OBS_BEFORE_ENTRY) and graduates by simply
-        # existing for a few days -- described here rather than claiming a
-        # confirmed edge the maturity gate itself says doesn't exist yet.
-        history = "accumulating -- collection-only until proven"
-        calibration = "unverified -- exploratory sizing until proven"
-        sizing = "maturity-gated, reduced"
-    if st.resolution_grade_source == "metar_daily_max":
-        resolution = f"Wunderground {html.escape(icao)} history"
-    else:
-        # e.g. Hong Kong settles on "hko_daily_max" (the HKO climate
-        # extract), not any Wunderground page -- say so plainly rather than
-        # implying a Wunderground resolution source that isn't the real one.
-        resolution = html.escape(st.resolution_grade_source.replace("_", " "))
+# --- station table ----------------------------------------------------------
+# One row per registered station instead of a grid of descriptive cards. The
+# cards' prose (observed history / calibration / sizing) was entirely
+# derivable from the maturity badge, while the numbers worth scanning per
+# station -- closed-trade stats, open exposure, realized P&L -- weren't on
+# the page at all in per-station form. Stats come from the same
+# summarize_paper_performance() dicts the headline P&L tile sums over, so
+# the table rows and the tile can never disagree.
+def _station_table():
+    open_count = {}
+    open_staked = {}
+    for p in open_positions:
+        open_count[p.station_icao] = open_count.get(p.station_icao, 0) + 1
+        open_staked[p.station_icao] = open_staked.get(p.station_icao, 0.0) + float(p.size_usd or 0.0)
+    rows = []
+    for icao in sorted(config.STATIONS):
+        st = config.STATIONS[icao]
+        maturity = config.STATION_MATURITY.get(icao, "exploratory")
+        badge_cls = "mature" if maturity == "mature" else "immature"
+        s = station_summaries.get(icao)
+        if s:
+            n_trades = str(s["n_trades"])
+            win = f"{s['win_rate']:.0%}"
+            pnl = float(s["total_pnl_usd"])
+            pnl_cell = f"{'-' if pnl < 0 else '+'}${abs(pnl):,.2f}"
+            pnl_cls = "neg" if pnl < 0 else "pos"
+            dwr = s.get("dollar_weighted_return_pct")
+            ret = f"{dwr:+.1%}" if dwr is not None else "&mdash;"
+            ret_cls = ("neg" if dwr < 0 else "pos") if dwr is not None else ""
+        else:
+            n_trades, win = "0", "&mdash;"
+            pnl_cell, pnl_cls, ret, ret_cls = "&mdash;", "", "&mdash;", ""
+        n_open = open_count.get(icao, 0)
+        at_risk = f"${open_staked.get(icao, 0.0):,.0f}" if n_open else "&mdash;"
+        rows.append(
+            "<tr>"
+            f"<td class='mono'>{html.escape(icao)}</td>"
+            f"<td>{html.escape(st.display_name)}</td>"
+            f"<td><span class='badge {badge_cls}'>{html.escape(maturity)}</span></td>"
+            f"<td class='mono num'>{n_trades}</td>"
+            f"<td class='mono num'>{win}</td>"
+            f"<td class='mono num'>{n_open}</td>"
+            f"<td class='mono num'>{at_risk}</td>"
+            f"<td class='mono num {pnl_cls}'>{pnl_cell}</td>"
+            f"<td class='mono num {ret_cls}'>{ret}</td>"
+            "</tr>"
+        )
     return (
-        "<div class='card station'>"
-        f"<h3><span class='icao'>{html.escape(icao)}</span> {html.escape(st.display_name)} "
-        f"<span class='badge {badge_cls}'>{html.escape(maturity)}</span></h3>"
-        "<dl>"
-        f"<dt>Country</dt><dd>{html.escape(st.country)}</dd>"
-        f"<dt>Observed history</dt><dd>{history}</dd>"
-        f"<dt>Calibration</dt><dd>{calibration} ({html.escape(st.official_client_key)})</dd>"
-        f"<dt>Sizing</dt><dd>{sizing}</dd>"
-        f"<dt>Resolution source</dt><dd>{resolution}</dd>"
-        "</dl>"
-        "</div>"
+        "<div class='tablewrap'><table class='ptable'>"
+        "<thead><tr><th>Station</th><th>Name</th><th>Maturity</th>"
+        "<th class='num'>Trades</th><th class='num'>Win rate</th>"
+        "<th class='num'>Open</th><th class='num'>At risk</th>"
+        "<th class='num'>Realized P&amp;L</th><th class='num'>Return</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
 
 
-station_cards_html = "".join(_station_card(icao, st) for icao, st in config.STATIONS.items())
+try:
+    stations_table_html = _station_table()
+    stations_cap = ("closed paper trades per station &middot; Return is dollar-weighted realized P&amp;L "
+                    "per dollar staked &middot; At risk sums open paper stakes")
+except Exception as exc:  # noqa: BLE001
+    warnings.append(f"station table failed: {exc}")
+    stations_table_html = "<div class='empty'>station table unavailable</div>"
+    stations_cap = ""
 
 # --- per-timezone-group time strips -----------------------------------------
 # The registry spans UTC+5 (Karachi) through UTC+9 (Tokyo/Seoul/Busan) --
@@ -627,15 +658,10 @@ page = """<!doctype html>
     font-size:10.5px; color:var(--heat); white-space:nowrap; }
   .countdown { margin-top:16px; font-size:13.5px; color:var(--ink-2); }
   .countdown b { font-family:var(--mono); color:var(--heat); font-variant-numeric:tabular-nums; }
-  .stations { display:grid; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); gap:12px; }
-  .station h3 { font-size:15px; margin:0; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-  .station .icao { font-family:var(--mono); color:var(--teal); }
   .badge { font-family:var(--mono); font-size:10.5px; letter-spacing:.06em; text-transform:uppercase;
     padding:2px 8px; border-radius:4px; }
   .badge.mature { background:var(--good-bg); color:var(--good); }
   .badge.immature { background:var(--warn-bg); color:var(--warn); }
-  .station dl { display:grid; grid-template-columns:auto 1fr; gap:4px 14px; margin:12px 0 0; font-size:13px; }
-  .station dt { color:var(--muted); } .station dd { margin:0; color:var(--ink-2); }
   .probes { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:8px; }
   .probe { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:6px;
     border:1px solid var(--line); background:var(--paper); font-size:12px; min-width:0; }
@@ -727,8 +753,10 @@ page = """<!doctype html>
     <p class="countdown">Next entry window opens in <b id="countdown">&mdash;</b> (soonest 05:00 across all groups).</p>
   </div>
 
-  <div class="stations">
-    @@STATIONCARDS@@
+  <div class="card">
+    <h2>Stations</h2>
+    <p class="cap">@@STATIONSCAP@@</p>
+    @@STATIONTABLE@@
   </div>
 
   <div class="card">
@@ -816,7 +844,8 @@ page = (
     .replace("@@JOURNAL@@", html.escape(journal))
     .replace("@@DEPLOYMS@@", str(deploy_epoch_ms))
     .replace("@@STATIONCOUNT@@", str(station_count))
-    .replace("@@STATIONCARDS@@", station_cards_html)
+    .replace("@@STATIONSCAP@@", stations_cap)
+    .replace("@@STATIONTABLE@@", stations_table_html)
     .replace("@@TIMESTRIPS@@", time_strips_html)
     .replace("@@NOWMARKGROUPS@@", nowmark_groups_json)
     .replace("@@COUNTDOWNMS@@", str(countdown_target_ms))
