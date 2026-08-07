@@ -239,10 +239,24 @@ def _load_ev_snapshots():
     return snaps
 
 
+# Mirrors ev_engine.best_opportunities(): the trading screen excludes
+# sub-EV_MIN_PRICE_SCREEN buckets because net EV divides raw_edge by price,
+# so a near-zero price turns any stale-model disagreement into a
+# "+18,820% EV" artifact. The dashboard used to skip this guard and rank
+# exactly those phantoms at the top of the table. getattr fallback keeps
+# the page rendering against a package checkout that predates the constant.
+try:
+    EV_MIN_PRICE = getattr(config, "EV_MIN_PRICE_SCREEN", 0.03)
+    EV_VETO_EDGE = getattr(config, "MAX_PLAUSIBLE_RAW_EDGE", 0.25)
+except NameError:  # config import itself failed above; page must still render
+    EV_MIN_PRICE, EV_VETO_EDGE = 0.03, 0.25
+
+
 def _ev_rows(snap):
     rows = []
     priced = [r for r in snap.get("results", []) if r.get("net_ev_per_dollar") is not None]
     unpriced = len(snap.get("results", [])) - len(priced)
+    suppressed = 0
     # Only rows that clear the entry screen are shown -- the sub-screen rows
     # are noise on a page whose question is "is there anything to take", and
     # at 13 stations they dominated the table.
@@ -250,7 +264,19 @@ def _ev_rows(snap):
         ev = r["net_ev_per_dollar"]
         if ev < EV_ENTRY_SCREEN:
             continue
+        if (r.get("market_price") or 0) < EV_MIN_PRICE:
+            suppressed += 1
+            continue
+        # A row the entry path would refuse is still worth SEEING (it often
+        # means the model, not the market, is wrong for that station) -- but
+        # it must not read as an opportunity. Badge instead of hide.
+        flags = ""
         cls = "pos"
+        if abs(r["raw_edge"]) > EV_VETO_EDGE:
+            flags += " <span class='badge veto'>veto zone</span>"
+            cls = ""
+        if r.get("spread_source") == "fallback_default":
+            flags += " <span class='badge fallback'>fallback est</span>"
         rows.append(
             "<tr>"
             f"<td class='mono'>{html.escape(snap['station_icao'])}</td>"
@@ -259,10 +285,10 @@ def _ev_rows(snap):
             f"<td class='mono num'>{r['model_prob']:.1%}</td>"
             f"<td class='mono num'>{r['market_price']:.3f}</td>"
             f"<td class='mono num'>{r['raw_edge']:+.1%}</td>"
-            f"<td class='mono num {cls}'>{ev:+.1%}</td>"
+            f"<td class='mono num {cls}'>{ev:+.1%}{flags}</td>"
             "</tr>"
         )
-    return rows, unpriced
+    return rows, unpriced, suppressed
 
 
 try:
@@ -271,6 +297,7 @@ try:
         ages = []
         section_blocks = []
         total_unpriced = 0
+        total_suppressed = 0
         # Grouped by station, each under its own subheading, instead of one
         # flat table spanning all 13 stations sorted purely by net EV -- at
         # 2-station scale a flat ranking was fine, but at 13 it buries a
@@ -280,8 +307,9 @@ try:
         # by ICAO for a stable page layout (not by "best EV station first",
         # which would reorder the whole page every regeneration).
         for snap in sorted(ev_snaps, key=lambda s: s.get("station_icao", "")):
-            rows, unpriced = _ev_rows(snap)
+            rows, unpriced, suppressed = _ev_rows(snap)
             total_unpriced += unpriced
+            total_suppressed += suppressed
             ages.append(snap.get("generated_at", ""))
             if not rows:
                 continue
@@ -304,6 +332,11 @@ try:
             if total_unpriced:
                 ev_html += (f"<p class='cap' style='margin:14px 0 0'>{total_unpriced} bucket/side rows "
                             "had no live quote (unseeded far-tail books).</p>")
+            if total_suppressed:
+                ev_html += (f"<p class='cap' style='margin:6px 0 0'>{total_suppressed} row(s) suppressed: "
+                            f"market price under {EV_MIN_PRICE:.2f}, where percentage EV explodes on a "
+                            "converged market the stale model disagrees with &mdash; the entry screen "
+                            "excludes these too (config.EV_MIN_PRICE_SCREEN).</p>")
         else:
             ev_html = ("<div class='empty'>No bucket/side cleared the "
                        f"{EV_ENTRY_SCREEN:.0%} net-EV entry screen in the latest computation.</div>")
@@ -662,6 +695,8 @@ page = """<!doctype html>
     padding:2px 8px; border-radius:4px; }
   .badge.mature { background:var(--good-bg); color:var(--good); }
   .badge.immature { background:var(--warn-bg); color:var(--warn); }
+  .badge.veto { background:var(--bad-bg); color:var(--bad); }
+  .badge.fallback { background:var(--warn-bg); color:var(--warn); }
   .probes { display:grid; grid-template-columns:repeat(auto-fit,minmax(215px,1fr)); gap:8px; }
   .probe { display:flex; align-items:center; gap:8px; padding:8px 12px; border-radius:6px;
     border:1px solid var(--line); background:var(--paper); font-size:12px; min-width:0; }

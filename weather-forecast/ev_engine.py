@@ -287,7 +287,7 @@ def book_dislocation(token_map: Dict[int, dict]) -> Optional[float]:
 def best_opportunities(
     results: List[EVResult],
     min_net_ev: float = 0.15,
-    min_price: float = 0.03,
+    min_price: float = config.EV_MIN_PRICE_SCREEN,
 ) -> List[EVResult]:
     """
     Filter to EVResults clearing a minimum net-EV bar, sorted best
@@ -571,6 +571,7 @@ def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
                 "raw_edge": r.raw_edge,
                 "slippage_pct": r.estimated_slippage_pct,
                 "net_ev_per_dollar": r.net_ev_per_dollar,
+                "spread_source": r.spread_source,
                 "notes": r.notes,
             }
             for r in results

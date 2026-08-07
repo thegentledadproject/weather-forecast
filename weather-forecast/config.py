@@ -451,6 +451,16 @@ MAX_STOP_OUTS_PER_BUCKET_PER_DAY = 1
 # catches absurdly LARGE edges); this catches meaninglessly SMALL ones.
 MIN_ABS_RAW_EDGE = 0.03
 
+# Minimum market price for a bucket/side to count as an opportunity AT ALL
+# -- anywhere: ev_engine.best_opportunities() (live + backtest screen) and
+# the status dashboard's EV table both apply it. Because net EV divides
+# raw_edge by price, a near-zero price turns any model disagreement into a
+# quadruple-digit "+18,820% EV" artifact; a market at 0.001 late in the day
+# is a CONVERGED market the stale morning model disagrees with, not free
+# money. Single constant so the trading screen and the report can never
+# drift apart on what counts as displayable edge again.
+EV_MIN_PRICE_SCREEN = 0.03
+
 # When the edge was computed against a std_dev_c with NO real spread
 # signal behind it (CalibratedEstimate.spread_source == "fallback_default"
 # -- see calibration.estimate_std_dev()), the probability the edge itself
