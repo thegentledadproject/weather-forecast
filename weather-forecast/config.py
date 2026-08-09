@@ -132,10 +132,11 @@ STATIONS = {
         lat=2.7456,
         lon=101.7099,
         wunderground_slug="my/sepang-district/WMKK",
-        long_term_normal_max_c=32.2,  # placeholder -- confirm against MET Malaysia's
-                                       # published climatological normals before relying
-                                       # on this for real calibration (see framework doc:
-                                       # Polymarket resolves KL to WMKK's Wunderground page)
+        long_term_normal_max_c=32.8,  # SOURCED: WMO 1991-2020 August mean daily max for
+                                       # Kuala Lumpur city. WMKK/Sepang is ~50 km south
+                                       # and more rural, so this is the loosest of the
+                                       # sourced substitutions -- MET Malaysia's own
+                                       # Sepang normals would be the exact figure.
         official_client_key="met_malaysia",
         polymarket_city_slug="kuala-lumpur",
         monsoon_phase_by_month=_SEA_MONSOON_PHASE_BY_MONTH,
@@ -155,9 +156,12 @@ STATIONS = {
         lat=35.5533,
         lon=139.7811,
         wunderground_slug="jp/tokyo/RJTT",
-        long_term_normal_max_c=31.3,  # placeholder (Tokyo Aug 1991-2020 normal) --
-                                       # confirm against JMA's published normals for
-                                       # Haneda itself before trusting for calibration
+        long_term_normal_max_c=31.3,  # STILL A PLACEHOLDER (2026-08-09 sourcing pass).
+                                       # JMA's 1991-2020 normal for the "Tokyo" station
+                                       # (Otemachi) is ~32.6C, but that is an inland
+                                       # urban-heat site and Haneda is on the bay --
+                                       # substituting it would swap one error for a
+                                       # bigger one. Needs JMA's Haneda (47671) normals.
         official_client_key="wwis",
         polymarket_city_slug="tokyo",
         utc_offset_hours=9,
@@ -172,8 +176,9 @@ STATIONS = {
         lat=37.4691,
         lon=126.4505,
         wunderground_slug="kr/incheon/RKSI",
-        long_term_normal_max_c=29.1,  # placeholder (Incheon Aug normal) -- confirm
-                                       # against KMA's published normals before trusting
+        long_term_normal_max_c=29.2,  # SOURCED: KMA 1991-2020 August mean daily max for
+                                       # Incheon city. RKSI is ~15 km west on Yeongjong
+                                       # Island; both coastal, so a close stand-in.
         official_client_key="wwis",
         polymarket_city_slug="seoul",  # Polymarket titles this "Seoul (Incheon)"
         utc_offset_hours=9,
@@ -191,8 +196,11 @@ STATIONS = {
         lat=35.1795,
         lon=128.9382,
         wunderground_slug="kr/busan/RKPK",
-        long_term_normal_max_c=30.8,  # placeholder (Busan Aug normal) -- confirm
-                                       # against KMA's published normals before trusting
+        long_term_normal_max_c=30.8,  # PLACEHOLDER KEPT ON PURPOSE (2026-08-09): KMA's
+                                       # 1991-2020 Busan normal is 29.5C, but that is the
+                                       # coastal city station and RKPK/Gimhae sits inland
+                                       # up the Nakdong valley, reliably warmer. Adopting
+                                       # 29.5 would bias this station cool. Needs Gimhae.
         official_client_key="wwis",
         polymarket_city_slug="busan",
         utc_offset_hours=9,
@@ -218,8 +226,11 @@ STATIONS = {
         lat=22.3020,
         lon=114.1741,
         wunderground_slug="hk/hong-kong/VHHH",  # proxy page only -- NOT the resolution source
-        long_term_normal_max_c=31.6,  # placeholder (HKO Aug 1991-2020 normal) --
-                                       # confirm against HKO's published normals
+        long_term_normal_max_c=31.3,  # SOURCED: HKO 1991-2020 August mean daily max.
+                                       # EXACT for this station -- the market settles on
+                                       # the Observatory's own record (resolution_grade_
+                                       # source="hko_daily_max"), so this normal and the
+                                       # settlement site are the same place.
         official_client_key="hko",
         polymarket_city_slug="hong-kong",
         bucket_min_c=27,  # live 2026-08-06 event: 27..37
@@ -238,8 +249,9 @@ STATIONS = {
         lat=14.5086,
         lon=121.0198,
         wunderground_slug="ph/manila/RPLL",
-        long_term_normal_max_c=30.9,  # placeholder (Manila Aug normal) -- confirm
-                                       # against PAGASA's published normals
+        long_term_normal_max_c=30.8,  # SOURCED: PAGASA 1991-2020 August mean daily max
+                                       # for Ninoy Aquino Intl -- which IS this station
+                                       # (RPLL), so no site substitution.
         official_client_key="wwis",
         polymarket_city_slug="manila",
         bucket_min_c=25,  # live 2026-08-06 event: 25..35
@@ -253,8 +265,9 @@ STATIONS = {
         lat=25.0694,
         lon=121.5525,
         wunderground_slug="tw/taipei/RCSS",
-        long_term_normal_max_c=34.3,  # placeholder (Taipei Aug normal) -- confirm
-                                       # against CWA's published normals
+        long_term_normal_max_c=34.2,  # SOURCED: CWB/CWA 1991-2020 August mean daily max
+                                       # for Taipei. Songshan sits inside the city, so
+                                       # the city normal is a close stand-in.
         official_client_key="wwis",
         polymarket_city_slug="taipei",
         bucket_min_c=28,  # live 2026-08-06 event: 28..38
@@ -273,8 +286,11 @@ STATIONS = {
         lat=31.1443,
         lon=121.8083,
         wunderground_slug="cn/shanghai/ZSPD",
-        long_term_normal_max_c=32.2,  # placeholder (Shanghai Aug normal; Pudong's
-                                       # coastal site may run cooler) -- confirm
+        long_term_normal_max_c=32.2,  # PLACEHOLDER KEPT ON PURPOSE (2026-08-09): CMA's
+                                       # 1991-2020 Shanghai normal is 32.6C, but that is
+                                       # Xujiahui -- a downtown heat-island site. Pudong
+                                       # is coastal and runs cooler, so adopting 32.6
+                                       # would move this the WRONG way. Needs Pudong.
         official_client_key="wwis",
         polymarket_city_slug="shanghai",
         bucket_min_c=27,  # live 2026-08-06 event: 27..37
@@ -288,7 +304,9 @@ STATIONS = {
         lat=40.0801,
         lon=116.5846,
         wunderground_slug="cn/beijing/ZBAA",
-        long_term_normal_max_c=30.3,  # placeholder (Beijing Aug normal) -- confirm
+        long_term_normal_max_c=30.7,  # SOURCED: CMA 1991-2020 August mean daily max for
+                                       # Beijing; Capital Airport is ~25 km NE of the
+                                       # reference station.
         official_client_key="wwis",
         polymarket_city_slug="beijing",
         bucket_min_c=30,  # live 2026-08-06 event: 30..40
@@ -302,7 +320,9 @@ STATIONS = {
         lat=23.3924,
         lon=113.2988,
         wunderground_slug="cn/guangzhou/ZGGG",
-        long_term_normal_max_c=33.4,  # placeholder (Guangzhou Aug normal) -- confirm
+        long_term_normal_max_c=33.4,  # STILL A PLACEHOLDER (2026-08-09 sourcing pass):
+                                       # no authoritative CMA 1991-2020 August normal
+                                       # located for Guangzhou. Not guessed.
         official_client_key="wwis",
         polymarket_city_slug="guangzhou",
         bucket_min_c=29,  # live 2026-08-06 event: 29..39
@@ -316,7 +336,9 @@ STATIONS = {
         lat=22.6393,
         lon=113.8108,
         wunderground_slug="cn/shenzhen/ZGSZ",
-        long_term_normal_max_c=32.5,  # placeholder (Shenzhen Aug normal) -- confirm
+        long_term_normal_max_c=32.2,  # SOURCED: Shenzhen Meteorological Bureau 1991-2020
+                                       # August mean daily max; Bao'an Airport is coastal
+                                       # within the same city.
         official_client_key="wwis",
         polymarket_city_slug="shenzhen",
         bucket_min_c=28,  # live 2026-08-06 event: 28..38
@@ -331,7 +353,9 @@ STATIONS = {
         lat=24.9065,
         lon=67.1608,
         wunderground_slug="pk/karachi/OPKC",
-        long_term_normal_max_c=31.7,  # placeholder (Karachi Aug monsoon normal) -- confirm
+        long_term_normal_max_c=32.5,  # SOURCED: 1991-2020 August mean daily max for
+                                       # Karachi, whose official station is at Jinnah
+                                       # Intl -- this station.
         official_client_key="wwis",
         polymarket_city_slug="karachi",
         utc_offset_hours=5,
@@ -794,7 +818,21 @@ EXPLORATORY_SIZE_MULTIPLIER = 0.20  # exploratory stations get 20% of what matur
 # those trades is wrong. Collection costs nothing; wrong entries don't.
 # New stations therefore start collection-only automatically and graduate
 # by simply existing for a few days.
-MIN_RESOLUTION_OBS_BEFORE_ENTRY = 5
+#
+# Raised 5 -> 10 on 2026-08-09, and demoted to a FLOOR rather than the
+# test. At 5 it was doing nothing at all: a forecast/observation pair
+# requires an observation, so n_pairs <= n_observations always, and
+# MIN_BIAS_PAIRS_BEFORE_ENTRY = 5 already implies five observations. The
+# adaptive bias gate below (pairs + standard error) is the real check --
+# it asks for more evidence from a noisy station and less from a
+# consistent one, which a flat count cannot do. What the count still buys
+# is history behind the OTHER half of the estimate: observed readings
+# carry 60% of the weight in blend_central_estimate() and are the
+# observed_variance spread fallback, and five of them is a thin basis for
+# either. Ten is roughly a fortnight of settlement-grade record. Both
+# currently-trading stations (WSSS and WMKK, 13 each) clear it, so this
+# changes nothing today -- it is a guard for the next station added.
+MIN_RESOLUTION_OBS_BEFORE_ENTRY = 10
 
 # --- Forecast bias: measure it, correct it, and refuse to trade blind ----
 # Counting observations was never the point -- MEASURING THE BIAS was, and
