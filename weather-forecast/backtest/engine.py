@@ -767,14 +767,27 @@ def _exit_pass(clock, tick, portfolio, prices, last_observed, counters) -> None:
         if not decision.should_exit:
             continue
 
-        # Status/exit_reason exactly as executor.close_position() derives
-        # them in paper mode (every replay fill is paper by definition).
+        # Status/exit_reason/exit_price exactly as executor.close_position()
+        # derives them in paper mode (every replay fill is paper by
+        # definition) -- INCLUDING the exit-side taker fee, which live
+        # deducts from the recorded price. A replay that booked exits
+        # gross while live booked them net would overstate every
+        # simulated exit by the fee, which is several times a typical
+        # trailing-stop gain.
+        gross_exit_price = decision.current_price
+        exit_fee_per_share = risk_manager.taker_fee_per_share(gross_exit_price)
+        net_exit_price = max(gross_exit_price - exit_fee_per_share, 0.0)
+        net_pnl_pct = risk_manager.compute_pnl_pct(position.entry_price, net_exit_price)
         portfolio.close_position(
             position_id=position_id,
-            exit_price=decision.current_price,
+            exit_price=net_exit_price,
             exit_time_iso=clock.now_iso(),
             status=f"closed_{decision.reason}",
-            exit_reason=f"{decision.reason} (paper, pnl={decision.pnl_pct:+.1%})",
+            exit_reason=(
+                f"{decision.reason} (paper, pnl={net_pnl_pct:+.1%} net; "
+                f"gross {gross_exit_price:.4f} - exit fee {exit_fee_per_share:.4f}/share "
+                f"= net {net_exit_price:.4f})"
+            ),
         )
         last_observed.pop(position_id, None)
 

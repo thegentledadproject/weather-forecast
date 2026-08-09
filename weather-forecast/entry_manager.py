@@ -9,14 +9,24 @@ mispriced; risk_manager.py/position_manager.py can manage a position
 once it exists; nothing sat between them turning "this looks good" into
 "here's exactly how much to trade, or why not to."
 
-Two vetoes run BEFORE any sizing, since neither can be fixed by trading
+Vetoes run BEFORE any sizing, since none of them can be fixed by trading
 smaller:
-  0a. Edge plausibility -- a raw edge past config.MAX_PLAUSIBLE_RAW_EDGE
-      is a data error, not alpha, and is rejected outright. This is not
-      hypothetical: a price-inversion bug produced "edges" of 0.88 and
-      net EVs of +1298% that cleared every EV, slippage and sizing gate
-      below and traded real money, because nothing asked whether an edge
-      that large was believable in the first place.
+  00. Entry price ceiling -- config.MAX_ENTRY_PRICE. Above it, remaining
+      upside (1 - price) is smaller than the risk carried, the edge
+      plausibility ceiling below goes structurally blind, and Kelly's
+      denominator collapses so every entry sizes to the cap. Nothing
+      bounded the top end before; entries this expensive were kept out
+      only accidentally, by percentage net EV having a (1-price)/price
+      ceiling that a 15% bar happens to make unreachable above 0.87.
+  0a. Edge plausibility -- a raw edge past the ceiling is a data error,
+      not alpha, and is rejected outright. This is not hypothetical: a
+      price-inversion bug produced "edges" of 0.88 and net EVs of +1298%
+      that cleared every EV, slippage and sizing gate below and traded
+      real money, because nothing asked whether an edge that large was
+      believable in the first place. The ceiling is the smaller of
+      config.MAX_PLAUSIBLE_RAW_EDGE and a fraction of the headroom that
+      actually exists at this price -- a flat ceiling alone could never
+      fire above price 0.75, since raw edge <= 1 - price by construction.
   0b. Per-bucket position cap -- config.MAX_OPEN_POSITIONS_PER_BUCKET
       open positions on the same (station, date, bucket, side) already
       means this bet is on. Repeat entries across cycles are not extra
@@ -87,6 +97,32 @@ _cooldown_vetoes_logged = set()
 _collection_only_logged = set()
 
 
+def max_plausible_edge_for(market_price: Optional[float]) -> float:
+    """
+    The largest raw edge that counts as believable at this price -- the
+    smaller of the flat config.MAX_PLAUSIBLE_RAW_EDGE and a fraction of
+    the headroom actually available, config.MAX_PLAUSIBLE_EDGE_HEADROOM_
+    FRACTION x (1 - price).
+
+    The headroom term exists because raw edge is bounded by (1 - price)
+    anyway: model_prob can't exceed 1.0, so at price 0.80 the largest
+    expressible edge is 0.20 and a flat 0.25 ceiling is unreachable. Above
+    price 0.75 the flat ceiling could never fire at all -- precisely the
+    band where a side/price mix-up yields the most plausible-looking
+    numbers (a spurious model_prob of 0.99 against a real 0.85 quote is an
+    edge of 0.14, under the flat ceiling and through every other gate).
+
+    The two terms are equal at price 0.50, so the curve is continuous and
+    the flat ceiling still binds everywhere below it -- no pre-existing
+    behaviour changes. Pure function, shared verbatim with
+    backtest/entry_sim.py so the live screen and the replay cannot drift.
+    """
+    if market_price is None:
+        return config.MAX_PLAUSIBLE_RAW_EDGE
+    headroom_ceiling = config.MAX_PLAUSIBLE_EDGE_HEADROOM_FRACTION * (1.0 - market_price)
+    return min(config.MAX_PLAUSIBLE_RAW_EDGE, max(headroom_ceiling, 0.0))
+
+
 def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
     """
     Full-Kelly fraction for this bet: raw_edge / (1 - price). Derived
@@ -98,7 +134,15 @@ def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
         return None
     if ev_result.market_price >= 1.0:
         return None  # degenerate, avoid division by zero
-    return ev_result.raw_edge / (1 - ev_result.market_price)
+    # Denominator floored: see config.MIN_KELLY_DENOMINATOR. (1 - price)
+    # goes to zero as price -> 1, and the effect is not that sizing gets
+    # aggressive so much as that it stops carrying information -- at price
+    # 0.95 even the smallest legal edge produces 0.60 full-Kelly, which
+    # quarter-Kellys onto MAX_POSITION_USD, so every approved entry
+    # emerges at the cap regardless of quality. Binds only above price
+    # 0.80, i.e. behind MAX_ENTRY_PRICE as a backstop.
+    denominator = max(1 - ev_result.market_price, config.MIN_KELLY_DENOMINATOR)
+    return ev_result.raw_edge / denominator
 
 
 def count_open_positions_for_bucket(
@@ -142,11 +186,17 @@ def count_stop_outs_for_bucket(
 ) -> Optional[int]:
     """
     How many times this exact (station, target_date, bucket, side) has
-    already exited via STOP-LOSS -- feeds the daily re-entry cooldown.
-    Counts closed_stop_loss only: a trailing stop is a winner giving back
-    its peak, which is a different fact from the market rejecting the
-    entry outright. Returns None if history could not be read at all --
-    callers must treat that as "unknown, do not open", not as zero.
+    already been closed by a price-noise exit -- feeds the daily re-entry
+    cooldown. Counts every status in config.COOLDOWN_COUNTED_EXIT_STATUSES.
+
+    Trailing-stop exits used to be excluded, on the reasoning that "a
+    trailing stop is a winner giving back its peak, not the market
+    rejecting the entry." True in isolation, but it left the churn loop
+    this cooldown exists to break wide open through the other door: a
+    bucket could stop -> re-buy -> trail out -> re-buy all day without
+    ever tripping it, paying the spread and both legs of taker fees every
+    lap. Returns None if history could not be read at all -- callers must
+    treat that as "unknown, do not open", not as zero.
     """
     try:
         history = storage.load_position_history(station_icao, is_paper=is_paper)
@@ -159,7 +209,7 @@ def count_stop_outs_for_bucket(
         if p.target_date == target_date
         and p.bucket_c == bucket_c
         and p.side.upper() == side.upper()
-        and p.status == "closed_stop_loss"
+        and p.status in config.COOLDOWN_COUNTED_EXIT_STATUSES
     )
 
 
@@ -269,19 +319,39 @@ def evaluate_entry(
             token_id=token_id,
         )
 
+    # Veto 00: entry price ceiling. Above MAX_ENTRY_PRICE the instrument
+    # itself is wrong for this system regardless of how good the signal
+    # looks -- remaining upside is (1 - price) against a full stake at
+    # risk, the plausibility ceiling below goes blind, and Kelly sizes
+    # everything to the cap. Checked first because it is a property of
+    # the market, not of the edge.
+    if ev_result.market_price is not None and ev_result.market_price > config.MAX_ENTRY_PRICE:
+        print(
+            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: entry price "
+            f"{ev_result.market_price:.3f} is above the {config.MAX_ENTRY_PRICE:.2f} ceiling. Only "
+            f"{1 - ev_result.market_price:.3f} of upside remains against the whole stake at risk, and the "
+            f"edge-plausibility and Kelly-sizing gates both stop discriminating this close to 1.00."
+        )
+        return _rejected(
+            f"Entry price {ev_result.market_price:.3f} above MAX_ENTRY_PRICE "
+            f"({config.MAX_ENTRY_PRICE:.2f}) -- too little upside left to justify the stake."
+        )
+
     # Veto 0a: edge plausibility. An edge this large on a liquid weather
     # market is bad data, not alpha -- reject before it can be sized.
     raw_edge = ev_result.raw_edge
-    if raw_edge is not None and abs(raw_edge) > config.MAX_PLAUSIBLE_RAW_EDGE:
+    max_plausible_edge = max_plausible_edge_for(ev_result.market_price)
+    if raw_edge is not None and abs(raw_edge) > max_plausible_edge:
         print(
             f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: raw edge "
-            f"{raw_edge:+.1%} exceeds the {config.MAX_PLAUSIBLE_RAW_EDGE:.0%} plausibility ceiling. An edge "
-            f"this large is a PRESUMED DATA ERROR (bad or inverted quote, stale calibration, wrong token id) "
-            f"-- not a real trading signal. Not trading it; investigate the price feed and the calibration."
+            f"{raw_edge:+.1%} exceeds the {max_plausible_edge:.1%} plausibility ceiling at price "
+            f"{ev_result.market_price}. An edge this large is a PRESUMED DATA ERROR (bad or inverted quote, "
+            f"stale calibration, wrong token id) -- not a real trading signal. Not trading it; investigate "
+            f"the price feed and the calibration."
         )
         return _rejected(
-            f"VETOED: raw edge {raw_edge:+.1%} exceeds MAX_PLAUSIBLE_RAW_EDGE "
-            f"({config.MAX_PLAUSIBLE_RAW_EDGE:.0%}) -- presumed data error, not alpha."
+            f"VETOED: raw edge {raw_edge:+.1%} exceeds the plausibility ceiling "
+            f"({max_plausible_edge:.1%} at price {ev_result.market_price}) -- presumed data error, not alpha."
         )
 
     # Veto 0a2: edge MATERIALITY -- the mirror of 0a. Percentage EV explodes

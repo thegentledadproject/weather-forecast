@@ -59,8 +59,14 @@ def test_explicit_hour_matches_wall_clock_for_every_hour(monkeypatch):
     # Edge-sensitive scenario (a 20% loss) so the decision itself is
     # meaningful evidence the same threshold set was actually used on
     # both paths, not just a coincidental "hold" on both sides.
-    position = _make_position(entry_price=1.0)
-    current_price = 0.80
+    #
+    # Entry 0.40 / price 0.32 is still exactly -20%, but the entry price
+    # now has to be a REAL one: thresholds are fractions of the risk unit
+    # min(entry, 1-entry), so the old entry_price=1.0 is a degenerate
+    # position with zero upside and a clamped 0.01 risk unit, which stops
+    # out at every hour and tests nothing about the tighten boundary.
+    position = _make_position(entry_price=0.40)
+    current_price = 0.32
 
     for h in range(24):
         utc_hour = (h - 8) % 24
@@ -78,15 +84,17 @@ def test_explicit_hour_matches_wall_clock_for_every_hour(monkeypatch):
 
 
 def test_decision_flips_exactly_at_tighten_hour():
-    # Stop-loss thresholds: normal 0.30, tightened 0.15 (config.py).
-    # A pinned -0.20 pnl is a hold under the loose threshold and a
-    # stop_loss under the tightened one -- exactly straddles the
-    # config-driven boundary this test is checking.
+    # Stop-loss thresholds: normal 0.30, tightened 0.15 (config.py), both
+    # applied to the risk unit min(entry, 1-entry) -- here 0.40, so the
+    # stop sits 0.12 below entry before the tighten hour and 0.06 below
+    # it after. A pinned -0.20 pnl (0.08 below a 0.40 entry) is a hold
+    # under the loose threshold and a stop_loss under the tightened one:
+    # exactly straddles the config-driven boundary this test checks.
     assert config.STOP_LOSS_PCT == 0.30
     assert config.TIGHTENED_STOP_LOSS_PCT == 0.15
 
-    position = _make_position(entry_price=1.0)
-    current_price = 0.80  # pnl_pct == -0.20
+    position = _make_position(entry_price=0.40)
+    current_price = 0.32  # pnl_pct == -0.20
 
     decisions = {
         h: risk_manager.evaluate_exit(position, current_price, local_hour=h)

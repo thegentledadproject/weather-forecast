@@ -396,8 +396,30 @@ DB_PATH = DATA_DIR / "polyweather.sqlite3"
 # winning position ride hoping for more upside fights the system's own
 # timing thesis. Tune these per your own risk tolerance; these are starting
 # defaults, not researched optima.
-PROFIT_TAKE_PCT = 0.50      # exit once unrealized gain hits +50% of entry price
-STOP_LOSS_PCT = 0.30        # exit once unrealized loss hits -30% of entry price
+#
+# THE UNIT THESE ARE MEASURED IN (changed 2026-08-09)
+# ---------------------------------------------------
+# Every threshold below is a fraction of the position's RISK UNIT --
+# risk_manager.risk_unit() = min(entry_price, 1 - entry_price) -- not of
+# entry price. The old entry-price basis broke down above 0.50 because
+# price is capped at 1.00 while the thresholds are not:
+#
+#   PROFIT_TAKE_PCT 0.50 needed price >= 1.50 x entry, i.e. UNREACHABLE
+#   for any entry above 0.667. Same arithmetic killed the tightened take
+#   above 0.80 and both trailing activations above 0.80 / 0.87. An entry
+#   at 0.85 therefore had NO upside exit of any kind -- only the stop-loss
+#   and resolution could ever fire -- while carrying a 30% stop against a
+#   maximum possible gain of +17.6%. The stop exceeded the entire
+#   remaining upside for every entry above 0.769.
+#
+# min(entry, 1-entry) is the distance to the NEARER boundary, so a
+# threshold expressed against it can never demand a price outside [0, 1].
+# Below 0.50 the risk unit IS entry price, so every number here keeps its
+# old meaning exactly: this reformulation is a no-op for entries at or
+# below 0.50 and only changes the 0.50-0.75 band that was mispriced.
+# (See MAX_ENTRY_PRICE, which caps entries at 0.75.)
+PROFIT_TAKE_PCT = 0.50      # take profit once gain reaches +50% of the risk unit
+STOP_LOSS_PCT = 0.30        # cut once loss reaches -30% of the risk unit
 
 # Trailing stop: once a position's gain (measured from its high-water mark,
 # not just current price) crosses TRAILING_STOP_ACTIVATION_PCT, the fixed
@@ -408,8 +430,26 @@ STOP_LOSS_PCT = 0.30        # exit once unrealized loss hits -30% of entry price
 # than capping every winner at the same fixed percentage.
 # Deliberately set the activation threshold BELOW the fixed profit-take so
 # trailing takes over before the hard cap would otherwise fire.
-TRAILING_STOP_ACTIVATION_PCT = 0.25   # start trailing once peak gain reaches +25%
-TRAILING_STOP_PCT = 0.15              # exit if price falls 15% off its peak, once trailing is active
+#
+# TRAILING_STOP_PCT is a fraction of the RISK UNIT, like everything else
+# here. It used to be a fraction of the high-water mark, which made the
+# give-back a moving target that widened with the peak and -- worse --
+# floored the exit at a fixed +6.25% gross gain (0.85 x 1.25 - 1) no
+# matter the entry price. That is below round-trip taker fees, so a
+# trailing exit at the activation point booked a NET LOSS while being
+# recorded as a winner. See TRAILING_EXIT_COST_MARGIN.
+TRAILING_STOP_ACTIVATION_PCT = 0.25   # start trailing once peak gain reaches +25% of the risk unit
+TRAILING_STOP_PCT = 0.15              # exit if price falls 15% of the risk unit off its peak
+
+# A trailing-stop exit must clear its own round-trip taker fees by this
+# multiple before it is allowed to fire. The trailing stop exists to bank
+# a profit; an exit that nets negative after the fees on both legs is not
+# banking anything, it is paying the exchange to flatten a winner. When
+# the breach fails this test the position is HELD -- the hard stop-loss
+# below still protects it, so this can only delay an upside exit, never a
+# downside one. Set to 1.0 to require bare fee-neutrality; 1.5 leaves a
+# margin for the spread, which is not modelled on the exit side.
+TRAILING_EXIT_COST_MARGIN = 1.5
 
 # After this local hour, tighten both thresholds (see risk_manager.py) --
 # reflects the edge-decay curve: once the primary trading window closes,
@@ -432,9 +472,46 @@ TIGHTENED_TRAILING_STOP_PCT = 0.08             # and trail tighter -- lock in ga
 # already fully accepted at entry, and stopping it on price noise forfeits
 # exactly the rare winning paths that justify buying it. Positions entered
 # below this threshold therefore skip the percentage stop-loss entirely;
-# upside exits (profit-take, trailing stop) and resolution detection
-# still apply.
+# the fixed profit-take and resolution detection still apply.
+#
+# The TRAILING STOP is exempted too (changed 2026-08-09). It was not, and
+# that left the original failure mode fully intact one mechanism over: on
+# a 1-cent tick, a $0.05 ticket that ticks to $0.07 arms trailing (+40%
+# peak) and a tick back to $0.05 is a 2-cent give-back that blows through
+# any give-back band worth having. The ticket got churned out flat -- a
+# loss after two legs of fees -- for exactly the price noise the stop-loss
+# exemption exists to ignore. A lottery ticket's upside exit is the fixed
+# take or resolution; it is not a peak-give-back trade.
 LOTTERY_PRICE_THRESHOLD = 0.15
+
+# Hard ceiling on entry price. Above this, a bought bucket stops behaving
+# like a position and starts behaving like a bond with a stop-loss on it:
+#
+#   - Remaining upside is (1 - price), which at 0.85 is 15c against a
+#     stake of 85c. You risk the whole stake to win 17.6%.
+#   - MAX_PLAUSIBLE_RAW_EDGE cannot fire at all above price 0.75, because
+#     raw edge <= 1 - price by construction (model_prob <= 1.0). The one
+#     gate built to catch inverted-quote/wrong-token data errors is
+#     structurally blind in exactly this band -- see
+#     MAX_PLAUSIBLE_EDGE_HEADROOM_FRACTION, which fixes that too.
+#   - Kelly's denominator is (1 - price), so sizing explodes toward the
+#     per-trade cap as price -> 1: at 0.95 the SMALLEST legal edge
+#     (MIN_ABS_RAW_EDGE) already pins MAX_POSITION_USD, and Kelly stops
+#     discriminating on edge quality at all. See MIN_KELLY_DENOMINATOR.
+#   - A 0.95 entry needs model_prob >= 0.98 to clear MIN_ABS_RAW_EDGE.
+#     Tail probabilities are where a fallback-spread calibration is least
+#     trustworthy, and this is where it would be sized largest.
+#
+# 0.75 is where the normal-regime stop (30% of the risk unit) stops
+# exceeding total available upside, and where MAX_PLAUSIBLE_RAW_EDGE
+# regains its teeth. Until now nothing bounded the top end at all: the
+# only price screens were `market_price >= 1.0` and EV_MIN_PRICE_SCREEN
+# at the bottom. Entries this expensive were kept out only ACCIDENTALLY,
+# by net EV being a ratio -- (model_prob - price)/price has a ceiling of
+# (1-price)/price, so a 15% EV bar is arithmetically impossible above
+# 0.87 and a 25% bar above 0.80. That is a side effect of the metric, not
+# a risk control, and it evaporates the moment min_net_ev is lowered.
+MAX_ENTRY_PRICE = 0.75
 
 # After this many stop-loss exits on the same (station, date, bucket, side),
 # entries there are blocked for the rest of the day. The per-bucket open-
@@ -442,6 +519,18 @@ LOTTERY_PRICE_THRESHOLD = 0.15
 # the same bucket ran a "stop -> re-buy -> stop" churn loop, paying the
 # spread on every lap. One stop-out is the market's answer for the day.
 MAX_STOP_OUTS_PER_BUCKET_PER_DAY = 1
+
+# Which closed statuses count toward that cooldown. Trailing-stop exits
+# were deliberately excluded on the reasoning that "a trailing stop is a
+# winner giving back its peak, not the market rejecting the entry" -- true
+# in isolation, but it left the churn loop wide open through the other
+# door: a bucket could stop -> re-buy -> trail out -> re-buy all day
+# without ever tripping a cooldown, paying the spread and both legs of
+# taker fees on every lap. Counted together, one give-back-to-the-peak on
+# a bucket is as good a reason to leave it alone for the day as one
+# stop-out is. Kept as a tuple rather than hardcoded so the trade-off
+# stays visible and reversible.
+COOLDOWN_COUNTED_EXIT_STATUSES = ("closed_stop_loss", "closed_trailing_stop")
 
 # Minimum ABSOLUTE edge (model_prob - market_price, in dollars/share) for
 # any entry. Percentage EV explodes mechanically as price -> 0, which
@@ -490,7 +579,18 @@ MIN_EXIT_PRICE = 0.03
 # If the re-fetch disagrees or fails, the cycle acts on NOTHING and leaves
 # the position open: skipping one cycle is recoverable, exiting on a
 # phantom price is not.
-MAX_SINGLE_CYCLE_MOVE = 0.5
+#
+# Was 0.5 until 2026-08-09, which is most of the tradeable range and meant
+# the check almost never fired: a 0.49c jump sailed through unconfirmed
+# straight into the high-water mark, and the HWM is a monotone ratchet
+# that persists to SQLite and never comes back down. One bad-but-plausible
+# high print therefore armed the trailing stop permanently and set a floor
+# the position had to keep beating -- entry 0.30, a spurious 0.42, and the
+# next honest 0.31 quote is a give-back that closes the position. 0.15 is
+# roughly the largest intraday move a weather bucket makes between two
+# scans without something else having gone wrong, and confirmation costs
+# one extra request only when it fires.
+MAX_SINGLE_CYCLE_MOVE = 0.15
 
 # --- Scheduler windows ----------------------------------------------------
 # All times are LOCAL to each station's own market day. The registry spans
@@ -558,6 +658,24 @@ BANKROLL_USD = 1000.0
 # when the model's probability is wrong, which it sometimes will be.
 KELLY_FRACTION = 0.25
 
+# Floor under Kelly's denominator. compute_kelly_fraction() is
+# raw_edge / (1 - price), which is correct binary Kelly and also a
+# division by something that goes to zero as price -> 1. The practical
+# effect at high prices is that sizing stops responding to edge quality:
+# at price 0.95 the MINIMUM legal edge (MIN_ABS_RAW_EDGE = 0.03) already
+# yields 0.60 full-Kelly -> 15% of bankroll -> pinned at MAX_POSITION_USD,
+# so every approved entry comes out at maximum size no matter how good it
+# is. MAX_POSITION_USD was the only thing standing between that and a
+# much larger bet.
+#
+# Flooring the denominator at 0.20 caps full-Kelly at 5x the raw edge, so
+# sizing keeps discriminating. It binds only above price 0.80, which makes
+# it a backstop behind MAX_ENTRY_PRICE = 0.75 rather than the primary
+# control -- deliberately so: the failure it guards against is silent
+# (sizing looks normal, it just stopped meaning anything), and a future
+# loosening of the entry-price cap should not quietly re-arm it.
+MIN_KELLY_DENOMINATOR = 0.20
+
 # Hard per-trade cap, independent of what Kelly sizing alone would suggest --
 # a large enough apparent edge should never translate into betting the whole
 # bankroll on one bucket of one station's market.
@@ -588,6 +706,27 @@ MAX_ACCEPTABLE_SLIPPAGE_PCT = 0.10
 # gate into real money -- because nothing anywhere asked whether an edge
 # that big was even believable. Now something does.
 MAX_PLAUSIBLE_RAW_EDGE = 0.25
+
+# ...but a flat ceiling is structurally blind at high prices, because raw
+# edge is bounded by (1 - price) anyway: model_prob cannot exceed 1.0, so
+# at price 0.80 the largest edge that can even be expressed is 0.20 and
+# the 0.25 ceiling is unreachable. Above price 0.75 this gate could never
+# fire at all -- exactly the band where a side/price mix-up produces the
+# most believable-looking numbers. A spurious model_prob of 0.99 against a
+# real 0.85 quote is an edge of 0.14: comfortably under the flat ceiling,
+# through every other gate, and sized at the cap.
+#
+# So the ceiling also scales with the headroom actually available:
+#
+#   ceiling(price) = min(MAX_PLAUSIBLE_RAW_EDGE,
+#                        MAX_PLAUSIBLE_EDGE_HEADROOM_FRACTION * (1 - price))
+#
+# At 0.50 the two terms are equal (0.5 x 0.5 = 0.25), so the curve is
+# continuous and the flat ceiling still binds everywhere below 0.50 --
+# no existing behaviour changes. Above 0.50 the headroom term takes over:
+# 0.10 at price 0.80, 0.025 at 0.95. "More than half the maximum edge
+# that could possibly exist at this price" is not a trading signal.
+MAX_PLAUSIBLE_EDGE_HEADROOM_FRACTION = 0.50
 
 # Maximum simultaneously-open positions on the exact same
 # (station, target_date, bucket, side). One is the right number: repeat

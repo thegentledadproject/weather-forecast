@@ -140,135 +140,169 @@ def check_and_exit_positions(station_icao: Optional[str] = None) -> List[ExitDec
     decisions = []
 
     for position in open_positions:
-        token_id = _token_id_for(position)
-        current_price = market_client.get_current_price_for_side(
+        # One bad row must not take monitoring down for every other open
+        # position. The scheduler wraps this whole function in a try, which
+        # keeps the DAEMON alive but abandons the rest of the cycle -- so a
+        # single position that raises means every position after it in the
+        # list goes unchecked, on every cycle, forever. That is not
+        # hypothetical: _token_id_for() raises NotImplementedError for any
+        # position opened before token_id was threaded through, and
+        # executor's auto-mode sell raises by design. Both are permanent
+        # conditions on a specific row. _station_for() below already
+        # reasoned this way about orphaned stations; the rest of the loop
+        # did not.
+        try:
+            decision = _check_one_position(position)
+        except Exception as exc:  # noqa: BLE001 - one row must never strand the others
+            print(
+                f"[position_manager] ERROR checking {position.position_id} ({position.station_icao} "
+                f"{position.bucket_c}°{position.side}, ${position.size_usd:.2f} open): {exc} -- skipping "
+                f"THIS position only, the rest of the cycle continues. This position is not being "
+                f"monitored and has no working stop-loss until the cause is fixed."
+            )
+            continue
+        if decision is not None:
+            decisions.append(decision)
+
+    return decisions
+
+
+def _check_one_position(position: Position) -> Optional[ExitDecision]:
+    """
+    The full exit check for ONE position: price fetch, sanity screening,
+    resolution check, high-water-mark refresh, exit evaluation, and the
+    exit itself if one is decided.
+
+    Returns the ExitDecision made (including "hold" decisions), or None
+    when the position was skipped this cycle without a decision -- price
+    unavailable, or a price that failed confirmation. Split out of
+    check_and_exit_positions() so one position's failure can be contained
+    to that position rather than aborting the cycle.
+    """
+    token_id = _token_id_for(position)
+    current_price = market_client.get_current_price_for_side(
+        token_id=token_id,
+        side=position.side,
+    )
+
+    if current_price is None:
+        failures = _note_price_failure(position)
+        # A market can resolve while its price feed is down, and a
+        # position we can't price is one we'd otherwise never see
+        # resolve. Once blind for long enough, ask Gamma directly.
+        if failures >= UNMONITORABLE_CYCLES_WARN and _market_reported_closed(position) is True:
+            return _close_resolved_without_price(position, token_id)
+        return None
+    _consecutive_price_failures.pop(position.position_id, None)
+
+    last_observed = _last_known_price(position)
+    move = abs(current_price - last_observed)
+    is_extreme = _is_extreme(current_price)
+    is_big_move = move > config.MAX_SINGLE_CYCLE_MOVE
+    # A bucket whose date has passed is resolved by definition, whatever
+    # the book still prints -- a stale but plausible last-traded quote
+    # would otherwise never trip the extreme-price check at all.
+    # "Passed" is measured on the POSITION'S OWN market day: Tokyo's
+    # date rolls over an hour before Singapore's and four hours before
+    # Karachi's, and a UTC+8 "today" would call a Karachi position
+    # past-dated while its market is still trading.
+    is_past_dated = position.target_date < _local_today_for(position)
+
+    if is_extreme or is_big_move or is_past_dated:
+        # None of these is acted on off a single quote. Confirm the
+        # price first; only then work out what it MEANS.
+        print(
+            f"[position_manager] {position.position_id}: price {current_price:.3f} needs confirmation "
+            f"(extreme={is_extreme}, move={move:+.3f} from last observed {last_observed:.3f}, "
+            f"past_dated={is_past_dated}) -- re-fetching once before taking any exit action."
+        )
+        confirmed_price = market_client.get_current_price_for_side(
             token_id=token_id,
             side=position.side,
         )
 
-        if current_price is None:
-            failures = _note_price_failure(position)
-            # A market can resolve while its price feed is down, and a
-            # position we can't price is one we'd otherwise never see
-            # resolve. Once blind for long enough, ask Gamma directly.
-            if failures >= UNMONITORABLE_CYCLES_WARN and _market_reported_closed(position) is True:
-                resolved = _close_resolved_without_price(position, token_id)
-                if resolved is not None:
-                    decisions.append(resolved)
-            continue
-        _consecutive_price_failures.pop(position.position_id, None)
-
-        last_observed = _last_known_price(position)
-        move = abs(current_price - last_observed)
-        is_extreme = _is_extreme(current_price)
-        is_big_move = move > config.MAX_SINGLE_CYCLE_MOVE
-        # A bucket whose date has passed is resolved by definition, whatever
-        # the book still prints -- a stale but plausible last-traded quote
-        # would otherwise never trip the extreme-price check at all.
-        # "Passed" is measured on the POSITION'S OWN market day: Tokyo's
-        # date rolls over an hour before Singapore's and four hours before
-        # Karachi's, and a UTC+8 "today" would call a Karachi position
-        # past-dated while its market is still trading.
-        is_past_dated = position.target_date < _local_today_for(position)
-
-        if is_extreme or is_big_move or is_past_dated:
-            # None of these is acted on off a single quote. Confirm the
-            # price first; only then work out what it MEANS.
+        if confirmed_price is None:
             print(
-                f"[position_manager] {position.position_id}: price {current_price:.3f} needs confirmation "
-                f"(extreme={is_extreme}, move={move:+.3f} from last observed {last_observed:.3f}, "
-                f"past_dated={is_past_dated}) -- re-fetching once before taking any exit action."
+                f"[position_manager] {position.position_id}: confirming re-fetch FAILED for price "
+                f"{current_price:.3f} -- taking NO exit action this cycle, position left open."
             )
-            confirmed_price = market_client.get_current_price_for_side(
-                token_id=token_id,
-                side=position.side,
+            return None
+
+        if abs(confirmed_price - current_price) > CONFIRMATION_TOLERANCE:
+            print(
+                f"[position_manager] {position.position_id}: price {current_price:.3f} NOT confirmed "
+                f"(re-fetch says {confirmed_price:.3f}, tolerance {CONFIRMATION_TOLERANCE:.2f}) -- the "
+                f"feed disagrees with itself, so taking NO exit action this cycle, position left open."
             )
+            return None
 
-            if confirmed_price is None:
-                print(
-                    f"[position_manager] {position.position_id}: confirming re-fetch FAILED for price "
-                    f"{current_price:.3f} -- taking NO exit action this cycle, position left open."
-                )
-                continue
-
-            if abs(confirmed_price - current_price) > CONFIRMATION_TOLERANCE:
-                print(
-                    f"[position_manager] {position.position_id}: price {current_price:.3f} NOT confirmed "
-                    f"(re-fetch says {confirmed_price:.3f}, tolerance {CONFIRMATION_TOLERANCE:.2f}) -- the "
-                    f"feed disagrees with itself, so taking NO exit action this cycle, position left open."
-                )
-                continue
-
-            current_price = confirmed_price
-            _last_observed_price[position.position_id] = current_price
-
-            # Resolution is only a live hypothesis for an extreme price or
-            # a past-dated bucket. A big move alone, once confirmed, is
-            # just a big move -- no Gamma round-trip, straight to normal
-            # evaluation below.
-            if _is_extreme(current_price) or is_past_dated:
-                market_closed = _market_reported_closed(position)
-
-                if market_closed is True:
-                    decisions.append(_close_as_resolved(position, current_price, market_closed))
-                    continue
-
-                if market_closed is None:
-                    # Can't confirm either way. Hold THIS CYCLE ONLY -- and
-                    # count it, so an indefinitely unresolvable position
-                    # gets escalated instead of quietly sitting forever.
-                    _note_unknown_resolution(position, current_price)
-                    decisions.append(ExitDecision(
-                        position_id=position.position_id,
-                        should_exit=False,
-                        reason="resolution_unknown",
-                        current_price=current_price,
-                        pnl_pct=risk_manager.compute_pnl_pct(position.entry_price, current_price),
-                    ))
-                    continue
-
-                # Gamma says OPEN: the market is live and this price is
-                # real, however extreme it looks. It gets evaluated like
-                # any other price -- a genuine collapse still needs its
-                # loss cut, and a genuine spike still needs taking.
-                _consecutive_unknown_resolution.pop(position.position_id, None)
-                print(
-                    f"[position_manager] {position.position_id}: price {current_price:.3f} confirmed and "
-                    f"Gamma reports the market still OPEN -- this is a real live price, evaluating exit "
-                    f"normally (stop-loss and profit-take both apply)."
-                )
-            else:
-                print(
-                    f"[position_manager] {position.position_id}: {move:+.3f} move confirmed by re-fetch "
-                    f"({current_price:.3f}) -- real movement, evaluating exit normally."
-                )
-
+        current_price = confirmed_price
         _last_observed_price[position.position_id] = current_price
 
-        # Refresh high-water-mark BEFORE evaluating -- the trailing stop
-        # needs to see this cycle's peak, not last cycle's.
-        new_hwm = risk_manager.update_high_water_mark(position, current_price)
-        if new_hwm != position.high_water_mark:
-            storage.update_high_water_mark(position.position_id, new_hwm)
-            position.high_water_mark = new_hwm
+        # Resolution is only a live hypothesis for an extreme price or
+        # a past-dated bucket. A big move alone, once confirmed, is
+        # just a big move -- no Gamma round-trip, straight to normal
+        # evaluation below.
+        if _is_extreme(current_price) or is_past_dated:
+            market_closed = _market_reported_closed(position)
 
-        # local_hour is passed EXPLICITLY, from this position's own station
-        # offset. risk_manager._local_hour()'s default is UTC+8 and stays
-        # that way (a station-agnostic fallback the parity tests pin), so
-        # leaving this argument off would apply Singapore's edge-decay
-        # tightening hour to Tokyo and Karachi -- an hour early for +9, three
-        # hours late for +5. Fixing the default alone would have been a
-        # no-op precisely because this call site never passed one.
-        decision = risk_manager.evaluate_exit(
-            position, current_price, local_hour=_local_hour_for(position),
-        )
-        decisions.append(decision)
+            if market_closed is True:
+                return _close_as_resolved(position, current_price, market_closed)
 
-        if decision.should_exit:
-            executor.close_position(position, decision)
-            _forget_position(position.position_id)
+            if market_closed is None:
+                # Can't confirm either way. Hold THIS CYCLE ONLY -- and
+                # count it, so an indefinitely unresolvable position
+                # gets escalated instead of quietly sitting forever.
+                _note_unknown_resolution(position, current_price)
+                return ExitDecision(
+                    position_id=position.position_id,
+                    should_exit=False,
+                    reason="resolution_unknown",
+                    current_price=current_price,
+                    pnl_pct=risk_manager.compute_pnl_pct(position.entry_price, current_price),
+                )
 
-    return decisions
+            # Gamma says OPEN: the market is live and this price is
+            # real, however extreme it looks. It gets evaluated like
+            # any other price -- a genuine collapse still needs its
+            # loss cut, and a genuine spike still needs taking.
+            _consecutive_unknown_resolution.pop(position.position_id, None)
+            print(
+                f"[position_manager] {position.position_id}: price {current_price:.3f} confirmed and "
+                f"Gamma reports the market still OPEN -- this is a real live price, evaluating exit "
+                f"normally (stop-loss and profit-take both apply)."
+            )
+        else:
+            print(
+                f"[position_manager] {position.position_id}: {move:+.3f} move confirmed by re-fetch "
+                f"({current_price:.3f}) -- real movement, evaluating exit normally."
+            )
+
+    _last_observed_price[position.position_id] = current_price
+
+    # Refresh high-water-mark BEFORE evaluating -- the trailing stop
+    # needs to see this cycle's peak, not last cycle's.
+    new_hwm = risk_manager.update_high_water_mark(position, current_price)
+    if new_hwm != position.high_water_mark:
+        storage.update_high_water_mark(position.position_id, new_hwm)
+        position.high_water_mark = new_hwm
+
+    # local_hour is passed EXPLICITLY, from this position's own station
+    # offset. risk_manager._local_hour()'s default is UTC+8 and stays
+    # that way (a station-agnostic fallback the parity tests pin), so
+    # leaving this argument off would apply Singapore's edge-decay
+    # tightening hour to Tokyo and Karachi -- an hour early for +9, three
+    # hours late for +5. Fixing the default alone would have been a
+    # no-op precisely because this call site never passed one.
+    decision = risk_manager.evaluate_exit(
+        position, current_price, local_hour=_local_hour_for(position),
+    )
+
+    if decision.should_exit:
+        executor.close_position(position, decision)
+        _forget_position(position.position_id)
+
+    return decision
 
 
 def _station_for(position: Position):

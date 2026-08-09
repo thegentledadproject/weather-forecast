@@ -38,6 +38,7 @@ from typing import Optional
 
 from models import Position, ExitDecision, EntryDecision
 import storage
+import risk_manager
 
 # Per-station execution mode. Three options:
 #   "manual_review" -- prints an ACTION NEEDED alert, requires a human to
@@ -166,10 +167,41 @@ def close_position(
     exit_reason="market_resolved"), so a resolved market can never be
     filed under the derived "closed_{decision.reason}" of a stop-loss.
     Left None (the normal path), both are derived exactly as before.
+
+    THE RECORDED EXIT PRICE IS NET OF THE EXIT-SIDE TAKER FEE
+    ---------------------------------------------------------
+    What gets written to storage is the EFFECTIVE fill price -- the quote
+    minus Polymarket's taker fee on this leg -- not the raw quote. The
+    raw quote overstates every exit by the fee, and since the fee is
+    0.05 x (1 - price) x price per share it is worth several times a
+    typical trailing-stop gain: booking exits gross is how a strategy
+    shows a positive record while losing money. The gross quote and the
+    fee are both preserved in the exit_reason text so nothing is lost.
+
+    NOT applied to resolution closes: redeeming a resolved position pays
+    par and is not a taker fill, so there is no fee to deduct.
+
+    KNOWN ASYMMETRY: entry_price is still recorded gross, so a stored
+    position's P&L is net of the exit fee but not the entry fee. Closing
+    that gap means changing what open_position() writes, which rewrites
+    the meaning of every historical entry_price in the database -- a
+    separate migration, not a side effect of this change.
     """
     mode = EXECUTION_MODE.get(position.station_icao, "manual_review")
     exit_time = datetime.now(timezone.utc).isoformat()
     status = status or f"closed_{decision.reason}"
+
+    gross_exit_price = decision.current_price
+    if status == "closed_resolution":
+        exit_fee_per_share = 0.0
+    else:
+        exit_fee_per_share = risk_manager.taker_fee_per_share(gross_exit_price)
+    exit_price = max(gross_exit_price - exit_fee_per_share, 0.0)
+    net_pnl_pct = risk_manager.compute_pnl_pct(position.entry_price, exit_price)
+    fee_note = (
+        f"gross {gross_exit_price:.4f} - exit fee {exit_fee_per_share:.4f}/share "
+        f"= net {exit_price:.4f}"
+    )
 
     if mode == "manual_review":
         # A resolved market can't be sold into -- the book is gone. Telling
@@ -182,33 +214,33 @@ def close_position(
         print(
             f"\n[ACTION NEEDED] {position.station_icao} {position.bucket_c}°C "
             f"({position.side}) -- {decision.reason.upper()}\n"
-            f"  Entry: {position.entry_price:.3f}  Current: {decision.current_price:.3f}  "
-            f"P&L: {decision.pnl_pct:+.1%}\n"
+            f"  Entry: {position.entry_price:.3f}  Current: {gross_exit_price:.3f}  "
+            f"P&L: {decision.pnl_pct:+.1%} gross, {net_pnl_pct:+.1%} net of the exit fee\n"
             f"  Recommended: {action}\n"
         )
         # Log as pending-manual so it doesn't get re-flagged identically
         # every single scan cycle while a human hasn't acted yet.
         storage.close_position(
             position_id=position.position_id,
-            exit_price=decision.current_price,
+            exit_price=exit_price,
             exit_time=exit_time,
             status=status,
-            reason=exit_reason or f"{decision.reason} (manual review, pnl={decision.pnl_pct:+.1%})",
+            reason=exit_reason or f"{decision.reason} (manual review, pnl={net_pnl_pct:+.1%} net; {fee_note})",
         )
         return
 
     if mode == "paper":
         print(
             f"[executor] PAPER EXIT: {position.station_icao} {position.bucket_c}°{position.side} "
-            f"-- {decision.reason.upper()} @ {decision.current_price:.3f}, "
-            f"pnl={decision.pnl_pct:+.1%} -- zero real risk, auto-filled."
+            f"-- {decision.reason.upper()} @ {gross_exit_price:.3f} ({fee_note}), "
+            f"pnl={net_pnl_pct:+.1%} net of the exit fee -- zero real risk, auto-filled."
         )
         storage.close_position(
             position_id=position.position_id,
-            exit_price=decision.current_price,
+            exit_price=exit_price,
             exit_time=exit_time,
             status=status,
-            reason=exit_reason or f"{decision.reason} (paper, pnl={decision.pnl_pct:+.1%})",
+            reason=exit_reason or f"{decision.reason} (paper, pnl={net_pnl_pct:+.1%} net; {fee_note})",
         )
         return
 
@@ -216,10 +248,10 @@ def close_position(
         _place_sell_order(position, decision)
         storage.close_position(
             position_id=position.position_id,
-            exit_price=decision.current_price,
+            exit_price=exit_price,
             exit_time=exit_time,
             status=status,
-            reason=exit_reason or f"{decision.reason} (auto, pnl={decision.pnl_pct:+.1%})",
+            reason=exit_reason or f"{decision.reason} (auto, pnl={net_pnl_pct:+.1%} net; {fee_note})",
         )
         return
 

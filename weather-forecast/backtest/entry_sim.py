@@ -39,7 +39,10 @@ rejection carries different (mostly empty) sizing fields than a later
 one's, so a reordered replica would produce EntryDecisions that differ
 from live even when the approve/reject verdict matched.
 
-  1. Veto 0a   raw edge > config.MAX_PLAUSIBLE_RAW_EDGE  -> reject
+  0. Veto 00   market_price > config.MAX_ENTRY_PRICE      -> reject
+  1. Veto 0a   |raw edge| > entry_manager.max_plausible_edge_for(price)
+               (the flat MAX_PLAUSIBLE_RAW_EDGE below price 0.50, the
+               price-relative headroom ceiling above it)  -> reject
   2. Veto 0a2  |raw edge| < MIN_ABS_RAW_EDGE (doubled by
                LOW_CONFIDENCE_EDGE_MULTIPLIER when the EVResult's
                spread_source is "fallback_default")       -> reject
@@ -93,6 +96,7 @@ from models import EVResult, EntryDecision
 # reimplements -- and so a rename upstream breaks the import loudly.
 from entry_manager import (
     compute_kelly_fraction,
+    max_plausible_edge_for,
     veto_same_bucket_conflicts,
     apply_portfolio_budget,
     collection_only_reason,
@@ -112,7 +116,7 @@ from ev_engine import best_opportunities  # noqa: F401  (re-exported for tests)
 # one, so it lives in decide_portfolio_entries()/_sim() beside the
 # portfolio budget rather than inside evaluate_entry(). Nothing was added
 # to or removed from the per-candidate sequence below.
-GATE_COUNT = 12
+GATE_COUNT = 13  # 12 until 2026-08-09, when Veto 00 (MAX_ENTRY_PRICE) was added to both sides
 
 
 def _maturity_for(station_icao: str, station_maturity: Optional[str]) -> str:
@@ -177,12 +181,22 @@ def evaluate_entry_sim(
             token_id=token_id,
         )
 
-    # --- Gate 1: Veto 0a, edge plausibility ------------------------------
-    raw_edge = ev.raw_edge
-    if raw_edge is not None and abs(raw_edge) > config.MAX_PLAUSIBLE_RAW_EDGE:
+    # --- Gate 0: Veto 00, entry price ceiling ----------------------------
+    if ev.market_price is not None and ev.market_price > config.MAX_ENTRY_PRICE:
         return _rejected(
-            f"VETOED: raw edge {raw_edge:+.1%} exceeds MAX_PLAUSIBLE_RAW_EDGE "
-            f"({config.MAX_PLAUSIBLE_RAW_EDGE:.0%}) -- presumed data error, not alpha."
+            f"Entry price {ev.market_price:.3f} above MAX_ENTRY_PRICE "
+            f"({config.MAX_ENTRY_PRICE:.2f}) -- too little upside left to justify the stake."
+        )
+
+    # --- Gate 1: Veto 0a, edge plausibility ------------------------------
+    # Ceiling is price-relative (see entry_manager.max_plausible_edge_for),
+    # imported rather than restated so live and replay cannot drift.
+    raw_edge = ev.raw_edge
+    max_plausible_edge = max_plausible_edge_for(ev.market_price)
+    if raw_edge is not None and abs(raw_edge) > max_plausible_edge:
+        return _rejected(
+            f"VETOED: raw edge {raw_edge:+.1%} exceeds the plausibility ceiling "
+            f"({max_plausible_edge:.1%} at price {ev.market_price}) -- presumed data error, not alpha."
         )
 
     # --- Gate 2: Veto 0a2, edge materiality ------------------------------
@@ -351,14 +365,15 @@ def count_open_for_bucket_side(portfolio, station_icao: str, target_date, bucket
 
 def count_stop_outs_for_bucket_side(portfolio, station_icao: str, target_date, bucket_c: int, side: str) -> int:
     """
-    Same-day closed_stop_loss exits on this exact (station, target_date,
+    Same-day price-noise exits on this exact (station, target_date,
     bucket, SIDE) in a replay portfolio -- the injected stand-in for
     entry_manager.count_stop_outs_for_bucket()'s storage query.
 
-    Counts closed_stop_loss ONLY, matching live: a trailing stop is a
-    winner giving back its peak, not the market rejecting the entry, so
-    it does not trip the re-entry cooldown. Live's paper/real scoping
-    needs no equivalent because every replay position is paper.
+    Counts every status in config.COOLDOWN_COUNTED_EXIT_STATUSES, matching
+    live: trailing-stop exits were excluded on both sides until
+    2026-08-09, which let a bucket churn stop -> re-buy -> trail out ->
+    re-buy all day without ever tripping the cooldown. Live's paper/real
+    scoping needs no equivalent because every replay position is paper.
     """
     side_upper = side.upper()
     return sum(
@@ -367,7 +382,7 @@ def count_stop_outs_for_bucket_side(portfolio, station_icao: str, target_date, b
         and p.target_date == target_date
         and p.bucket_c == bucket_c
         and p.side.upper() == side_upper
-        and p.status == "closed_stop_loss"
+        and p.status in config.COOLDOWN_COUNTED_EXIT_STATUSES
     )
 
 
