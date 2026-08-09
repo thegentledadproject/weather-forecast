@@ -247,9 +247,21 @@ def _load_ev_snapshots():
 # the page rendering against a package checkout that predates the constant.
 try:
     EV_MIN_PRICE = getattr(config, "EV_MIN_PRICE_SCREEN", 0.03)
-    EV_VETO_EDGE = getattr(config, "MAX_PLAUSIBLE_RAW_EDGE", 0.25)
+    # The edge ceiling is PRICE-RELATIVE (config.max_plausible_edge_for) and
+    # there is now also a hard entry-price cap. This used to be a single flat
+    # constant here, which quietly went stale the moment those gates landed:
+    # rows above the price cap, and rows over the headroom ceiling but under
+    # the flat 0.25, rendered as clean opportunities the entry path would
+    # refuse. Same drift the min-price screen above had (46db643) -- both are
+    # now read from config rather than restated.
+    MAX_ENTRY_PRICE = getattr(config, "MAX_ENTRY_PRICE", 1.0)
+    _edge_ceiling_for = getattr(
+        config, "max_plausible_edge_for",
+        lambda price: getattr(config, "MAX_PLAUSIBLE_RAW_EDGE", 0.25),
+    )
 except NameError:  # config import itself failed above; page must still render
-    EV_MIN_PRICE, EV_VETO_EDGE = 0.03, 0.25
+    EV_MIN_PRICE, MAX_ENTRY_PRICE = 0.03, 1.0
+    _edge_ceiling_for = lambda price: 0.25  # noqa: E731
 
 
 def _ev_rows(snap):
@@ -270,9 +282,17 @@ def _ev_rows(snap):
         # A row the entry path would refuse is still worth SEEING (it often
         # means the model, not the market, is wrong for that station) -- but
         # it must not read as an opportunity. Badge instead of hide.
+        #
+        # Both pre-sizing vetoes are reflected, in the order evaluate_entry
+        # runs them: the entry-price ceiling first (a property of the market),
+        # then the price-relative edge ceiling (a property of the signal).
         flags = ""
         cls = "pos"
-        if abs(r["raw_edge"]) > EV_VETO_EDGE:
+        price = r.get("market_price")
+        if price is not None and price > MAX_ENTRY_PRICE:
+            flags += " <span class='badge veto'>over price cap</span>"
+            cls = ""
+        if abs(r["raw_edge"]) > _edge_ceiling_for(price):
             flags += " <span class='badge veto'>veto zone</span>"
             cls = ""
         if r.get("spread_source") == "fallback_default":

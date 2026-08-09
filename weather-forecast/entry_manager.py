@@ -98,30 +98,15 @@ _cooldown_vetoes_logged = set()
 _collection_only_logged = set()
 
 
-def max_plausible_edge_for(market_price: Optional[float]) -> float:
-    """
-    The largest raw edge that counts as believable at this price -- the
-    smaller of the flat config.MAX_PLAUSIBLE_RAW_EDGE and a fraction of
-    the headroom actually available, config.MAX_PLAUSIBLE_EDGE_HEADROOM_
-    FRACTION x (1 - price).
-
-    The headroom term exists because raw edge is bounded by (1 - price)
-    anyway: model_prob can't exceed 1.0, so at price 0.80 the largest
-    expressible edge is 0.20 and a flat 0.25 ceiling is unreachable. Above
-    price 0.75 the flat ceiling could never fire at all -- precisely the
-    band where a side/price mix-up yields the most plausible-looking
-    numbers (a spurious model_prob of 0.99 against a real 0.85 quote is an
-    edge of 0.14, under the flat ceiling and through every other gate).
-
-    The two terms are equal at price 0.50, so the curve is continuous and
-    the flat ceiling still binds everywhere below it -- no pre-existing
-    behaviour changes. Pure function, shared verbatim with
-    backtest/entry_sim.py so the live screen and the replay cannot drift.
-    """
-    if market_price is None:
-        return config.MAX_PLAUSIBLE_RAW_EDGE
-    headroom_ceiling = config.MAX_PLAUSIBLE_EDGE_HEADROOM_FRACTION * (1.0 - market_price)
-    return min(config.MAX_PLAUSIBLE_RAW_EDGE, max(headroom_ceiling, 0.0))
+# The price-relative edge-plausibility ceiling. DEFINED IN config, not
+# here: the live gate below, backtest/entry_sim's replica, and the status
+# dashboard's "veto zone" badge all need it, and the dashboard cannot
+# import this module cheaply (it would drag in executor and
+# clients.market_client onto a page whose whole design rule is "render
+# regardless"). Re-exported under the original name so entry_sim's
+# `from entry_manager import max_plausible_edge_for` and the tests keep
+# reading naturally at the call site.
+max_plausible_edge_for = config.max_plausible_edge_for
 
 
 def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:

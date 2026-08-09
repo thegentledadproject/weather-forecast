@@ -728,6 +728,31 @@ MAX_PLAUSIBLE_RAW_EDGE = 0.25
 # that could possibly exist at this price" is not a trading signal.
 MAX_PLAUSIBLE_EDGE_HEADROOM_FRACTION = 0.50
 
+
+def max_plausible_edge_for(market_price: Optional[float]) -> float:
+    """
+    The largest raw edge that counts as believable at this price:
+    min(MAX_PLAUSIBLE_RAW_EDGE, MAX_PLAUSIBLE_EDGE_HEADROOM_FRACTION x
+    (1 - price)). See the two constants above for why the flat ceiling
+    alone is structurally blind above price 0.75.
+
+    Lives in config, not in entry_manager, because it is pure policy over
+    two config constants and it has THREE consumers that must never
+    disagree: the live entry gate, backtest/entry_sim's replica, and the
+    status dashboard's "veto zone" badge. The dashboard keeping its own
+    copy of a trading screen is a mistake this codebase has already made
+    twice -- once with the min-price screen (fixed in 46db643, after the
+    page spent a week ranking sub-cent phantoms at the top of the table),
+    and again here, where a flat local constant left rows the entry path
+    now rejects displayed as clean opportunities. config is the one
+    module all three already import, and it depends on nothing but
+    models, so the dashboard pays no new import surface for the fix.
+    """
+    if market_price is None:
+        return MAX_PLAUSIBLE_RAW_EDGE
+    headroom_ceiling = MAX_PLAUSIBLE_EDGE_HEADROOM_FRACTION * (1.0 - market_price)
+    return min(MAX_PLAUSIBLE_RAW_EDGE, max(headroom_ceiling, 0.0))
+
 # Maximum simultaneously-open positions on the exact same
 # (station, target_date, bucket, side). One is the right number: repeat
 # entries on one bucket are not independent bets, they are the same bet
