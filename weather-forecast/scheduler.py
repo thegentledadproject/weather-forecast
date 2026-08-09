@@ -274,6 +274,12 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
             observations=pipeline.gather_observations(station, target_date),
             forecasts=pipeline.gather_forecasts(station),
             ensemble_members=openmeteo_client.get_ensemble_spread(station),
+            # Measured (forecast - settled truth) for THIS station, so a
+            # source that habitually runs cool is read as what it has
+            # historically meant. The same number gates entry below: if it
+            # is too noisy to correct with, decide_portfolio_entries keeps
+            # the station collection-only regardless of what the EV says.
+            forecast_bias_c=entry_manager.forecast_bias_stats(station_icao)[0] or 0.0,
         )
         # ONE discovery per station-cycle. The EV table, the bucket bounds
         # the model probabilities were computed on, and the token ids entry

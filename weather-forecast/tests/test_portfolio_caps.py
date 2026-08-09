@@ -155,6 +155,14 @@ class TestCollectionFirstGate:
             storage, "count_observations_from_source",
             lambda icao, source: config.MIN_RESOLUTION_OBS_BEFORE_ENTRY,
         )
+        # Graduating now takes a well-measured forecast bias too, not just
+        # an observation count: enough pairs, tight enough standard error.
+        # Same-sized errors so stdev/sqrt(n) lands comfortably inside
+        # MAX_BIAS_STANDARD_ERROR_C.
+        monkeypatch.setattr(
+            storage, "forecast_error_samples",
+            lambda icao, source: [0.2] * config.MIN_BIAS_PAIRS_BEFORE_ENTRY,
+        )
         monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [])
         monkeypatch.setattr(storage, "load_position_history", lambda *a, **kw: [])
         monkeypatch.setattr(market_client, "get_available_depth_usd", lambda token_id: 1000.0)

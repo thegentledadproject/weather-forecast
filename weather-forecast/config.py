@@ -771,6 +771,42 @@ EXPLORATORY_SIZE_MULTIPLIER = 0.20  # exploratory stations get 20% of what matur
 # by simply existing for a few days.
 MIN_RESOLUTION_OBS_BEFORE_ENTRY = 5
 
+# --- Forecast bias: measure it, correct it, and refuse to trade blind ----
+# Counting observations was never the point -- MEASURING THE BIAS was, and
+# until 2026-08-09 nothing did. Measured that day across the registry:
+# WSSS +0.07C (the only near-unbiased station, and the only reliably
+# profitable one) against RCSS -1.80, WMKK -1.76, RKPK -1.49, RKSI -1.48,
+# ZGGG -1.17. Buckets are whole degrees, so a 1.7C bias misplaces the
+# model's probability mass by ~2 buckets -- on every bucket, every cycle,
+# all in the same direction, at exactly the tradeable size. That is the
+# failure collection_only_reason()'s docstring predicted; the gate did not
+# catch it because 5 stored observations was the whole test.
+#
+# Two constants, doing two different jobs:
+#   ENABLE_FORECAST_BIAS_CORRECTION subtracts the measured bias from the
+#   forecast term of the central estimate (calibration.blend_central_estimate)
+#   -- the fix. It is what the collected observations were collected FOR.
+#
+#   MIN_BIAS_PAIRS / MAX_BIAS_STANDARD_ERROR_C gate on whether that
+#   correction can be TRUSTED. Correcting by a number measured off two
+#   days is just a different guess. Standard error (sd/sqrt(n)), not raw
+#   |bias|, is the right test: a large bias measured precisely is
+#   correctable, a small one measured noisily is not.
+ENABLE_FORECAST_BIAS_CORRECTION = True
+
+# Forecast/observation pairs required before the bias estimate may be
+# trusted enough to trade on. Distinct from (and stricter in practice
+# than) MIN_RESOLUTION_OBS_BEFORE_ENTRY: an observation with no matching
+# stored forecast for the same target date measures nothing.
+MIN_BIAS_PAIRS_BEFORE_ENTRY = 5
+
+# Cap on the standard error of the bias estimate, in degrees C. At 0.5C
+# the correction is worth less than the noise in the number correcting.
+# Reference points from the 2026-08-09 measurement: WSSS n=9 sd 0.66 ->
+# SE 0.22 (trustworthy), WMKK n=8 sd 0.76 -> SE 0.27 (trustworthy),
+# RCSS n=3 sd 2.16 -> SE 1.25 (not).
+MAX_BIAS_STANDARD_ERROR_C = 0.5
+
 # Shared budget across ALL approved legs for one station on one day -- e.g.
 # a YES leg on the top bucket plus NO legs hedging tail buckets, opened
 # together (see entry_manager.apply_portfolio_budget). Without this, each

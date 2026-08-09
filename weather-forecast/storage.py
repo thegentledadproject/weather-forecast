@@ -184,6 +184,41 @@ def count_observations_from_source(station_icao: str, source: str) -> int:
     return int(row[0]) if row else 0
 
 
+def forecast_error_samples(station_icao: str, source: str) -> List[float]:
+    """
+    One (forecast - settled truth) error in degrees C per target date this
+    station has BOTH a settlement-grade observation and at least one stored
+    forecast for. Feeds calibration.bias_stats() and, through it, the bias
+    correction and the gate that decides whether the correction is
+    trustworthy (entry_manager.forecast_bias_stats).
+
+    Two deliberate choices:
+      - `source` is the station's own resolution_grade_source, matching
+        count_observations_from_source(): the error must be measured
+        against the record the market actually settles on, not against a
+        convenient proxy.
+      - Only forecasts fetched on or before the target date count. A row
+        fetched afterwards has seen the day it is "forecasting" and would
+        flatter the bias toward zero -- the same lookahead the backtest
+        goes to lengths to avoid.
+
+    The per-date forecast mean mirrors blend_central_estimate's own
+    forecast term, so the number measured is the number corrected.
+    """
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT o.max_temp_c, AVG(f.max_temp_c) "
+            "FROM observations o JOIN forecasts f "
+            "  ON f.station_icao = o.station_icao AND f.target_date = o.target_date "
+            "WHERE o.station_icao = ? AND o.source = ? "
+            "  AND f.max_temp_c IS NOT NULL AND o.max_temp_c IS NOT NULL "
+            "  AND date(f.fetched_at) <= o.target_date "
+            "GROUP BY o.target_date",
+            (station_icao, source),
+        ).fetchall()
+    return [float(forecast_mean) - float(observed) for observed, forecast_mean in rows]
+
+
 def load_forecast_history(station_icao: str, source: str, limit: int = 90) -> List[PointForecast]:
     """Load past forecasts from one source for one station, most recent first."""
     with _connect() as conn:

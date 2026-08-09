@@ -132,6 +132,13 @@ class CalibratedEstimate:
     # before trading on a "fallback_default" estimate, since an edge that
     # size is only as trustworthy as the spread it was computed against.
     spread_source: str = "fallback_default"
+    # Measured mean (forecast - settled truth) for this station, in degrees
+    # C, ALREADY SUBTRACTED from the forecast term of central_estimate_c by
+    # calibration.blend_central_estimate(). Recorded so a stored estimate
+    # says how much correction it carries: 0.0 means uncorrected, either
+    # because the station has no measured bias yet or because
+    # config.ENABLE_FORECAST_BIAS_CORRECTION is off.
+    forecast_bias_c: float = 0.0
 
 
 @dataclass

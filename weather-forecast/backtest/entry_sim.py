@@ -398,6 +398,9 @@ def decide_portfolio_entries_sim(
     portfolio_exposure_usd: float = 0.0,
     resolution_obs_count: Optional[int] = None,
     enforce_collection_gate: bool = False,
+    bias_n: Optional[int] = None,
+    bias_stderr: Optional[float] = None,
+    enforce_bias_quality: bool = False,
 ) -> List[EntryDecision]:
     """
     Replica of entry_manager.decide_portfolio_entries(), in the same
@@ -446,7 +449,13 @@ def decide_portfolio_entries_sim(
 
     # --- Stage 0: collection-first gate (station-level, not per-candidate) ---
     if enforce_collection_gate and candidates:
-        gate_reason = collection_only_reason(candidates[0][0].station_icao, resolution_obs_count)
+        gate_reason = collection_only_reason(
+            candidates[0][0].station_icao,
+            resolution_obs_count,
+            bias_n=bias_n,
+            bias_stderr=bias_stderr,
+            enforce_bias_quality=enforce_bias_quality,
+        )
         if gate_reason is not None:
             return [collection_only_decision(ev, token_id, gate_reason) for ev, token_id in candidates]
 

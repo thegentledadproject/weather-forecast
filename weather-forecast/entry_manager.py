@@ -76,6 +76,7 @@ clients/market_client.py (local)
 from datetime import date
 from typing import List, Optional, Tuple
 
+import calibration
 import config
 import storage
 import executor
@@ -229,7 +230,30 @@ def resolution_obs_count(station_icao: str) -> Optional[int]:
         return None
 
 
-def collection_only_reason(station_icao: str, obs_count: Optional[int]) -> Optional[str]:
+def forecast_bias_stats(station_icao: str) -> tuple:
+    """
+    This station's measured forecast bias as (bias_c, n_pairs, stderr_c).
+
+    Returns (None, None, None) if it could not be read at all -- callers
+    must treat that as "unknown, therefore not yet graduated", exactly as
+    resolution_obs_count()'s None is treated, never as an unbiased zero.
+    """
+    try:
+        station = config.get_station(station_icao)
+        errors = storage.forecast_error_samples(station_icao, station.resolution_grade_source)
+        return calibration.bias_stats(errors)
+    except Exception as exc:  # noqa: BLE001 - KeyError (unregistered) or any storage failure
+        print(f"[entry_manager] could not measure forecast bias for {station_icao}: {exc}")
+        return None, None, None
+
+
+def collection_only_reason(
+    station_icao: str,
+    obs_count: Optional[int],
+    bias_n: Optional[int] = None,
+    bias_stderr: Optional[float] = None,
+    enforce_bias_quality: bool = False,
+) -> Optional[str]:
     """
     The collection-first gate, as a PURE function: None means this
     station may open positions, any string is the reason it may not.
@@ -245,6 +269,22 @@ def collection_only_reason(station_icao: str, obs_count: Optional[int]) -> Optio
     the registry at once; without this gate all eleven would have started
     trading on day one off numbers nobody has checked. Collecting costs
     nothing. Wrong entries cost money.
+
+    Counting observations was only ever a PROXY for the real question, and
+    on 2026-08-09 the proxy was measured against the thing it stood for and
+    found wanting: ten stations had graduated on 5-7 observations while
+    their forecasts ran 1.2-1.8°C cool, which at whole-degree buckets is
+    ~2 buckets of misplaced probability mass -- precisely the failure the
+    paragraph above predicts. So the gate now also asks whether the bias
+    has been measured WELL ENOUGH to correct for (calibration applies the
+    correction itself; see blend_central_estimate). bias_stderr, not raw
+    |bias|, is the test: a large bias pinned down precisely is correctable,
+    a small one measured off two noisy days is not.
+
+    enforce_bias_quality is opt-in so replays that never modelled the bias
+    keep their existing meaning instead of silently rejecting everything --
+    the same opt-in shape entry_sim's enforce_collection_gate already uses.
+    Live always passes True.
 
     Kept pure (registry lookup only, no storage) so backtest/entry_sim.py
     can reuse it verbatim and the two sides cannot drift in wording or in
@@ -265,6 +305,28 @@ def collection_only_reason(station_icao: str, obs_count: Optional[int]) -> Optio
             f"Collection-only: {station_icao} has {obs_count} stored '{source}' observation(s), below the "
             f"{config.MIN_RESOLUTION_OBS_BEFORE_ENTRY} required before any entry -- this station's model "
             f"bias is unmeasured, so its 'edge' is a guess. Collecting, not trading."
+        )
+
+    if not enforce_bias_quality:
+        return None
+
+    if bias_n is None:
+        return (
+            f"Collection-only: {station_icao}'s forecast bias could not be measured, so there is no way "
+            f"to tell whether its edges are real -- refusing to open blind."
+        )
+    if bias_n < config.MIN_BIAS_PAIRS_BEFORE_ENTRY:
+        return (
+            f"Collection-only: {station_icao} has {bias_n} forecast/observation pair(s), below the "
+            f"{config.MIN_BIAS_PAIRS_BEFORE_ENTRY} needed to measure its forecast bias. Stored observations "
+            f"only measure anything on dates a forecast was stored too. Collecting, not trading."
+        )
+    if bias_stderr is None or bias_stderr > config.MAX_BIAS_STANDARD_ERROR_C:
+        shown = "unknown" if bias_stderr is None else f"{bias_stderr:.2f}C"
+        return (
+            f"Collection-only: {station_icao}'s forecast bias is measured to +/-{shown} (standard error over "
+            f"{bias_n} pair(s)), above the {config.MAX_BIAS_STANDARD_ERROR_C:.2f}C needed to correct for it -- "
+            f"correcting by a number this noisy is just a different guess. Collecting, not trading."
         )
     return None
 
@@ -829,7 +891,14 @@ def decide_portfolio_entries(
     candidate_is_paper = executor.EXECUTION_MODE.get(station_icao, "manual_review") == "paper"
 
     # --- Stage 0: collection-first gate ----------------------------------
-    gate_reason = collection_only_reason(station_icao, resolution_obs_count(station_icao))
+    bias_c, bias_n, bias_stderr = forecast_bias_stats(station_icao)
+    gate_reason = collection_only_reason(
+        station_icao,
+        resolution_obs_count(station_icao),
+        bias_n=bias_n,
+        bias_stderr=bias_stderr,
+        enforce_bias_quality=True,
+    )
     if gate_reason is not None:
         # Logged once per station/day: a brand-new station trips this on
         # every cycle for days, and the repeat lines would bury real events.

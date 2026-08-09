@@ -855,6 +855,14 @@ def _entry_pass(
         forecasts=forecasts,
         observations=observations,
         ensemble_members=None,  # no historical ensemble spread exists -- see manifest
+        # forecast_bias_c deliberately left at its 0.0 default: correcting
+        # by a bias measured over the whole record would leak the future
+        # into every replayed day. Doing this honestly means reconstructing
+        # the bias as of each simulated instant (only forecasts fetched on
+        # or before each past target date, only observations visible then),
+        # which is its own piece of work. Until that exists, replays model
+        # the UNCORRECTED calibration -- and the same reasoning is why
+        # enforce_bias_quality stays off for the gate below.
     )
 
     # Station's own bucket bounds + edge mode (B4): the legacy
@@ -998,6 +1006,12 @@ def _entry_pass(
         portfolio_exposure_usd=portfolio_exposure_usd,
         resolution_obs_count=resolution_obs_count,
         enforce_collection_gate=True,
+        # Off until point-in-time bias reconstruction exists (see the
+        # calibrate() call above). Replays therefore model the OLD
+        # counting-only gate, not the live bias-quality one -- a known and
+        # deliberate live/replay divergence, recorded here rather than
+        # papered over with a whole-record bias that would be lookahead.
+        enforce_bias_quality=False,
     )
     counters["n_decisions"] = int(counters["n_decisions"]) + len(decisions)
 
