@@ -96,9 +96,29 @@ def test_blend_weight_defaults_to_config():
 def test_blend_weight_is_per_station():
     # Singapore is the one station that genuinely wants persistence weight;
     # everyone else takes the forecast-heavy default.
-    assert config.forecast_blend_weight("WSSS") == 0.50
+    assert config.forecast_blend_weight("WSSS") == 0.40
     assert config.forecast_blend_weight("WMKK") == config.FORECAST_BLEND_WEIGHT_DEFAULT
     assert config.forecast_blend_weight("NOT_A_STATION") == config.FORECAST_BLEND_WEIGHT_DEFAULT
+
+
+def test_wsss_override_is_persistence_heavy_not_a_specific_magic_number():
+    """
+    The property that is actually measured, asserted as a property.
+
+    On n=9 the per-station optimum bootstraps anywhere from 0.00 to 0.70, so
+    pinning an exact value would be pinning noise -- but the DIRECTION is
+    well-supported: WSSS beats the forecast-heavy default about 93% of the
+    time. This fails if someone drifts the override back toward the default
+    (which is what the 0.50 that shipped on 2026-08-10 was), while leaving
+    room to retune within the range the data actually supports.
+    """
+    wsss = config.forecast_blend_weight("WSSS")
+    assert wsss < config.FORECAST_BLEND_WEIGHT_DEFAULT, (
+        "the WSSS override exists to weight persistence MORE than the default"
+    )
+    assert 0.2 <= wsss <= 0.5, (
+        f"WSSS weight {wsss} is outside the range its 9 samples support"
+    )
 
 
 def test_calibrate_uses_the_station_weight():
@@ -111,7 +131,10 @@ def test_calibrate_uses_the_station_weight():
         station=config.get_station("WMKK"), target_date=date(2026, 8, 10),
         forecasts=forecasts, observations=observations,
     )
-    assert wsss.central_estimate_c == pytest.approx(round(0.5 * 30.0 + 0.5 * 34.0, 1))
+    w_wsss = config.forecast_blend_weight("WSSS")
+    assert wsss.central_estimate_c == pytest.approx(
+        round(w_wsss * 30.0 + (1 - w_wsss) * 34.0, 1)
+    )
     w = config.FORECAST_BLEND_WEIGHT_DEFAULT
     assert wmkk.central_estimate_c == pytest.approx(round(w * 30.0 + (1 - w) * 34.0, 1))
     # The forecast-heavy station must land closer to the forecast.

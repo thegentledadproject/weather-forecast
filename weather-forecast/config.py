@@ -1006,14 +1006,39 @@ ENABLE_FORECAST_BIAS_CORRECTION = True
 FORECAST_BLEND_WEIGHT_DEFAULT = 0.85
 
 # Per-station overrides. WSSS is the one station that genuinely wants a
-# persistence-heavy blend, and it is not a fitting artifact: equatorial
-# Singapore's daily max barely moves, so yesterday really does predict
-# today there. Its own 10 samples put the optimum at 0.50 (RMSE 0.582, vs
-# 0.641 at 0.85) -- and since the legacy 0.40 was tuned ON Singapore, the
-# old constant was right for this station and wrong for the other ten.
-# Only add an override with >= 10 measured samples AND a physical reason.
+# persistence-heavy blend, and that part is not a fitting artifact:
+# equatorial Singapore's daily max barely moves, so yesterday really does
+# predict today there, and the legacy 0.40 was tuned ON Singapore -- right
+# for this station, wrong for the other ten.
+#
+# 0.40, NOT the 0.50 this shipped as on 2026-08-10. That commit justified
+# 0.50 as WSSS's own optimum; independently replicated on the same data, it
+# is neither the optimum nor an improvement:
+#
+#     w      0.20    0.35    0.40    0.50    0.85    0.95
+#     RMSE   0.537   0.525   0.527   0.538   0.654   0.703
+#            n=9, WSSS only, leave-one-out bias
+#
+# Bootstrapping WSSS's own days, 0.40 beats 0.50 about three times in four
+# (P(0.50 better) = 0.26). The commit's own reported figures said the same
+# thing -- "WSSS is 0.541 -> 0.582" is the legacy 0.40 scoring better than
+# the new 0.50 -- and it shipped anyway, describing 0.50 as near-optimal.
+#
+# What the data DOES support is overriding away from the 0.85 default:
+# P(0.50 better than 0.85) = 0.93. Both 0.40 and 0.50 clear that bar; 0.40
+# is simply the better of the two and the one that was already here.
+#
+# NOT set to the 0.35 argmin. On n=9 the bootstrap optimum ranges 0.00-0.70
+# (median 0.30), so the per-station weight is essentially unidentified and
+# chasing the argmin would be fitting noise. Leave-one-station-out CV
+# cannot settle this either -- WSSS's fold picks 0.95, because it learns
+# only from ten forecast-heavy stations.
+#
+# Only add an override with a PHYSICAL reason and enough samples to
+# distinguish it from its neighbours on the grid. Nine is not enough; it
+# was enough to establish the direction here, not the value.
 FORECAST_BLEND_WEIGHT_BY_STATION = {
-    "WSSS": 0.50,
+    "WSSS": 0.40,
 }
 
 
