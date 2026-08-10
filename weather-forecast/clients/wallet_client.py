@@ -235,6 +235,60 @@ def _signature_type() -> int:
     return value
 
 
+def _explicit_creds(lib):
+    """
+    ApiCreds from CLOB_API_KEY / CLOB_SECRET / CLOB_PASS_PHRASE, or None if
+    none of them are set. Raises if only some are.
+
+    WHY THESE EXIST, HAVING ONCE BEEN DOCUMENTED AS POINTLESS. This module
+    used to derive credentials with create_or_derive_api_key() and nothing
+    else, and .env.example told operators these three variables would have
+    no effect. That was wrong under signature type 3, and the failure is
+    not obvious from either end. Read the SDK's own order builder:
+
+        def _v2_order_signer(self) -> str:
+            if self.signature_type == SignatureTypeV2.POLY_1271:
+                return self.funder
+            return self.signer.address()
+
+    Under type 3 the order's `signer` field is the FUNDER (the deposit
+    wallet), while `owner` is creds.api_key -- and a derived key is bound
+    to whichever address performed L1 auth, which is the EOA behind
+    POLYMARKET_PRIVATE_KEY. When funder != EOA, the exchange rejects the
+    order with 400 "the order signer address has to be the address of the
+    API KEY". That is py-clob-client-v2 #70 exactly, and no amount of
+    re-deriving fixes it: L1 auth can only ever speak for the EOA.
+
+    So a deposit-wallet account needs credentials REGISTERED TO THE
+    DEPOSIT WALLET, minted out of band (hermes does this with
+    generate_creds.py / setup_deposit_wallet.py plus builder credentials
+    and the relayer; nothing in this repo provisions them). Supplying them
+    here is the only way this codebase can trade such an account.
+
+    Fails closed on a partial set, like the private key / funder check:
+    two out of three silently falling back to derived credentials would
+    reproduce the same rejection with none of the explanation.
+    """
+    key        = (os.environ.get("CLOB_API_KEY")     or "").strip()
+    secret     = (os.environ.get("CLOB_SECRET")      or "").strip()
+    passphrase = (os.environ.get("CLOB_PASS_PHRASE") or "").strip()
+
+    present = {"CLOB_API_KEY": bool(key), "CLOB_SECRET": bool(secret),
+               "CLOB_PASS_PHRASE": bool(passphrase)}
+    if all(present.values()):
+        return lib.ApiCreds(api_key=key, api_secret=secret, api_passphrase=passphrase)
+    if any(present.values()):
+        missing = [k for k, v in present.items() if not v]
+        raise RuntimeError(
+            f"Partial CLOB API credentials: {', '.join(missing)} not set. "
+            f"Set all three or none. Falling back to derived credentials "
+            f"here would silently produce orders the exchange rejects with "
+            f"'the order signer address has to be the address of the API KEY' "
+            f"whenever POLYMARKET_FUNDER is not the private key's own address."
+        )
+    return None
+
+
 def get_client():
     """
     Lazily construct and cache the authenticated ClobClient, reading
@@ -274,20 +328,30 @@ def get_client():
         )
 
     lib = _clob()
+    creds = _explicit_creds(lib)
+
     client = lib.ClobClient(
         CLOB_HOST,
         chain_id=POLYGON_CHAIN_ID,
         key=private_key,
+        creds=creds,
         signature_type=signature_type,
         funder=funder,
     )
-    # create_or_derive_api_KEY, not ..._api_creds. The previous name does not
-    # exist on the installed client (verified against py_clob_client_v2 1.0.2:
-    # dir(ClobClient) has create_or_derive_api_key and no ..._creds), so the
-    # first authenticated call would have died with an AttributeError -- proof
-    # this path had never actually been executed.
-    creds = client.create_or_derive_api_key()
-    client.set_api_creds(creds)
+
+    if creds is None:
+        # create_or_derive_api_KEY, not ..._api_creds. The previous name does
+        # not exist on the installed client (verified against
+        # py_clob_client_v2 1.0.2: dir(ClobClient) has create_or_derive_api_key
+        # and no ..._creds), so the first authenticated call would have died
+        # with an AttributeError -- proof this path had never been executed.
+        client.set_api_creds(client.create_or_derive_api_key())
+    else:
+        # NOT overwritten with a derived key, which is the entire point --
+        # see _explicit_creds(). Deriving here would discard credentials that
+        # belong to the deposit wallet and replace them with EOA-bound ones,
+        # reintroducing the rejection they were supplied to avoid.
+        logger.info("[wallet_client] using explicit CLOB API credentials from the environment")
 
     _client = client
     return _client
