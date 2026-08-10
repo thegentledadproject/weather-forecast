@@ -15,6 +15,28 @@ else
     git clone "$REPO_URL" "$APP_DIR"
 fi
 
+# RE-EXEC AFTER THE PULL. bash reads a script INCREMENTALLY, by byte offset
+# -- it does not load the whole file up front. The pull above rewrites this
+# very file, so any commit that changes the number of bytes ABOVE the
+# not-yet-read portion shifts every following line out from under the
+# interpreter, and bash resumes mid-statement somewhere in the new content.
+#
+# This is not hypothetical. On the 2026-08-10 deploy the commit changed both
+# the pip line and the systemd unit block; the run completed with no error,
+# reported "active", and left the service on the PREVIOUS unit file --
+# still `--mode paper` while the repo on disk said `--mode simulation`. A
+# deploy that silently applies the old config and reports success is the
+# worst possible failure mode for this script.
+#
+# Re-exec once, after the code is settled, so the rest of this file runs
+# from a version that is no longer changing. The guard variable prevents an
+# infinite loop; the second pass's pull is a no-op.
+if [ -z "${POLYWEATHER_DEPLOY_REEXEC:-}" ]; then
+    export POLYWEATHER_DEPLOY_REEXEC=1
+    echo "== Re-exec into the pulled version of this script =="
+    exec bash "$APP_DIR/deploy/deploy_daemon.sh" "$@"
+fi
+
 echo "== Python venv + deps =="
 if ! python3 -m venv "$VENV" 2>/dev/null; then
     sudo apt-get update -q && sudo apt-get install -y -q python3-venv
