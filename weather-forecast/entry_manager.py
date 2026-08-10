@@ -446,12 +446,19 @@ def evaluate_entry(
     # bigger edge there isn't extra caution for its own sake -- it's the
     # same "is this real or is this noise" question MIN_ABS_RAW_EDGE
     # already asks, applied to a case where the noise floor is higher.
+    # Membership in a SET, not equality with one string: the spread chain
+    # now has two tiers that mean "not measured for this station"
+    # (fallback_default, and the pooled cross-station estimate). Under the
+    # old chain every station got "forecast_variance", which never tripped
+    # this multiplier despite being the least trustworthy number in the
+    # model -- so this reads as a tightening, and is one.
+    spread_source = getattr(ev_result, "spread_source", None)
     min_abs_edge = config.MIN_ABS_RAW_EDGE
-    if getattr(ev_result, "spread_source", None) == "fallback_default":
+    if spread_source in config.LOW_CONFIDENCE_SPREAD_SOURCES:
         min_abs_edge *= config.LOW_CONFIDENCE_EDGE_MULTIPLIER
 
     if raw_edge is not None and abs(raw_edge) < min_abs_edge:
-        low_conf_note = " (raised: spread_source=fallback_default)" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
+        low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         return _rejected(
             f"Absolute edge {raw_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note} "
             f"-- inside book noise, not a tradeable disagreement."

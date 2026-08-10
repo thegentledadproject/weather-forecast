@@ -202,12 +202,13 @@ def evaluate_entry_sim(
     # --- Gate 2: Veto 0a2, edge materiality ------------------------------
     # Bar doubles when the estimate's spread came from calibration's flat
     # fallback default (no real spread signal) -- same arithmetic as live.
+    spread_source = getattr(ev, "spread_source", None)
     min_abs_edge = config.MIN_ABS_RAW_EDGE
-    if getattr(ev, "spread_source", None) == "fallback_default":
+    if spread_source in config.LOW_CONFIDENCE_SPREAD_SOURCES:
         min_abs_edge *= config.LOW_CONFIDENCE_EDGE_MULTIPLIER
 
     if raw_edge is not None and abs(raw_edge) < min_abs_edge:
-        low_conf_note = " (raised: spread_source=fallback_default)" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
+        low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         return _rejected(
             f"Absolute edge {raw_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note} "
             f"-- inside book noise, not a tradeable disagreement."

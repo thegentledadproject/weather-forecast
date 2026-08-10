@@ -1116,3 +1116,64 @@ def live_mode_is_permitted(station_icao: str, execution_mode: str) -> bool:
     if execution_mode not in ("simulation", "live"):
         return True
     return live_size_cap_usd(station_icao, execution_mode) is not None
+
+
+# --- Predictive spread (calibration.estimate_std_dev) ----------------------
+# std_dev_c is the width of the distribution every bucket probability is cut
+# from, so it decides how much mass sits on the modal bucket versus the
+# tails. MEASURED 2026-08-10 on 50 station-days, scoring multi-class Brier
+# against settled buckets: it is the single biggest lever in the model, and
+# the estimator was losing to a constant.
+#
+#   current chain (forecast_variance for all 50)   Brier 0.8040
+#   a flat 1.0C                                    Brier 0.7228
+#   measured per-station error spread + pooled     Brier 0.7225
+#
+# The old chain's second tier was stdev across the available point
+# forecasts -- i.e. how much the MODELS DISAGREE, which is not the quantity
+# the probability step needs and is estimated from two or three numbers. It
+# emitted spreads from 0.25C to 4.33C against a 1.0C bucket width. An
+# over-wide distribution underprices the modal bucket and overprices the
+# tails, which manufactures exactly the fake tail edges the entry gates then
+# have to veto; an over-narrow one manufactures confidence.
+#
+# What the probability step actually wants is the spread of this station's
+# own FORECAST ERRORS -- and the mean of that distribution is already
+# measured as forecast_bias_c. Its standard deviation was sitting unused.
+
+# Forecast/observation pairs required before a station's own error spread is
+# preferred over the pooled one. Matches MIN_BIAS_PAIRS_BEFORE_ENTRY: the
+# same pairs, the same reason to distrust three of them.
+MIN_SPREAD_PAIRS = 5
+
+# Hard band on any returned spread, whatever tier produced it.
+#
+# The floor is the safety-critical end and is deliberately ABOVE the grid
+# optimum. A too-NARROW spread is the dangerous direction: it makes the
+# model look certain, which inflates the gap between model probability and
+# market price, which is an edge the entry gates will happily size into.
+# A too-wide spread only costs missed trades. WSSS's own measured spread
+# (~0.56C) sits below this floor and gets raised to it.
+SPREAD_FLOOR_C = 0.7
+SPREAD_CEILING_C = 2.0
+
+# Used only when even the pooled estimate is unavailable -- an empty
+# database. The measured pooled value on 2026-08-10 was 0.81C.
+POOLED_SPREAD_FALLBACK_C = 1.0
+
+# How long the pooled spread is cached. It reads every station's error
+# samples, so recomputing it per station per cycle would be 13x the queries
+# for a number that moves once a day at most.
+POOLED_SPREAD_CACHE_TTL_S = 3600
+
+# Spread sources that mean "not measured FOR THIS STATION". Entries against
+# one of these must clear LOW_CONFIDENCE_EDGE_MULTIPLIER x the normal
+# minimum edge, because the probability the edge is computed from is only
+# as good as the spread behind it.
+#
+# "pooled_error" is new to this set and it TIGHTENS the gate: under the old
+# chain every station got "forecast_variance", which never tripped the
+# multiplier even though it was the least trustworthy number in the model.
+# A station with fewer than MIN_SPREAD_PAIRS pairs now correctly has to
+# clear a higher bar. WSSS is unaffected -- it has its own measured spread.
+LOW_CONFIDENCE_SPREAD_SOURCES = {"fallback_default", "pooled_error"}

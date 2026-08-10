@@ -912,6 +912,13 @@ def _entry_pass(
         # which is its own piece of work. Until that exists, replays model
         # the UNCORRECTED calibration -- and the same reasoning is why
         # enforce_bias_quality stays off for the gate below.
+        #
+        # allow_measured_spread=False for the IDENTICAL reason, one level
+        # down: calibration.estimate_std_dev's measured and pooled tiers
+        # both read the whole stored error record, so either would price a
+        # replayed Aug-3 tick using errors from Aug-10. Replays get the
+        # measured pooled constant instead, reported as "replay_constant".
+        allow_measured_spread=False,
     )
 
     # Station's own bucket bounds + edge mode (B4): the legacy
