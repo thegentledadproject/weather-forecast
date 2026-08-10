@@ -47,12 +47,19 @@ API unreachable, station has no Polymarket market that day), the cycle
 logs it and continues with position-exit checks only -- it does not
 crash the whole scheduler over one station's missing market.
 
-Every station currently trades in "manual_review" mode (executor.py's
-EXECUTION_MODE default), so "primary"/"secondary" cycles PRINT
-recommended entries for a human to act on -- they do not place orders.
-That's consistent with the rest of the codebase: nothing here executes
-real trades until a station is deliberately promoted to "auto" and a
-real entry-placement path is built (still missing, see project summary).
+EXECUTION MODE IS PER STATION, NOT PER RUN
+-------------------------------------------
+--mode sets the BASELINE for the run; executor.py's ladder
+(manual_review -> paper -> simulation -> live) decides what each station
+actually does. --mode simulation/live promotes only the stations
+config.live_mode_is_permitted() allows -- today WSSS alone -- and every
+other station falls back to --fallback-mode, so one process runs WSSS on
+the real order path and the other twelve on paper simultaneously.
+
+Real orders additionally require --mode live, the explicit
+--i-understand-this-spends-real-money flag, and POLYMARKET_LIVE_TRADING
+=true in the environment. "simulation" builds the identical order and
+submits nothing.
 
 DEPENDENCIES
 ------------
@@ -72,6 +79,7 @@ import pipeline
 import ev_engine
 import position_manager
 import executor
+from clients import wallet_client
 from clients.official.registry import get_official_client
 
 # Floor on how long the daemon loop may sleep between wake-ups. With 13
@@ -420,17 +428,83 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run the weather-forecast trading scheduler.")
     parser.add_argument(
         "--mode",
-        choices=["manual_review", "paper"],
+        choices=["manual_review", "paper", "simulation", "live"],
         default="manual_review",
-        help="Execution mode for every registered station this run (default: manual_review).",
+        help=(
+            "Baseline execution mode for this run (default: manual_review). "
+            "'simulation' and 'live' apply ONLY to stations that satisfy "
+            "config.live_mode_is_permitted(); every other station falls back to "
+            "--fallback-mode. See the mode ladder in executor.py."
+        ),
+    )
+    parser.add_argument(
+        "--fallback-mode",
+        choices=["manual_review", "paper"],
+        default="paper",
+        help=(
+            "Mode for stations not eligible for --mode simulation/live "
+            "(default: paper). Ignored unless --mode is simulation or live."
+        ),
+    )
+    parser.add_argument(
+        "--i-understand-this-spends-real-money",
+        action="store_true",
+        help="Required with --mode live. Without it, live is refused.",
     )
     args = parser.parse_args()
 
-    if args.mode == "paper":
+    if args.mode in ("simulation", "live"):
+        # A station-by-station decision, never a blanket one. --mode live is
+        # a statement about the run, not about the registry: only stations
+        # config.py already permits get the real order path, and the other
+        # twelve keep paper-trading in the same process.
+        if args.mode == "live" and not getattr(args, "i_understand_this_spends_real_money"):
+            parser.error(
+                "--mode live requires --i-understand-this-spends-real-money. "
+                "It also requires POLYMARKET_LIVE_TRADING=true in the environment; "
+                "neither switch is sufficient alone."
+            )
+
+        promoted, held_back = [], []
+        for icao in config.STATIONS:
+            if config.live_mode_is_permitted(icao, args.mode):
+                executor.EXECUTION_MODE[icao] = args.mode
+                promoted.append(icao)
+            else:
+                executor.EXECUTION_MODE[icao] = args.fallback_mode
+                held_back.append(icao)
+
+        print(
+            f"[scheduler] {args.mode.upper()} mode active for: "
+            f"{', '.join(promoted) if promoted else '(no eligible station)'}."
+        )
+        print(
+            f"[scheduler] {len(held_back)} station(s) not eligible -- running "
+            f"'{args.fallback_mode}': {', '.join(held_back)}"
+        )
+        if args.mode == "live":
+            env_gate = wallet_client.live_trading_enabled()
+            print(
+                f"[scheduler] REAL MONEY. Second gate POLYMARKET_LIVE_TRADING="
+                f"{'true -- ORDERS WILL BE SUBMITTED' if env_gate else 'unset -- orders will NOT be submitted'}. "
+                f"Trade size ${config.LIVE_TRADE_SIZE_USD:.2f}, "
+                f"max {config.LIVE_MAX_CONCURRENT_POSITIONS} concurrent, "
+                f"${config.LIVE_MAX_TOTAL_EXPOSURE_USD:.2f} total exposure ceiling."
+            )
+            for line in wallet_client.preflight():
+                print(f"[scheduler] preflight: {line}")
+        else:
+            print(
+                "[scheduler] Simulation builds real orders against the real book "
+                "and submits NOTHING. No credentials are required."
+            )
+    elif args.mode == "paper":
         for icao in config.STATIONS:
             executor.EXECUTION_MODE[icao] = "paper"
         print("[scheduler] Paper trading mode active -- no live orders will be submitted.")
     else:
+        for icao in config.STATIONS:
+            executor.EXECUTION_MODE[icao] = "manual_review"
         print("[scheduler] Manual review mode active -- recommended actions will be printed for a human to execute.")
 
     run_forever()

@@ -194,7 +194,12 @@ def get_client():
         signature_type=DEFAULT_SIGNATURE_TYPE,
         funder=funder,
     )
-    creds = client.create_or_derive_api_creds()
+    # create_or_derive_api_KEY, not ..._api_creds. The previous name does not
+    # exist on the installed client (verified against py_clob_client_v2 1.0.2:
+    # dir(ClobClient) has create_or_derive_api_key and no ..._creds), so the
+    # first authenticated call would have died with an AttributeError -- proof
+    # this path had never actually been executed.
+    creds = client.create_or_derive_api_key()
     client.set_api_creds(creds)
 
     _client = client
@@ -346,40 +351,45 @@ def build_entry_order(token_id: str, price: float, size_usd: float) -> OrderSpec
         requested_price=price,
     )
 
-    # Minimum order size. Treated as a SHARE count (the conservative
-    # reading -- see the unverified-field note in the module docstring),
-    # with an independent dollar floor underneath it.
-    dollar_floor = ASSUMED_MIN_ORDER_USD
-    if min_order_size is not None and size_shares < min_order_size:
-        bumped_shares = _round_up_to_grid(min_order_size, SHARE_DECIMALS)
+    # Minimum order size. Treated as a SHARE count -- probed against the live
+    # API on 2026-08-10 ("mos":5 on the WSSS buckets), with an independent
+    # dollar floor underneath it in case a separate notional minimum exists
+    # that the market metadata does not advertise. See the extended note in
+    # config.py: at a 5-share minimum a $1 order is legal only at price <=
+    # 0.20, so the refusal below is the EXPECTED outcome on most buckets.
+    def _bump_to(target_shares: float, what: str) -> bool:
+        """Raise the order to `target_shares`, or refuse. True if refused."""
+        bumped_shares = _round_up_to_grid(target_shares, SHARE_DECIMALS)
         bumped_notional = round(bumped_shares * limit_price, 6)
+        if not config.LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE:
+            spec.ok = False
+            spec.reason = (
+                f"{what} requires ${bumped_notional:.2f} at {limit_price:.4f}, above "
+                f"the requested ${size_usd:.2f}, and "
+                f"LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE is off -- declining rather "
+                f"than spending more than the configured trade size"
+            )
+            return True
         if bumped_notional > config.LIVE_SIZE_OVERSHOOT_CEILING_USD:
             spec.ok = False
             spec.reason = (
-                f"market minimum of {min_order_size} shares costs "
-                f"${bumped_notional:.2f} at {limit_price:.4f}, past the "
+                f"{what} costs ${bumped_notional:.2f} at {limit_price:.4f}, past the "
                 f"${config.LIVE_SIZE_OVERSHOOT_CEILING_USD:.2f} overshoot ceiling "
                 f"on a ${size_usd:.2f} trade -- declining rather than oversizing"
             )
-            return spec
+            return True
         spec.size_shares = bumped_shares
         spec.notional_usd = bumped_notional
-        notional = bumped_notional
+        return False
 
-    if notional < dollar_floor:
-        bumped_shares = _round_up_to_grid(dollar_floor / limit_price, SHARE_DECIMALS)
-        bumped_notional = round(bumped_shares * limit_price, 6)
-        if bumped_notional > config.LIVE_SIZE_OVERSHOOT_CEILING_USD:
-            spec.ok = False
-            spec.reason = (
-                f"${dollar_floor:.2f} exchange minimum costs ${bumped_notional:.2f} "
-                f"at {limit_price:.4f}, past the "
-                f"${config.LIVE_SIZE_OVERSHOOT_CEILING_USD:.2f} overshoot ceiling "
-                f"-- declining rather than oversizing"
-            )
+    if min_order_size is not None and size_shares < min_order_size:
+        if _bump_to(min_order_size, f"market minimum of {min_order_size} shares"):
             return spec
-        spec.size_shares = bumped_shares
-        spec.notional_usd = bumped_notional
+
+    if spec.notional_usd < ASSUMED_MIN_ORDER_USD:
+        if _bump_to(ASSUMED_MIN_ORDER_USD / limit_price,
+                    f"${ASSUMED_MIN_ORDER_USD:.2f} notional floor"):
+            return spec
 
     if spec.notional_usd > config.LIVE_SIZE_OVERSHOOT_CEILING_USD:
         spec.ok = False
@@ -430,7 +440,7 @@ def build_exit_order(token_id: str, price: float, size_shares: float) -> OrderSp
     factor = 10 ** SHARE_DECIMALS
     sell_shares = math.floor(size_shares * factor + 1e-9) / factor
 
-    return OrderSpec(
+    spec = OrderSpec(
         ok=sell_shares > 0,
         token_id=token_id, side="SELL", limit_price=limit_price,
         size_shares=sell_shares, notional_usd=round(sell_shares * limit_price, 6),
@@ -438,6 +448,25 @@ def build_exit_order(token_id: str, price: float, size_shares: float) -> OrderSp
         requested_price=price,
         reason="order resolved" if sell_shares > 0 else "share count rounds to zero",
     )
+
+    # THE EXIT LEG CARRIES THE SAME MINIMUM AS THE ENTRY LEG.
+    #
+    # This is the check that makes small sizing dangerous rather than merely
+    # conservative: a position too small to sell cannot be exited AT ALL --
+    # every stop-loss, trailing stop and profit-take is dead for its whole
+    # life, and it can only come off the book by resolving. build_entry_order()
+    # is what actually prevents this, by refusing to open a position whose
+    # share count is under the market minimum in the first place. This check
+    # is the backstop for positions that predate that rule or were opened by
+    # hand, and it fails LOUDLY rather than submitting a doomed order.
+    if spec.ok and min_order_size is not None and sell_shares < min_order_size:
+        spec.ok = False
+        spec.reason = (
+            f"{sell_shares} shares is below the market minimum of {min_order_size} "
+            f"-- this position cannot be sold and can only come off the book by "
+            f"resolving. It should never have been opened at this size"
+        )
+    return spec
 
 
 # --------------------------------------------------------------------------

@@ -21,8 +21,13 @@ if ! python3 -m venv "$VENV" 2>/dev/null; then
     python3 -m venv "$VENV"
 fi
 "$VENV/bin/pip" install --quiet --upgrade pip
-# py-clob-client-v2 (live trading only) intentionally excluded from the paper deployment.
-"$VENV/bin/pip" install --quiet requests beautifulsoup4
+# py-clob-client-v2 IS now installed: WSSS runs in "simulation" mode, which
+# builds real orders (tick size, share rounding, minimum order size) against
+# the real book and submits nothing. That path needs the library even though
+# it never spends anything. wallet_client imports it lazily, so a box where
+# this install fails degrades to a clear per-order error rather than a
+# scheduler that won't start.
+"$VENV/bin/pip" install --quiet requests beautifulsoup4 py-clob-client-v2
 
 echo "== Sanity check: entrypoint imports and argparse work =="
 cd "$PKG_DIR"
@@ -46,14 +51,21 @@ fi
 echo "== systemd service =="
 sudo tee /etc/systemd/system/$SERVICE.service >/dev/null <<UNIT
 [Unit]
-Description=polyweather paper-trading scheduler (all registered stations)
+Description=polyweather scheduler (WSSS simulation, all other stations paper)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 User=ubuntu
 WorkingDirectory=$PKG_DIR
-ExecStart=$VENV/bin/python scheduler.py --mode paper
+# --mode simulation promotes ONLY the stations config.live_mode_is_permitted()
+# allows (today: WSSS alone) onto the real order path; --fallback-mode paper
+# keeps the other twelve exactly where they were. Nothing here submits an
+# order: that additionally requires --mode live, the
+# --i-understand-this-spends-real-money flag, AND POLYMARKET_LIVE_TRADING=true
+# in this unit's environment. None of those three are set by this script, and
+# adding them is a deliberate manual edit, not a deploy step.
+ExecStart=$VENV/bin/python scheduler.py --mode simulation --fallback-mode paper
 Restart=on-failure
 RestartSec=30
 

@@ -738,23 +738,84 @@ LIVE_TRADING_STATIONS = {"WSSS"}
 # gate results.
 LIVE_TRADE_SIZE_USD = 1.0
 
-# Polymarket enforces a per-market minimum order size, and the CLOB order
-# builder ROUNDS SHARE COUNTS DOWN (round_down(size, 2) -- verified in
-# py_clob_client_v2/order_builder/builder.py:36 ROUNDING_CONFIG, which uses
-# size=2 decimals at every tick size). A $1.00 notional therefore rounds to
-# slightly BELOW $1.00 and is rejected wherever the minimum is exactly $1.
-# wallet_client.build_entry_order() rounds the share count UP onto the
-# 2-decimal grid so the submitted notional lands at or just above the
-# minimum; this is the ceiling on how far it may overshoot the requested
-# size before giving up instead.
-LIVE_SIZE_OVERSHOOT_CEILING_USD = 1.25
+# THE MINIMUM ORDER SIZE IS DENOMINATED IN SHARES, NOT DOLLARS, AND IT
+# BINDS HARD AT $1.
+# --------------------------------------------------------------------------
+# Probed against the live CLOB API on 2026-08-10: the WSSS bucket markets
+# report min_order_size = 5 SHARES ("mos":5), not $1 of notional. Minimum
+# viable notional is therefore 5 x price:
+#
+#     price   0.10    0.20    0.31    0.50    0.62    0.75
+#     min $   0.50    1.00    1.55    2.50    3.10    3.75
+#
+# A $1.00 order is legal only at price <= 0.20. On the live WSSS book the
+# realistically tradeable buckets sat at 0.31 and 0.62 -- both of which
+# REJECT a $1 order. MAX_ENTRY_PRICE is 0.75, so the true worst case for a
+# single minimum-size trade is $3.75.
+#
+# (Corroborating evidence for the share reading: resting book orders of
+# 23.67 shares @ 0.004 = $0.09 notional exist and are legal, and the value
+# is identically 5 on markets priced 0.045 and 0.74. Strong, but NOT proof
+# -- a resting order can be a partially-filled remnant. Confirm with one
+# deliberately undersized live order and read the rejection before trusting
+# any sizing formula.)
+#
+# Separately, the CLOB order builder ROUNDS SHARE COUNTS DOWN
+# (round_down(size, 2), verified in py_clob_client_v2/order_builder/
+# builder.py:36), so even where $1 is legal a naive $1.00 order is submitted
+# for slightly under $1.00. wallet_client.build_entry_order() rounds the
+# share count UP onto the same 2-decimal grid to cancel that out.
+#
+# WHAT THIS MEANS FOR A "$1 TRADE SIZE"
+# --------------------------------------
+# LIVE_TRADE_SIZE_USD stays $1: it is the size ASKED FOR, and it is what
+# entry_manager sizes to. The exchange minimum then raises the order to the
+# smallest legal size for that bucket's price, so actual orders land at
+# roughly $1.55-$3.75 rather than $1. That is not the requested size and is
+# not treated as if it were -- Position.size_usd records the RESOLVED
+# notional, so P&L, exposure and every report read the real number.
+#
+# The ceiling is the hard stop on that upsizing. At $5.00 it clears the
+# $3.75 worst case (MAX_ENTRY_PRICE 0.75 x a 5-share minimum) with room to
+# absorb a wider minimum on a bucket that reports one, and still refuses
+# anything that would make a "small validation trade" quietly material.
+LIVE_SIZE_OVERSHOOT_CEILING_USD = 5.0
+
+# Whether an order may be sized UP to the exchange minimum when the
+# requested notional is below it. False keeps LIVE_TRADE_SIZE_USD a hard
+# statement about how much may be spent per trade, at the cost of declining
+# nearly every candidate (a $1 order is legal only at price <= 0.20).
+# True lets the exchange minimum set the size, bounded by
+# LIVE_SIZE_OVERSHOOT_CEILING_USD above.
+#
+# ON: the ceiling is now the only thing standing between a thin-book bucket
+# reporting an unexpectedly large minimum and an order several times the
+# intended size. Do not raise the ceiling without re-reading the exposure
+# backstops below, which are what bound the total rather than the trade.
+LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE = True
 
 # Fail-closed backstops on the live track. These are not sizing knobs --
 # they are the blast radius if something upstream is wrong. Breaching any of
 # them stops NEW live entries; open positions still exit normally, because
 # stranding a real position is worse than the exposure that opened it.
+#
+# The exposure ceiling admits the concurrent-position limit at the
+# worst-case single trade, and the two stay aligned: at a 5-share minimum
+# the most expensive legal entry is MAX_ENTRY_PRICE x 5 = $3.75, so three
+# of them is exactly $11.25. LIVE_SIZE_OVERSHOOT_CEILING_USD ($5.00) does
+# NOT set the trade size -- it is headroom above that worst case, and only
+# becomes the binding number if a bucket reports a minimum larger than 5
+# shares.
+#
+# That is the case to watch. A bucket demanding, say, 8 shares at 0.60
+# would cost $4.80: still under the ceiling, but three of them need $14.40
+# and the exposure cap would stop the third. That failure is the safe
+# direction (fewer positions, not larger ones), which is why the ceiling is
+# allowed to run ahead of the exposure cap rather than being pinned to it.
+# If you raise the ceiling further, re-derive this ceiling x
+# LIVE_MAX_CONCURRENT_POSITIONS product rather than assuming it still holds.
 LIVE_MAX_CONCURRENT_POSITIONS = 3        # across all live stations
-LIVE_MAX_TOTAL_EXPOSURE_USD = 5.0        # sum of open live size_usd
+LIVE_MAX_TOTAL_EXPOSURE_USD = 11.25      # sum of open live size_usd
 LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
 
 # Entries submit as FOK (fill-or-kill), not GTC. A GTC limit order returns

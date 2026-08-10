@@ -109,6 +109,37 @@ _collection_only_logged = set()
 max_plausible_edge_for = config.max_plausible_edge_for
 
 
+def _execution_mode(station_icao: str) -> str:
+    """This station's executor mode, defaulted the same way executor does."""
+    return executor.EXECUTION_MODE.get(station_icao, "manual_review")
+
+
+def _candidate_is_paper(station_icao: str) -> bool:
+    """
+    Which track a candidate entry for this station belongs to, matching
+    exactly what executor.open_position() stamps onto Position.is_paper.
+
+    MUST stay `mode != "live"`, not `mode == "paper"`. It was the latter
+    while there were only two real modes, and the mode ladder grew to four
+    underneath it: under "simulation" or "manual_review" the old form
+    returns False, i.e. "this is a real-money candidate", so the per-bucket
+    cap and the day-exposure total would be counted against the REAL track
+    while executor files the position under the PAPER track. The two
+    counts then disagree permanently, and the per-bucket cap silently stops
+    binding on the track it is supposed to protect.
+    """
+    return _execution_mode(station_icao) != "live"
+
+
+def live_size_cap_usd(station_icao: str) -> Optional[float]:
+    """
+    The fixed notional this station must trade at, or None for normal Kelly
+    sizing. Thin wrapper over config.live_size_cap_usd() that supplies the
+    mode, so no caller has to remember to.
+    """
+    return config.live_size_cap_usd(station_icao, _execution_mode(station_icao))
+
+
 def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
     """
     Full-Kelly fraction for this bet: raw_edge / (1 - price). Derived
@@ -430,7 +461,7 @@ def evaluate_entry(
     # we can't tell -- either way, don't stack another leg onto it. Counted
     # within this candidate's own track (paper vs. real), matching how
     # executor.open_position() stamps Position.is_paper from the same mode.
-    candidate_is_paper = executor.EXECUTION_MODE.get(station_icao, "manual_review") == "paper"
+    candidate_is_paper = _candidate_is_paper(station_icao)
     open_count = count_open_positions_for_bucket(
         station_icao, ev_result.target_date, ev_result.bucket_c, ev_result.side,
         is_paper=candidate_is_paper,
@@ -516,6 +547,21 @@ def evaluate_entry(
     # Cap 2: station maturity -- exploratory stations sized down hard
     if maturity == "exploratory":
         size_usd *= config.EXPLORATORY_SIZE_MULTIPLIER
+
+    # Cap 2b: fixed live/simulation trade size. REPLACES Kelly sizing rather
+    # than capping it -- see config.LIVE_TRADE_SIZE_USD.
+    #
+    # Applied HERE, above the depth/slippage/net-EV re-checks below, and not
+    # in executor. Those three checks all re-evaluate the trade at "the
+    # ACTUAL recommended size"; clamping after them would file a $1 trade
+    # under a $150 trade's slippage estimate and net-EV figure, and
+    # net_ev_at_size -- the number the approval reason quotes, the dashboard
+    # prints and the P&L attribution reads -- would describe a trade that
+    # never happened. Clamping first costs nothing and keeps every
+    # downstream number about the order that actually gets built.
+    live_cap = live_size_cap_usd(station_icao)
+    if live_cap is not None:
+        size_usd = min(size_usd, live_cap)
 
     # Cap 3: real order-book depth
     depth_usd = market_client.get_available_depth_usd(token_id)
@@ -873,7 +919,7 @@ def decide_portfolio_entries(
         return []
 
     station_icao = ev_results[0].station_icao
-    candidate_is_paper = executor.EXECUTION_MODE.get(station_icao, "manual_review") == "paper"
+    candidate_is_paper = _candidate_is_paper(station_icao)
 
     # --- Stage 0: collection-first gate ----------------------------------
     bias_c, bias_n, bias_stderr = forecast_bias_stats(station_icao)

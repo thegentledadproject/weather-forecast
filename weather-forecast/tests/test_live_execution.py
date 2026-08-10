@@ -1,0 +1,675 @@
+"""
+The real-money execution path: the mode ladder, the fixed $1 trade size,
+and every place the code is supposed to refuse rather than guess.
+
+The bias of this file is deliberate and one-directional. Almost every
+assertion here is that something did NOT happen -- no order submitted, no
+position written, no close recorded. Those are the failures that cost real
+money or strand a real position; a mode that is too cautious costs a
+missed trade, which is recoverable.
+"""
+
+from datetime import date
+
+import pytest
+
+import config
+import entry_manager
+import executor
+import storage
+from clients import market_client, wallet_client
+from models import EntryDecision, ExitDecision, EVResult, Position
+
+
+# --------------------------------------------------------------------------
+# Helpers
+# --------------------------------------------------------------------------
+
+def stub_book(monkeypatch, tick="0.01", min_order_size=None):
+    """Pin the public-book constraints wallet_client reads."""
+    monkeypatch.setattr(
+        wallet_client, "_book_constraints", lambda token_id: (tick, min_order_size)
+    )
+
+
+def make_decision(size_usd=1.0, price=0.30, station="WSSS", approved=True, token_id="TOK"):
+    return EntryDecision(
+        station_icao=station, target_date=date(2026, 8, 10), bucket_c=32, side="YES",
+        kelly_fraction_raw=0.4, kelly_fraction_applied=0.1,
+        recommended_size_usd=size_usd, available_depth_usd=1000.0,
+        slippage_at_size_pct=0.01, net_ev_at_size=0.30,
+        approved=approved, reason="test", station_maturity="mature",
+        entry_price=price, token_id=token_id,
+    )
+
+
+def make_position(station="WSSS", size_shares=3.33, price=0.30, mode="live", token_id="TOK"):
+    return Position(
+        position_id="p1", station_icao=station, target_date=date(2026, 8, 10),
+        bucket_c=32, side="YES", entry_price=price, size_usd=1.0,
+        entry_time="2026-08-10T00:00:00+00:00", status="open", token_id=token_id,
+        is_paper=(mode != "live"), size_shares=size_shares, execution_mode=mode,
+    )
+
+
+@pytest.fixture
+def captured(monkeypatch):
+    """Capture what would be written to storage instead of writing it."""
+    opened, closed = [], []
+    monkeypatch.setattr(storage, "open_position", lambda p: opened.append(p))
+    monkeypatch.setattr(
+        storage, "close_position",
+        lambda **kw: closed.append(kw),
+    )
+    monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [])
+    monkeypatch.setattr(storage, "load_position_history", lambda *a, **kw: [])
+    return {"opened": opened, "closed": closed}
+
+
+@pytest.fixture
+def mode(monkeypatch):
+    """Set every station's execution mode for one test."""
+    def _set(station_mode, station="WSSS"):
+        monkeypatch.setattr(
+            executor, "EXECUTION_MODE",
+            {icao: ("manual_review" if icao != station else station_mode)
+             for icao in config.STATIONS},
+        )
+    return _set
+
+
+# --------------------------------------------------------------------------
+# The allowlist / maturity conjunction
+# --------------------------------------------------------------------------
+
+def test_live_size_cap_requires_allowlist_and_maturity():
+    assert config.live_size_cap_usd("WSSS", "live") == config.LIVE_TRADE_SIZE_USD
+    assert config.live_size_cap_usd("WSSS", "simulation") == config.LIVE_TRADE_SIZE_USD
+    # Not allowlisted -> no cap, and not permitted at all.
+    assert config.live_size_cap_usd("WMKK", "live") is None
+    assert config.live_mode_is_permitted("WMKK", "live") is False
+    # Paper/manual_review are unaffected -- normal Kelly sizing.
+    assert config.live_size_cap_usd("WSSS", "paper") is None
+
+
+def test_allowlisting_an_immature_station_does_nothing(monkeypatch):
+    """
+    The conjunction has to hold from BOTH sides: adding a station to the
+    allowlist without promoting its maturity must not enable it.
+    """
+    monkeypatch.setattr(config, "LIVE_TRADING_STATIONS", {"WSSS", "WMKK"})
+    assert config.live_size_cap_usd("WMKK", "live") is None
+    assert config.live_mode_is_permitted("WMKK", "live") is False
+
+
+def test_every_allowlisted_station_is_mature():
+    """Guards the shipped config itself, not just the helper."""
+    for icao in config.LIVE_TRADING_STATIONS:
+        assert config.STATION_MATURITY.get(icao) == "mature", (
+            f"{icao} is allowlisted for real money but is not a mature station"
+        )
+
+
+# --------------------------------------------------------------------------
+# Mode validation
+# --------------------------------------------------------------------------
+
+def test_legacy_auto_mode_is_refused_not_mapped_to_live(mode):
+    mode("auto")
+    with pytest.raises(ValueError, match="legacy mode 'auto'"):
+        executor._validated_mode("WSSS")
+
+
+def test_unknown_mode_raises(mode):
+    mode("yolo")
+    with pytest.raises(ValueError, match="Unknown execution mode"):
+        executor._validated_mode("WSSS")
+
+
+def test_ineligible_station_in_live_mode_raises_rather_than_downgrading(monkeypatch):
+    monkeypatch.setattr(executor, "EXECUTION_MODE", {"WMKK": "live"})
+    with pytest.raises(ValueError, match="has not earned it"):
+        executor._validated_mode("WMKK")
+
+
+# --------------------------------------------------------------------------
+# The $1 sizing clamp
+# --------------------------------------------------------------------------
+
+def _ev(price=0.35, prob=0.45, station="WSSS"):
+    # Edge kept modest on purpose: config.max_plausible_edge_for() vetoes a
+    # raw edge above ~25% at this price as a presumed data error, so a
+    # headline-grabbing 0.55-vs-0.30 candidate never reaches the sizing code
+    # these tests are about.
+    return EVResult(
+        station_icao=station, target_date=date(2026, 8, 10), bucket_c=32, side="YES",
+        model_prob=prob, market_price=price, raw_edge=prob - price,
+        estimated_slippage_pct=0.01, fee_rate_pct=0.0,
+        net_ev_per_dollar=(prob - price) / price - 0.01, spread_source="ensemble",
+    )
+
+
+@pytest.mark.parametrize("station_mode,expect_capped", [
+    ("simulation", True),
+    ("live", True),
+    ("paper", False),
+    ("manual_review", False),
+])
+def test_live_modes_size_at_one_dollar(monkeypatch, mode, captured, station_mode, expect_capped):
+    mode(station_mode)
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda token_id: 1000.0)
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda token_id, size_usd: 0.01)
+
+    decision = entry_manager.evaluate_entry(_ev(), "TOK", min_net_ev=0.15)
+
+    assert decision.approved
+    if expect_capped:
+        assert decision.recommended_size_usd == config.LIVE_TRADE_SIZE_USD
+    else:
+        assert decision.recommended_size_usd > config.LIVE_TRADE_SIZE_USD
+
+
+def test_net_ev_at_size_describes_the_clamped_size(monkeypatch, mode, captured):
+    """
+    The clamp must run BEFORE the slippage/net-EV re-checks, so the recorded
+    net_ev_at_size describes the order that actually gets built. If it ran
+    after, slippage would be quoted for a ~$77 trade on a $1 order.
+    """
+    mode("simulation")
+    seen_sizes = []
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda token_id: 1000.0)
+
+    def _slippage(token_id, size_usd):
+        seen_sizes.append(size_usd)
+        return 0.01
+
+    monkeypatch.setattr(market_client, "estimate_slippage", _slippage)
+    entry_manager.evaluate_entry(_ev(), "TOK", min_net_ev=0.15)
+
+    assert seen_sizes == [config.LIVE_TRADE_SIZE_USD]
+
+
+def test_candidate_track_matches_what_executor_stamps(mode):
+    """
+    entry_manager's per-bucket cap must count against the same track
+    executor files the position under, for every mode -- not just paper.
+    """
+    for station_mode in ("manual_review", "paper", "simulation"):
+        mode(station_mode)
+        assert entry_manager._candidate_is_paper("WSSS") is True
+    mode("live")
+    assert entry_manager._candidate_is_paper("WSSS") is False
+
+
+# --------------------------------------------------------------------------
+# Order construction: the $1 rounding problem
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize("price", [0.05, 0.10, 0.19, 0.27, 0.33, 0.50, 0.66, 0.75])
+def test_one_dollar_order_never_lands_below_one_dollar(monkeypatch, price):
+    """
+    The order builder rounds share counts DOWN to 2 decimals, so a naive
+    $1.00 order is submitted for slightly less than $1.00 and is rejected
+    wherever the exchange minimum binds at $1. Rounding up onto the same
+    grid is the fix; this pins it across the price range.
+    """
+    stub_book(monkeypatch, tick="0.01")
+    spec = wallet_client.build_entry_order("TOK", price, 1.00)
+
+    assert spec.ok, spec.reason
+    assert spec.notional_usd >= 1.00
+    # Already on the builder's 2-decimal grid, so round_down() is a no-op.
+    assert spec.size_shares == round(spec.size_shares, 2)
+    assert spec.notional_usd <= config.LIVE_SIZE_OVERSHOOT_CEILING_USD
+
+
+def test_share_count_survives_the_builders_round_down(monkeypatch):
+    """The exact failure mode, stated directly: 1.00/0.33 = 3.0303..."""
+    stub_book(monkeypatch, tick="0.01")
+    spec = wallet_client.build_entry_order("TOK", 0.33, 1.00)
+
+    import math
+    naive = math.floor((1.00 / 0.33) * 100) / 100      # what the old path submitted
+    assert naive * 0.33 < 1.00                          # ...which is under the minimum
+    assert spec.size_shares > naive
+    assert spec.notional_usd >= 1.00
+
+
+def test_buy_limit_rounds_up_and_sell_limit_rounds_down(monkeypatch):
+    """
+    Both round in the direction that keeps the order marketable. Rounding a
+    buy limit down would sit it below the ask and guarantee a fill-or-kill
+    order gets killed -- indistinguishable from "no liquidity".
+    """
+    assert wallet_client._align_price_to_tick(0.301, "0.01", "BUY") == 0.31
+    assert wallet_client._align_price_to_tick(0.309, "0.01", "SELL") == 0.30
+    # Already aligned: unchanged in both directions.
+    assert wallet_client._align_price_to_tick(0.30, "0.01", "BUY") == 0.30
+    assert wallet_client._align_price_to_tick(0.30, "0.01", "SELL") == 0.30
+
+
+def test_declines_when_upsizing_is_disabled(monkeypatch):
+    """
+    The live minimum is 5 SHARES, so at price 0.50 the smallest legal order
+    is $2.50 -- 2.5x the requested $1. With upsizing OFF, declining is the
+    only correct answer. Pinned explicitly rather than read off the shipped
+    default, so this keeps testing the branch it names if the default flips.
+    """
+    monkeypatch.setattr(config, "LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE", False)
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    spec = wallet_client.build_entry_order("TOK", 0.50, 1.00)
+
+    assert not spec.ok
+    assert "LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE is off" in spec.reason
+
+
+def test_upsizing_raises_the_order_to_exactly_the_market_minimum(monkeypatch):
+    """With the flag on, the order is raised to the minimum and no further."""
+    monkeypatch.setattr(config, "LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE", True)
+    monkeypatch.setattr(config, "LIVE_SIZE_OVERSHOOT_CEILING_USD", 5.0)
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+
+    spec = wallet_client.build_entry_order("TOK", 0.50, 1.00)
+
+    assert spec.ok, spec.reason
+    assert spec.size_shares == 5.0
+    assert spec.notional_usd == pytest.approx(2.50)
+
+
+def test_shipped_ceiling_admits_the_worst_case_minimum_order(monkeypatch):
+    """
+    Guards the shipped config, not the helper: with upsizing on, the ceiling
+    must clear MAX_ENTRY_PRICE x a 5-share minimum, or the most expensive
+    tradeable buckets would be silently undtradeable while the config claims
+    otherwise.
+    """
+    if not config.LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE:
+        pytest.skip("upsizing disabled -- ceiling is not the binding constraint")
+
+    worst_case = config.MAX_ENTRY_PRICE * 5
+    assert config.LIVE_SIZE_OVERSHOOT_CEILING_USD >= worst_case, (
+        f"ceiling ${config.LIVE_SIZE_OVERSHOOT_CEILING_USD:.2f} is below the "
+        f"${worst_case:.2f} worst-case minimum order"
+    )
+
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    spec = wallet_client.build_entry_order("TOK", config.MAX_ENTRY_PRICE, 1.00)
+    assert spec.ok, spec.reason
+
+
+def test_upsizing_still_refuses_past_the_overshoot_ceiling(monkeypatch):
+    monkeypatch.setattr(config, "LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE", True)
+    monkeypatch.setattr(config, "LIVE_SIZE_OVERSHOOT_CEILING_USD", 2.00)
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+
+    spec = wallet_client.build_entry_order("TOK", 0.50, 1.00)
+
+    assert not spec.ok
+    assert "overshoot ceiling" in spec.reason
+
+
+def test_a_one_dollar_order_is_legal_only_at_low_prices(monkeypatch):
+    """
+    Pins the actual constraint: with a 5-share minimum, $1 buys enough
+    shares only at price <= 0.20. This is the fact that makes a literal
+    "$1 trade size" untradeable on most of the live WSSS book -- and
+    therefore the reason upsizing is enabled at all.
+    """
+    monkeypatch.setattr(config, "LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE", False)
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+
+    assert wallet_client.build_entry_order("TOK", 0.20, 1.00).ok
+    assert not wallet_client.build_entry_order("TOK", 0.21, 1.00).ok
+
+
+@pytest.mark.parametrize("price", [0.21, 0.31, 0.50, 0.62, 0.75])
+def test_upsizing_makes_the_real_book_tradeable(monkeypatch, price):
+    """
+    The complement: the prices that a literal $1 order cannot reach are
+    exactly the ones the live WSSS buckets actually trade at, and upsizing
+    turns each of them into a legal order at the exchange minimum.
+    """
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    spec = wallet_client.build_entry_order("TOK", price, 1.00)
+
+    assert spec.ok, spec.reason
+    assert spec.size_shares == 5.0
+    assert spec.notional_usd == pytest.approx(5.0 * price)
+    assert spec.notional_usd <= config.LIVE_SIZE_OVERSHOOT_CEILING_USD
+
+
+def test_exit_refuses_below_the_market_minimum(monkeypatch):
+    """
+    A position too small to sell cannot be exited at all -- every stop-loss
+    and profit-take is dead for its whole life. Fail loudly.
+    """
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    spec = wallet_client.build_exit_order("TOK", 0.40, 3.2)
+
+    assert not spec.ok
+    assert "cannot be sold" in spec.reason
+
+
+def test_entry_sizing_never_opens_a_position_it_cannot_exit(monkeypatch):
+    """
+    The structural guarantee behind the test above: whatever entry size is
+    accepted must clear the same minimum the exit leg will face.
+    """
+    monkeypatch.setattr(config, "LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE", True)
+    monkeypatch.setattr(config, "LIVE_SIZE_OVERSHOOT_CEILING_USD", 3.75)
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+
+    for price in (0.05, 0.20, 0.31, 0.50, 0.62, 0.75):
+        entry = wallet_client.build_entry_order("TOK", price, 1.00)
+        if not entry.ok:
+            continue
+        exit_spec = wallet_client.build_exit_order("TOK", price, entry.size_shares)
+        assert exit_spec.ok, (
+            f"price {price}: entry of {entry.size_shares} shares is not exitable "
+            f"-- {exit_spec.reason}"
+        )
+
+
+def test_refuses_to_guess_tick_size_when_book_is_unreachable(monkeypatch):
+    monkeypatch.setattr(wallet_client, "_book_constraints", lambda token_id: (None, None))
+    spec = wallet_client.build_entry_order("TOK", 0.30, 1.00)
+
+    assert not spec.ok
+    assert "order book unavailable" in spec.reason
+
+
+def test_exit_refuses_without_a_recorded_share_count(monkeypatch):
+    """
+    size_usd/entry_price is NOT an acceptable substitute: it uses the wrong
+    price and asks the exchange to sell shares that do not exist.
+    """
+    stub_book(monkeypatch, tick="0.01")
+    spec = wallet_client.build_exit_order("TOK", 0.40, None)
+
+    assert not spec.ok
+    assert "no recorded share count" in spec.reason
+
+
+def test_exit_rounds_shares_down(monkeypatch):
+    """Selling more than is held fails outright; dust is cheaper."""
+    stub_book(monkeypatch, tick="0.01")
+    spec = wallet_client.build_exit_order("TOK", 0.40, 3.4567)
+
+    assert spec.ok
+    assert spec.size_shares == 3.45
+
+
+# --------------------------------------------------------------------------
+# Submission gates
+# --------------------------------------------------------------------------
+
+def test_simulation_never_submits(monkeypatch):
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(wallet_client, "get_client", _explode)
+    spec = wallet_client.build_entry_order("TOK", 0.30, 1.00)
+
+    result = wallet_client.submit_order(spec, live=False)
+
+    assert result.simulated and not result.submitted and not result.filled
+
+
+def test_live_is_blocked_without_the_environment_gate(monkeypatch):
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.delenv("POLYMARKET_LIVE_TRADING", raising=False)
+    monkeypatch.setattr(wallet_client, "get_client", _explode)
+    spec = wallet_client.build_entry_order("TOK", 0.30, 1.00)
+
+    result = wallet_client.submit_order(spec, live=True)
+
+    assert not result.submitted and not result.filled
+    assert "second gate closed" in result.error
+
+
+def test_unresolved_spec_is_never_submitted(monkeypatch):
+    monkeypatch.setattr(wallet_client, "_book_constraints", lambda token_id: (None, None))
+    monkeypatch.setattr(wallet_client, "get_client", _explode)
+    spec = wallet_client.build_entry_order("TOK", 0.30, 1.00)
+
+    result = wallet_client.submit_order(spec, live=True)
+
+    assert not result.submitted and not result.filled
+
+
+def _explode(*a, **kw):
+    raise AssertionError("get_client() must not be reached on this path")
+
+
+@pytest.mark.parametrize("response,expected_fill", [
+    ({"success": True, "status": "matched"}, True),
+    ({"success": True, "status": "live"}, False),      # resting, not filled
+    ({"success": True, "status": "delayed"}, False),
+    ({"success": False, "status": "matched"}, False),
+    ({"status": "unmatched"}, False),
+    ({}, False),                                        # unrecognised -> not a fill
+    ("some string", False),                             # not even a dict
+])
+def test_fill_interpretation_defaults_to_not_filled(response, expected_fill):
+    spec = wallet_client.OrderSpec(
+        ok=True, token_id="TOK", side="BUY", limit_price=0.3,
+        size_shares=3.34, notional_usd=1.002,
+    )
+    filled, _, _ = wallet_client._interpret_fill(response, spec)
+    assert filled is expected_fill
+
+
+# --------------------------------------------------------------------------
+# executor: entries
+# --------------------------------------------------------------------------
+
+def test_unfilled_live_order_records_no_position(monkeypatch, mode, captured):
+    """
+    THE failure this design exists to prevent. A stored "open" position with
+    no shares behind it is one the exit path will later try to sell.
+    """
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=False, simulated=False, spec=spec, error="killed unfilled",
+        ),
+    )
+
+    executor.open_position(make_decision())
+
+    assert captured["opened"] == []
+
+
+def test_filled_live_order_records_shares_and_the_real_fill_price(monkeypatch, mode, captured):
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=True, simulated=False, spec=spec,
+            order_id="0xabc", fill_price=0.31, fill_shares=3.23,
+        ),
+    )
+
+    executor.open_position(make_decision())
+
+    assert len(captured["opened"]) == 1
+    pos = captured["opened"][0]
+    assert pos.execution_mode == "live"
+    assert pos.is_paper is False
+    assert pos.size_shares == 3.23
+    assert pos.entry_price == 0.31              # the real fill, not the decision price
+    assert pos.order_id == "0xabc"
+    assert pos.size_usd == pytest.approx(0.31 * 3.23, rel=1e-6)
+
+
+def test_simulation_records_the_resolved_size_not_the_requested_one(monkeypatch, mode, captured):
+    mode("simulation")
+    stub_book(monkeypatch, tick="0.01")
+
+    executor.open_position(make_decision(size_usd=1.00, price=0.33))
+
+    assert len(captured["opened"]) == 1
+    pos = captured["opened"][0]
+    assert pos.execution_mode == "simulation"
+    assert pos.is_paper is True                  # zero real risk
+    assert pos.size_shares is not None
+    assert pos.size_usd >= 1.00                  # what the real order would have cost
+
+
+def test_entry_abandoned_when_tick_alignment_blows_the_slippage_budget(monkeypatch, mode, captured):
+    """
+    On a 0.1-tick market, aligning a 0.31 limit up to 0.40 is +29% -- far
+    past MAX_ACCEPTABLE_SLIPPAGE_PCT. The entry was sized under a slippage
+    budget that no longer describes this order.
+    """
+    mode("simulation")
+    stub_book(monkeypatch, tick="0.1")
+
+    executor.open_position(make_decision(price=0.31))
+
+    assert captured["opened"] == []
+
+
+def test_live_entry_blocked_by_exposure_backstop(monkeypatch, mode, captured):
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    existing = [make_position(mode="live") for _ in range(config.LIVE_MAX_CONCURRENT_POSITIONS)]
+    monkeypatch.setattr(storage, "load_open_positions", lambda **kw: list(existing))
+    monkeypatch.setattr(wallet_client, "submit_order", _explode)
+
+    executor.open_position(make_decision())
+
+    assert captured["opened"] == []
+
+
+def test_unapproved_decision_never_reaches_the_order_path(monkeypatch, mode, captured):
+    mode("live")
+    monkeypatch.setattr(wallet_client, "build_entry_order", _explode)
+
+    executor.open_position(make_decision(approved=False))
+
+    assert captured["opened"] == []
+
+
+# --------------------------------------------------------------------------
+# executor: exits
+# --------------------------------------------------------------------------
+
+def _exit_decision(reason="stop_loss", price=0.20):
+    return ExitDecision(
+        position_id="p1", should_exit=True, reason=reason,
+        current_price=price, pnl_pct=-0.33,
+    )
+
+
+def test_unfilled_live_exit_leaves_the_position_open(monkeypatch, mode, captured):
+    """
+    Recording a close we could not place would hide a position whose shares
+    are still on the exchange from every later exit check.
+    """
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=False, simulated=False, spec=spec, error="killed unfilled",
+        ),
+    )
+
+    executor.close_position(make_position(), _exit_decision())
+
+    assert captured["closed"] == []
+
+
+def test_unbuildable_exit_leaves_the_position_open(monkeypatch, mode, captured):
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(wallet_client, "submit_order", _explode)
+
+    # No recorded share count -> the sell cannot be built.
+    executor.close_position(make_position(size_shares=None), _exit_decision())
+
+    assert captured["closed"] == []
+
+
+def test_resolution_close_places_no_order_in_live_mode(monkeypatch, mode, captured):
+    """
+    A resolved market has no book to sell into. An order there is a
+    guaranteed non-fill, which would then block the close and strand the
+    position.
+    """
+    mode("live")
+    monkeypatch.setattr(wallet_client, "build_exit_order", _explode)
+    monkeypatch.setattr(wallet_client, "submit_order", _explode)
+
+    executor.close_position(
+        make_position(), _exit_decision(reason="resolution", price=1.0),
+        status="closed_resolution", exit_reason="market_resolved",
+    )
+
+    assert len(captured["closed"]) == 1
+    assert captured["closed"][0]["status"] == "closed_resolution"
+
+
+def test_filled_live_exit_is_recorded_net_of_the_exit_fee(monkeypatch, mode, captured):
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=True, simulated=False, spec=spec,
+            order_id="0xdef", fill_price=spec.limit_price, fill_shares=spec.size_shares,
+        ),
+    )
+
+    import risk_manager
+    executor.close_position(make_position(), _exit_decision(price=0.20))
+
+    assert len(captured["closed"]) == 1
+    recorded = captured["closed"][0]["exit_price"]
+    assert recorded == pytest.approx(0.20 - risk_manager.taker_fee_per_share(0.20))
+
+
+def test_live_position_is_not_closed_by_a_non_live_process(monkeypatch, mode, captured):
+    """
+    THE stranding bug, stated directly. A real position is open; the daemon
+    restarts without the live flag, so WSSS is back to manual_review. The old
+    code dispatched on the STATION'S CURRENT MODE, printed an ACTION NEEDED
+    and wrote the close immediately -- database says closed, shares still
+    held, no stop-loss, invisible to every report from then on.
+
+    Dispatch is on the POSITION'S origin mode, and a live position may only
+    be closed by a process authorized for live.
+    """
+    mode("manual_review")                     # daemon restarted without --mode live
+    monkeypatch.setattr(wallet_client, "build_exit_order", _explode)
+    monkeypatch.setattr(wallet_client, "submit_order", _explode)
+
+    executor.close_position(make_position(mode="live"), _exit_decision())
+
+    assert captured["closed"] == [], "a live position was closed by a manual_review process"
+
+
+def test_paper_position_never_reaches_the_order_path_in_a_live_process(monkeypatch, mode, captured):
+    """
+    The mirror-image failure: starting WITH the live flag must not route a
+    pre-existing paper position into a real sell of shares that don't exist.
+    """
+    mode("live")
+    monkeypatch.setattr(wallet_client, "build_exit_order", _explode)
+    monkeypatch.setattr(wallet_client, "submit_order", _explode)
+
+    executor.close_position(make_position(mode="paper"), _exit_decision())
+
+    assert len(captured["closed"]) == 1       # closed as paper, no order attempted
+
+
+def test_simulation_exit_records_without_submitting(monkeypatch, mode, captured):
+    mode("simulation")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(wallet_client, "get_client", _explode)
+
+    executor.close_position(make_position(mode="simulation"), _exit_decision())
+
+    assert len(captured["closed"]) == 1

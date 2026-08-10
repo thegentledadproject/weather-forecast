@@ -295,7 +295,7 @@ def open_position(position: Position) -> None:
     """Persist a newly-entered position. position.status should be 'open'."""
     with _connect() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 position.position_id,
                 position.station_icao,
@@ -312,6 +312,9 @@ def open_position(position: Position) -> None:
                 position.exit_reason,
                 position.token_id,
                 int(position.is_paper),
+                position.size_shares,
+                position.execution_mode,
+                position.order_id,
             ),
         )
 

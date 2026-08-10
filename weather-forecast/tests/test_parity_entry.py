@@ -68,6 +68,25 @@ CASES = [
     ids=[case[0] for case in CASES],
 )
 def test_entry_decision_field_parity(monkeypatch, ev, open_count, stop_outs, depth, slip, min_net_ev):
+    # Pin every station to paper for the duration of this test.
+    #
+    # The parity contract is about the GATE CHAIN -- raw edge, materiality,
+    # per-bucket cap, cooldown, Kelly, depth, slippage, net EV -- not about
+    # execution. entry_manager grew one sizing input the replica has no
+    # concept of: config.LIVE_TRADE_SIZE_USD, which replaces Kelly sizing
+    # with a flat $1 for stations running in simulation/live mode. WSSS
+    # defaults to "simulation", so without this pin the live path sizes the
+    # WSSS cases at $1 while the replica sizes them at Kelly and the parity
+    # test fails on a difference that is correct in both directions.
+    #
+    # entry_sim deliberately does NOT model the cap: a backtest of $1 trades
+    # measures nothing about strategy edge, which is the only thing a
+    # backtest is for. The cap's own behaviour is pinned separately in
+    # test_live_execution.py.
+    monkeypatch.setattr(
+        executor, "EXECUTION_MODE", {icao: "paper" for icao in config.STATIONS},
+    )
+
     # Stub live I/O so evaluate_entry sees exactly what the sim is handed.
     if open_count is None:
         def _unreadable(**kw):
