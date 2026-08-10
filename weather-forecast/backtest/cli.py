@@ -37,6 +37,7 @@ from pathlib import Path
 
 import config
 
+import backtest.compare as compare
 import backtest.engine as engine
 import backtest.price_history_client as price_history_client
 import backtest.settings as settings
@@ -109,6 +110,21 @@ def _cmd_parity(args: argparse.Namespace) -> None:
     sys.exit(result.returncode)
 
 
+def _cmd_compare(args: argparse.Namespace) -> None:
+    windows = None
+    if args.station:
+        windows = [
+            (icao, lo, hi) for icao, lo, hi in compare.discover_windows()
+            if icao in args.station
+        ]
+        missing = set(args.station) - {w[0] for w in windows}
+        if missing:
+            raise ValueError(f"no market data for: {', '.join(sorted(missing))}")
+
+    arms = compare.compare(args.arms, windows=windows)
+    print(compare.format_report(arms))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="backtest.cli", description="Backtest tooling CLI.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -156,6 +172,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_parity = subparsers.add_parser("parity", help="Run the entry-parity / gate-census pytest suite.")
     p_parity.set_defaults(func=_cmd_parity)
+
+    p_cmp = subparsers.add_parser(
+        "compare",
+        help="A/B config variants over the same replayed history, with honest P&L accounting.",
+    )
+    p_cmp.add_argument(
+        "--arms", nargs="+", default=["shipped", "legacy-all"],
+        choices=sorted(compare.ARMS),
+        help="Config variants to run (default: shipped legacy-all).",
+    )
+    p_cmp.add_argument(
+        "--station", nargs="*", default=None,
+        help="Limit to these stations. Default: every station with market data.",
+    )
+    p_cmp.set_defaults(func=_cmd_compare)
 
     return parser
 
