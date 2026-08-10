@@ -27,11 +27,16 @@ config.py (local)
 
 import config
 
-# Fixed local-time offset for every registered station (SGT/MYT, UTC+8).
-# MUST match risk_manager._local_hour()'s tz_offset_hours default and
-# scheduler.local_now()'s -- both hardcode 8 for exactly the same reason
-# (WSSS and WMKK share this offset). Verified against both modules; if a
-# station in another timezone is ever registered, all three change together.
+# DEFAULT local-time offset only -- no longer the offset every station is
+# replayed at. simclock is parameterized per station as of 2026-08-10
+# (design C5): engine.run() reads station.utc_offset_hours and threads it
+# through SimClock, local_minute_to_ts() and generate_ticks(), and a run's
+# manifest records the offset it actually used as sim_utc_offset_hours.
+#
+# Still matches risk_manager._local_hour()'s tz_offset_hours default and
+# scheduler.local_now()'s, both of which hardcode 8 as their own
+# station-agnostic fallback. This value is what a caller gets when it names
+# no station at all -- the synthetic test scenario, mainly.
 LOCAL_UTC_OFFSET_HOURS = 8
 
 # An observation for target date D is not knowable until D+1 local: the

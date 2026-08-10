@@ -433,27 +433,23 @@ def run(
     station = config.get_station(station_icao)
     station_icao = station.icao
 
-    # C5 guard. backtest/simclock.py's LOCAL_TZ is a single fixed
-    # timezone (timezone(timedelta(hours=settings.LOCAL_UTC_OFFSET_HOURS)))
-    # shared by EVERY simulated instant in a run -- it drives window replay
-    # (simclock.generate_ticks -> scheduler.determine_window), edge-decay
-    # tightening (risk_manager.evaluate_exit's local_hour), and observation-
-    # visibility boundaries (resolution.observation_visible's local-date
-    # comparison). None of that is parameterized per-station yet (a
-    # deliberate, reviewed decision: guard now, thread a real per-station tz
-    # through simclock later -- not an oversight). Running a station whose
-    # utc_offset_hours does not match the clock therefore replays the
-    # entire trading thesis at the wrong local hour: RJTT (+9) an hour off,
-    # OPKC (+5) three hours off. Refuse outright rather than produce a
-    # result that looks complete but is silently mistimed.
-    if station.utc_offset_hours != settings.LOCAL_UTC_OFFSET_HOURS:
-        raise ValueError(
-            f"Station {station.icao} has utc_offset_hours={station.utc_offset_hours}, "
-            f"but backtest/simclock.py's LOCAL_TZ is fixed to "
-            f"settings.LOCAL_UTC_OFFSET_HOURS={settings.LOCAL_UTC_OFFSET_HOURS}. "
-            f"backtest/simclock.py's LOCAL_TZ must be parameterized per-station "
-            f"before this station can be backtested -- see design doc section C5."
-        )
+    # C5 RESOLVED 2026-08-10: the simulated clock is per-station.
+    #
+    # backtest/simclock.py used to hold ONE fixed timezone shared by every
+    # simulated instant, so a station whose utc_offset_hours disagreed with
+    # it replayed the entire trading thesis at the wrong local hour -- RJTT
+    # (+9) an hour off, OPKC (+5) three hours off. That drives window replay
+    # (generate_ticks -> scheduler.determine_window), edge-decay tightening
+    # (risk_manager.evaluate_exit's local_hour) and observation-visibility
+    # boundaries (resolution.observation_visible's local-date comparison).
+    # Rather than produce a mistimed result that looks complete, run()
+    # refused those stations outright -- which left 6 of the 13 registered
+    # stations unbacktestable, including every UTC+9 one.
+    #
+    # simclock now takes utc_offset_hours on SimClock, local_minute_to_ts()
+    # and generate_ticks(), and this function threads the station's own
+    # offset through all three. The guard is gone because the limitation is.
+    local_offset = station.utc_offset_hours
 
     run_id = run_id or _make_run_id(
         station_icao, start_date, end_date, depth_regime, fee_rate_pct, bankroll_mode
@@ -536,8 +532,10 @@ def run(
     tokens_seen: set = set()
 
     # --- clock --------------------------------------------------------------
-    first_ts = simclock.local_minute_to_ts(start_date, settings.SIM_DAY_START_HOUR_LOCAL * 60)
-    clock = simclock.SimClock(first_ts)
+    first_ts = simclock.local_minute_to_ts(
+        start_date, settings.SIM_DAY_START_HOUR_LOCAL * 60, local_offset,
+    )
+    clock = simclock.SimClock(first_ts, utc_offset_hours=local_offset)
     last_ts = first_ts
 
     # Last price actually OBSERVED per position, mirroring
@@ -559,7 +557,7 @@ def run(
                 if ids.get(key):
                     tokens_seen.add(ids[key])
 
-        for tick in simclock.generate_ticks(day):
+        for tick in simclock.generate_ticks(day, local_offset):
             clock.advance_to(tick.ts)
             last_ts = tick.ts
             counters["n_cycles"] = int(counters["n_cycles"]) + 1
@@ -625,7 +623,7 @@ def run(
     counters["n_unresolved"] = len(unresolved)
 
     # --- provenance and manifest --------------------------------------------
-    end_ts = simclock.local_minute_to_ts(end_date + timedelta(days=1), 0)
+    end_ts = simclock.local_minute_to_ts(end_date + timedelta(days=1), 0, local_offset)
     coverage = price_store.coverage_stats(
         sorted(tokens_seen), first_ts, end_ts, db_path=market_db_path
     )
@@ -716,7 +714,11 @@ def run(
             "ev_engine.DEFAULT_FEE_RATE_PCT": ev_engine.DEFAULT_FEE_RATE_PCT,
         },
         "backtest_settings": {
+            # The DEFAULT offset. The clock this run actually used is
+            # sim_utc_offset_hours below -- they differ for any station
+            # outside UTC+8, which is the whole point of the C5 fix.
             "LOCAL_UTC_OFFSET_HOURS": settings.LOCAL_UTC_OFFSET_HOURS,
+            "sim_utc_offset_hours": local_offset,
             "OBS_PUBLISH_LAG_DAYS": settings.OBS_PUBLISH_LAG_DAYS,
             "MAX_STALENESS_FACTOR": settings.MAX_STALENESS_FACTOR,
             "DEFAULT_SNAPSHOT_FIDELITY_MIN": settings.DEFAULT_SNAPSHOT_FIDELITY_MIN,

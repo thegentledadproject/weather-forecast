@@ -50,26 +50,11 @@ def _parse_date(value: str) -> date:
 def _cmd_run(args: argparse.Namespace) -> None:
     import backtest.report as report
 
-    # C5 guard, mirrored from backtest/engine.py::run() so the CLI fails
-    # fast with the same explanation before doing any work (engine.run()
-    # would also raise this, but only after resolving the station and
-    # entering the run). backtest/simclock.py's LOCAL_TZ is a single fixed
-    # timezone shared by every simulated instant -- it drives window
-    # replay, edge-decay tightening hours, and observation-visibility
-    # boundaries, none of which is parameterized per-station yet
-    # (deliberate: guard now, parameterize simclock later -- see design C5).
-    # Running a station whose utc_offset_hours doesn't match the clock
-    # replays the whole trading thesis at the wrong local hour.
-    station = config.get_station(args.station)
-    if station.utc_offset_hours != settings.LOCAL_UTC_OFFSET_HOURS:
-        raise ValueError(
-            f"Station {station.icao} has utc_offset_hours={station.utc_offset_hours}, "
-            f"but backtest/simclock.py's LOCAL_TZ is fixed to "
-            f"settings.LOCAL_UTC_OFFSET_HOURS={settings.LOCAL_UTC_OFFSET_HOURS}. "
-            f"backtest/simclock.py's LOCAL_TZ must be parameterized per-station "
-            f"before this station can be backtested -- see design doc section C5."
-        )
-
+    # The C5 guard that used to live here is gone: backtest/simclock.py is
+    # parameterized per-station as of 2026-08-10, so a station outside UTC+8
+    # replays on its OWN local clock instead of being refused. engine.run()
+    # reads station.utc_offset_hours and threads it through the clock, the
+    # tick schedule and every local-date boundary.
     run = engine.run(
         station_icao=args.station,
         start_date=args.from_date,

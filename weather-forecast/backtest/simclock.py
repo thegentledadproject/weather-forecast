@@ -42,9 +42,23 @@ import scheduler
 
 from backtest import settings
 
-# Fixed-offset local timezone for every registered station (see
-# settings.LOCAL_UTC_OFFSET_HOURS for why a fixed offset, not a tz database).
+# Default local offset, used only when a caller does not name one. Every
+# function and the SimClock itself now take utc_offset_hours, because the
+# registry spans UTC+5 (Karachi) through UTC+9 (Japan/Korea) and a single
+# shared clock replayed all of them at Singapore's hours.
+#
+# Still a FIXED offset rather than a tz database entry: no registered city
+# observes DST. That is an assumption which happens to hold for every Asian
+# market listed so far, not a general truth -- re-check it before
+# registering a station in a DST region (see models.StationConfig).
 LOCAL_TZ = timezone(timedelta(hours=settings.LOCAL_UTC_OFFSET_HOURS))
+
+
+def tz_for(utc_offset_hours: Optional[int] = None) -> timezone:
+    """The fixed-offset timezone for a station, defaulting to the legacy UTC+8."""
+    if utc_offset_hours is None:
+        return LOCAL_TZ
+    return timezone(timedelta(hours=utc_offset_hours))
 
 _MINUTES_PER_DAY = 24 * 60
 
@@ -85,8 +99,17 @@ class SimClock:
     later as an inexplicably profitable backtest.
     """
 
-    def __init__(self, ts: int):
+    def __init__(self, ts: int, utc_offset_hours: Optional[int] = None):
         self.ts = int(ts)
+        # The station's own offset. Everything local this clock reports --
+        # the hour risk_manager's edge-decay tightening keys on, the date
+        # target_date and observation visibility key on -- is derived from
+        # it, so a clock built without one replays a UTC+9 station at
+        # Singapore's hours: an hour early for +9, three hours late for +5.
+        self.utc_offset_hours = (
+            settings.LOCAL_UTC_OFFSET_HOURS if utc_offset_hours is None else int(utc_offset_hours)
+        )
+        self.tz = tz_for(self.utc_offset_hours)
 
     def advance_to(self, ts: int) -> None:
         """Move the clock to ts. Raises ValueError if that would move time backwards."""
@@ -104,8 +127,8 @@ class SimClock:
         return datetime.fromtimestamp(self.ts, timezone.utc)
 
     def local_datetime(self) -> datetime:
-        """Current simulated time as a tz-aware datetime at the station-local fixed offset."""
-        return self.utc_datetime().astimezone(LOCAL_TZ)
+        """Current simulated time as a tz-aware datetime at THIS station's offset."""
+        return self.utc_datetime().astimezone(self.tz)
 
     def local_hour(self) -> int:
         """Local hour 0-23 -- what risk_manager._local_hour() would have returned at this instant."""
@@ -129,17 +152,24 @@ class SimClock:
         return self.utc_datetime().isoformat()
 
     def __repr__(self) -> str:
-        return f"SimClock(ts={self.ts}, local={self.local_datetime().isoformat()})"
+        return (f"SimClock(ts={self.ts}, utc_offset_hours={self.utc_offset_hours}, "
+                f"local={self.local_datetime().isoformat()})")
 
 
-def local_minute_to_ts(day: date, minute_of_day: int) -> int:
-    """Convert a LOCAL (date, minute-of-day) to unix UTC seconds using the fixed station offset."""
+def local_minute_to_ts(day: date, minute_of_day: int,
+                       utc_offset_hours: Optional[int] = None) -> int:
+    """
+    Convert a LOCAL (date, minute-of-day) to unix UTC seconds at a station's
+    own fixed offset. Omitting utc_offset_hours keeps the legacy UTC+8
+    behaviour, which is what the synthetic test scenario is built on.
+    """
     hour, minute = divmod(minute_of_day, 60)
-    local_dt = datetime.combine(day, time(hour=hour, minute=minute), tzinfo=LOCAL_TZ)
+    local_dt = datetime.combine(day, time(hour=hour, minute=minute),
+                                tzinfo=tz_for(utc_offset_hours))
     return int(local_dt.timestamp())
 
 
-def generate_ticks(day: date) -> List[Tick]:
+def generate_ticks(day: date, utc_offset_hours: Optional[int] = None) -> List[Tick]:
     """
     Every timestamp a live daemon would have woken at on the given LOCAL
     day, in strictly increasing order.
@@ -177,7 +207,7 @@ def generate_ticks(day: date) -> List[Tick]:
 
         ticks.append(
             Tick(
-                ts=local_minute_to_ts(day, minute_of_day),
+                ts=local_minute_to_ts(day, minute_of_day, utc_offset_hours),
                 mode=window["mode"],
                 min_net_ev=window["min_net_ev"],
                 interval_min=interval,
