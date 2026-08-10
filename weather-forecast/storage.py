@@ -16,11 +16,49 @@ config.py, models.py (local)
 """
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import date
 from typing import List, Optional
 
 import config
 from models import PointForecast, ObservedReading, Position
+
+
+@contextmanager
+def _db():
+    """
+    Transaction scope AND connection lifetime in one context manager.
+    EVERY function in this module must use _db(); never `with _connect()`.
+
+    THIS IS THE SAME BUG 4f72dd4 FIXED IN price_store.py, AND IT WAS LEFT
+    HERE. sqlite3's own `with conn:` delimits a TRANSACTION -- it commits or
+    rolls back and then does nothing else. It never closes the connection.
+    `with _connect() as conn:` therefore relies entirely on the connection
+    object being garbage-collected to release its file descriptor.
+
+    Refcounting does not reclaim it. Measured directly: with gc disabled,
+    50 calls through `with _connect()` leave all 50 connections alive,
+    whether or not the body raised. sqlite3.Connection sits in reference
+    cycles, so only the CYCLIC collector frees it -- and the cyclic
+    collector is triggered by allocation volume, which a scheduler that
+    spends most of its life asleep barely generates. Descriptors then
+    accumulate for hours between collections.
+
+    That is the "[Errno 24] Too many open files" that took the daemon down
+    on 2026-08-07 and was still happening 2026-08-10: 26 of the process's
+    29 descriptors were open handles to polyweather.sqlite3 a few minutes
+    after a restart. Once the limit is hit, EVERY outbound request fails to
+    get a socket too, so whole station cycles die with "unable to open
+    database file" and the failure looks like a network problem.
+
+    Closing in a finally is deterministic and immune to all of it.
+    """
+    conn = _connect()
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def _connect() -> sqlite3.Connection:
@@ -97,7 +135,7 @@ def save_forecast(forecast: PointForecast) -> None:
     """Persist a single forecast pull. Safe to call repeatedly (idempotent per fetch)."""
     if forecast is None:
         return
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO forecasts VALUES (?, ?, ?, ?, ?, ?)",
             (
@@ -113,7 +151,7 @@ def save_forecast(forecast: PointForecast) -> None:
 
 def save_observation(observation: ObservedReading) -> None:
     """Persist a confirmed actual reading, e.g. once verified manually against Wunderground."""
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO observations VALUES (?, ?, ?, ?)",
             (
@@ -127,7 +165,7 @@ def save_observation(observation: ObservedReading) -> None:
 
 def load_observations_since(station_icao: str, cutoff: date) -> List[ObservedReading]:
     """Load all stored observations for one station on or after cutoff."""
-    with _connect() as conn:
+    with _db() as conn:
         rows = conn.execute(
             "SELECT station_icao, target_date, max_temp_c, source FROM observations "
             "WHERE station_icao = ? AND target_date >= ?",
@@ -196,7 +234,7 @@ def count_observations_from_source(station_icao: str, source: str) -> int:
     would let 30 days of Open-Meteo analysis backfill graduate a station
     that has never once been compared against the record it settles on.
     """
-    with _connect() as conn:
+    with _db() as conn:
         row = conn.execute(
             "SELECT COUNT(*) FROM observations WHERE station_icao = ? AND source = ?",
             (station_icao, source),
@@ -225,7 +263,7 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
     The per-date forecast mean mirrors blend_central_estimate's own
     forecast term, so the number measured is the number corrected.
     """
-    with _connect() as conn:
+    with _db() as conn:
         rows = conn.execute(
             "SELECT o.max_temp_c, AVG(f.max_temp_c) "
             "FROM observations o JOIN forecasts f "
@@ -241,7 +279,7 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
 
 def load_forecast_history(station_icao: str, source: str, limit: int = 90) -> List[PointForecast]:
     """Load past forecasts from one source for one station, most recent first."""
-    with _connect() as conn:
+    with _db() as conn:
         rows = conn.execute(
             "SELECT station_icao, source, target_date, max_temp_c, fetched_at, raw_note "
             "FROM forecasts WHERE station_icao = ? AND source = ? ORDER BY fetched_at DESC LIMIT ?",
@@ -293,7 +331,7 @@ def _row_to_position(r) -> Position:
 
 def open_position(position: Position) -> None:
     """Persist a newly-entered position. position.status should be 'open'."""
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -321,7 +359,7 @@ def open_position(position: Position) -> None:
 
 def update_high_water_mark(position_id: str, new_high_water_mark: float) -> None:
     """Persist an updated high-water-mark for an open position -- called every scan cycle the peak price moves."""
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute(
             "UPDATE positions SET high_water_mark = ? WHERE position_id = ?",
             (new_high_water_mark, position_id),
@@ -330,7 +368,7 @@ def update_high_water_mark(position_id: str, new_high_water_mark: float) -> None
 
 def close_position(position_id: str, exit_price: float, exit_time: str, status: str, reason: str) -> None:
     """Mark a position closed -- status should be one of 'closed_take_profit', 'closed_stop_loss', 'closed_trailing_stop', 'closed_resolution' (see models.Position.status)."""
-    with _connect() as conn:
+    with _db() as conn:
         conn.execute(
             "UPDATE positions SET status = ?, exit_price = ?, exit_time = ?, exit_reason = ? WHERE position_id = ?",
             (status, exit_price, exit_time, reason, position_id),
@@ -347,7 +385,7 @@ def load_open_positions(station_icao: Optional[str] = None, is_paper: Optional[b
     still need live exit monitoring to be useful), but reporting and
     bankroll accounting must never silently mix them.
     """
-    with _connect() as conn:
+    with _db() as conn:
         query = "SELECT * FROM positions WHERE status = 'open'"
         params = []
         if station_icao:
@@ -362,7 +400,7 @@ def load_open_positions(station_icao: Optional[str] = None, is_paper: Optional[b
 
 def load_position_history(station_icao: str, limit: int = 100, is_paper: Optional[bool] = None) -> List[Position]:
     """Load closed positions for a station, most recent exit first, optionally filtered to paper vs. real."""
-    with _connect() as conn:
+    with _db() as conn:
         query = "SELECT * FROM positions WHERE station_icao = ? AND status != 'open'"
         params = [station_icao]
         if is_paper is not None:
