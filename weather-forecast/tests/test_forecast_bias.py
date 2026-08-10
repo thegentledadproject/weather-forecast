@@ -73,13 +73,63 @@ def test_correction_shifts_the_forecast_term_by_the_measured_bias():
 
 
 def test_correction_leaves_the_observed_term_alone():
-    # Observed readings are settled truth: only the forecast half of the
-    # 60/40 blend may be corrected. forecast mean 30.0 -> 31.0 after a
-    # -1.0 bias; observed mean 34.0 is untouched.
+    # Observed readings are settled truth: only the forecast side of the
+    # blend may be corrected. forecast mean 30.0 -> 31.0 after a -1.0
+    # bias; observed mean 34.0 is untouched.
     forecasts = [_fc(30.0)]
     observations = [_obs(34.0)]
-    got = calibration.blend_central_estimate(forecasts, observations, 31.4, forecast_bias_c=-1.0)
+    got = calibration.blend_central_estimate(
+        forecasts, observations, 31.4, forecast_bias_c=-1.0, forecast_weight=0.4,
+    )
     assert got == pytest.approx(0.4 * 31.0 + 0.6 * 34.0)
+
+
+# --- the blend weight ------------------------------------------------------
+
+def test_blend_weight_defaults_to_config():
+    forecasts, observations = [_fc(30.0)], [_obs(34.0)]
+    w = config.FORECAST_BLEND_WEIGHT_DEFAULT
+    got = calibration.blend_central_estimate(forecasts, observations, 31.4)
+    assert got == pytest.approx(round(w * 30.0 + (1 - w) * 34.0, 1))
+
+
+def test_blend_weight_is_per_station():
+    # Singapore is the one station that genuinely wants persistence weight;
+    # everyone else takes the forecast-heavy default.
+    assert config.forecast_blend_weight("WSSS") == 0.50
+    assert config.forecast_blend_weight("WMKK") == config.FORECAST_BLEND_WEIGHT_DEFAULT
+    assert config.forecast_blend_weight("NOT_A_STATION") == config.FORECAST_BLEND_WEIGHT_DEFAULT
+
+
+def test_calibrate_uses_the_station_weight():
+    forecasts, observations = [_fc(30.0)], [_obs(34.0)]
+    wsss = calibration.calibrate(
+        station=config.get_station("WSSS"), target_date=date(2026, 8, 10),
+        forecasts=forecasts, observations=observations,
+    )
+    wmkk = calibration.calibrate(
+        station=config.get_station("WMKK"), target_date=date(2026, 8, 10),
+        forecasts=forecasts, observations=observations,
+    )
+    assert wsss.central_estimate_c == pytest.approx(round(0.5 * 30.0 + 0.5 * 34.0, 1))
+    w = config.FORECAST_BLEND_WEIGHT_DEFAULT
+    assert wmkk.central_estimate_c == pytest.approx(round(w * 30.0 + (1 - w) * 34.0, 1))
+    # The forecast-heavy station must land closer to the forecast.
+    assert abs(wmkk.central_estimate_c - 30.0) < abs(wsss.central_estimate_c - 30.0)
+
+
+def test_correction_is_no_longer_diluted_away():
+    # The defect this fixes: at w=0.4 a -1.66C measured bias moved the
+    # estimate by only +0.66C. At the new default it must carry ~85% of
+    # its measured size into the final number.
+    forecasts, observations = [_fc(30.0)], [_obs(30.0)]
+    base = calibration.blend_central_estimate(forecasts, observations, 31.4)
+    corrected = calibration.blend_central_estimate(
+        forecasts, observations, 31.4, forecast_bias_c=-1.66,
+    )
+    shift = corrected - base
+    assert shift == pytest.approx(1.66 * config.FORECAST_BLEND_WEIGHT_DEFAULT, abs=0.06)
+    assert shift > 1.0  # the old 0.4 blend produced 0.66
 
 
 def test_calibrate_records_the_bias_it_applied(monkeypatch):

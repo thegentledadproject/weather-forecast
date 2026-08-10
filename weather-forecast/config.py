@@ -705,6 +705,67 @@ MIN_KELLY_DENOMINATOR = 0.20
 # bankroll on one bucket of one station's market.
 MAX_POSITION_USD = 150.0
 
+# --- Real-money execution (executor.py, clients/wallet_client.py) ----------
+# Everything below governs the ONLY path in this codebase that can spend real
+# funds. Read the mode ladder in executor.py before changing any of it.
+#
+# THE LADDER: manual_review -> paper -> simulation -> live
+#   Only "live" spends money. "simulation" is the new rung: it runs the REAL
+#   order-construction path (tick-size resolution, share rounding, minimum
+#   order-size check, balance/allowance preflight) against the REAL market,
+#   and stops immediately before submission. Its purpose is that the code
+#   which will eventually move money is the code being exercised now --
+#   "paper" cannot test any of that, because it fabricates a fill at the
+#   decision price and never touches wallet_client at all.
+
+# Stations allowed to leave paper trading. Membership here is necessary but
+# NOT sufficient -- a station must ALSO be STATION_MATURITY == "mature"
+# (see live_size_cap_usd() below, which enforces the conjunction). WSSS is
+# the only station with a confirmed measured edge; per the 2026-08-09
+# divergence review the other twelve are collectively negative and none of
+# them belong anywhere near this list.
+LIVE_TRADING_STATIONS = {"WSSS"}
+
+# Fixed notional for every simulation/live order, in dollars. This REPLACES
+# Kelly sizing entirely for those modes rather than capping it: at $1 the
+# point is to validate the execution path, not to express edge, and a size
+# that varies with Kelly would make a rejected order impossible to
+# distinguish from a mis-sized one.
+#
+# Applied in entry_manager.size_position(), NOT in executor. That matters:
+# slippage, net EV and the depth cap are all re-checked at the actual size,
+# so clamping after those checks would file a $1 trade under a $150 trade's
+# gate results.
+LIVE_TRADE_SIZE_USD = 1.0
+
+# Polymarket enforces a per-market minimum order size, and the CLOB order
+# builder ROUNDS SHARE COUNTS DOWN (round_down(size, 2) -- verified in
+# py_clob_client_v2/order_builder/builder.py:36 ROUNDING_CONFIG, which uses
+# size=2 decimals at every tick size). A $1.00 notional therefore rounds to
+# slightly BELOW $1.00 and is rejected wherever the minimum is exactly $1.
+# wallet_client.build_entry_order() rounds the share count UP onto the
+# 2-decimal grid so the submitted notional lands at or just above the
+# minimum; this is the ceiling on how far it may overshoot the requested
+# size before giving up instead.
+LIVE_SIZE_OVERSHOOT_CEILING_USD = 1.25
+
+# Fail-closed backstops on the live track. These are not sizing knobs --
+# they are the blast radius if something upstream is wrong. Breaching any of
+# them stops NEW live entries; open positions still exit normally, because
+# stranding a real position is worse than the exposure that opened it.
+LIVE_MAX_CONCURRENT_POSITIONS = 3        # across all live stations
+LIVE_MAX_TOTAL_EXPOSURE_USD = 5.0        # sum of open live size_usd
+LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
+
+# Entries submit as FOK (fill-or-kill), not GTC. A GTC limit order returns
+# an order id and then RESTS -- it is not a fill. Recording that as an open
+# position creates a position whose shares do not exist, which the exit path
+# will later try to sell. FOK either fills completely and immediately or is
+# killed, so submission and fill are the same event and there is no
+# unreconciled state to get wrong. The cost is giving up the maker rebate
+# and accepting the taker fee, which ev_engine already charges for anyway.
+LIVE_ENTRY_ORDER_TYPE = "FOK"
+
 # Never size a position larger than this fraction of the visible order-book
 # depth (within a 10% price-impact band, per market_client.get_available_depth_usd).
 # Two reasons: (1) the slippage ESTIMATE itself becomes unreliable past this
@@ -857,6 +918,48 @@ MIN_RESOLUTION_OBS_BEFORE_ENTRY = 10
 #   correctable, a small one measured noisily is not.
 ENABLE_FORECAST_BIAS_CORRECTION = True
 
+# --- Blend weight: how much of the central estimate is the FORECAST ------
+# blend_central_estimate() mixes today's (bias-corrected) forecast with the
+# mean of recent settled maxima. The split was 40/60 toward the observed
+# term, with the code's own justification being "directionally justified by
+# the measured NEA bias" -- i.e. forecasts were known to be biased, so they
+# were down-weighted. That is a workaround, not a fix, and once the bias is
+# corrected explicitly the two compensations stack: at w=0.4 a measured
+# -1.66C bias only moved the estimate +0.66C.
+#
+# MEASURED on 2026-08-10 over 52 station-days that have a forecast, prior
+# observations, and settlement-grade truth. Bias applied leave-one-out, so
+# the correction is never fitted on the point it is scored against:
+#
+#     w_forecast   0.0    0.4    0.7    0.85   0.9    0.95   1.0
+#     RMSE (C)     2.665  1.760  1.234  1.092  1.072  1.068  1.080
+#
+# Leave-one-STATION-out CV lands at RMSE 1.074 with per-fold weights of
+# 0.90-0.95, so the optimum is not an artifact of fitting 52 points.
+# Persistence alone (w=0) is roughly HALF as accurate as the forecast
+# alone -- the old blend put 60% of the weight on the worse predictor.
+#
+# 0.85 rather than the measured 0.90-0.95: the plateau is flat (1.068 to
+# 1.092 across 0.85-0.95, ~2%), and keeping 15% on observed history is a
+# cheap hedge for cycles where the forecast set is thin or stale.
+FORECAST_BLEND_WEIGHT_DEFAULT = 0.85
+
+# Per-station overrides. WSSS is the one station that genuinely wants a
+# persistence-heavy blend, and it is not a fitting artifact: equatorial
+# Singapore's daily max barely moves, so yesterday really does predict
+# today there. Its own 10 samples put the optimum at 0.50 (RMSE 0.582, vs
+# 0.641 at 0.85) -- and since the legacy 0.40 was tuned ON Singapore, the
+# old constant was right for this station and wrong for the other ten.
+# Only add an override with >= 10 measured samples AND a physical reason.
+FORECAST_BLEND_WEIGHT_BY_STATION = {
+    "WSSS": 0.50,
+}
+
+
+def forecast_blend_weight(station_icao: str) -> float:
+    """Weight on the forecast term of the central estimate, for one station."""
+    return FORECAST_BLEND_WEIGHT_BY_STATION.get(station_icao, FORECAST_BLEND_WEIGHT_DEFAULT)
+
 # Forecast/observation pairs required before the bias estimate may be
 # trusted enough to trade on. Distinct from (and stricter in practice
 # than) MIN_RESOLUTION_OBS_BEFORE_ENTRY: an observation with no matching
@@ -887,3 +990,43 @@ MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD = 250.0
 # ones, so diversification arguments don't apply. Sized at 40% of bankroll:
 # room for a couple of real multi-leg baskets, never most of the roll.
 MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD = 400.0
+
+
+def live_size_cap_usd(station_icao: str, execution_mode: str) -> Optional[float]:
+    """
+    The fixed notional this station must trade at under `execution_mode`,
+    or None if normal Kelly sizing applies.
+
+    Takes the mode as an ARGUMENT rather than reading executor.EXECUTION_MODE
+    directly: executor imports risk_manager which imports ev_engine which
+    imports this module, so config cannot import executor without a cycle.
+    Callers already have the mode in hand.
+
+    The real-money conjunction lives here, in one place, so it cannot be
+    half-satisfied anywhere else: a station trades at the live size only if
+    it is BOTH explicitly allowlisted in LIVE_TRADING_STATIONS AND carries
+    STATION_MATURITY == "mature". Adding a station to the allowlist without
+    promoting it therefore does nothing, which is the safe direction for a
+    one-line edit to fail in.
+    """
+    if execution_mode not in ("simulation", "live"):
+        return None
+    if station_icao not in LIVE_TRADING_STATIONS:
+        return None
+    if STATION_MATURITY.get(station_icao, "exploratory") != "mature":
+        return None
+    return LIVE_TRADE_SIZE_USD
+
+
+def live_mode_is_permitted(station_icao: str, execution_mode: str) -> bool:
+    """
+    Whether `station_icao` may run in `execution_mode` at all.
+
+    Distinct from live_size_cap_usd(): this is the admission check executor
+    uses to REFUSE a simulation/live mode set on a station that has not
+    earned it, rather than silently falling back to Kelly sizing on the
+    real-money path.
+    """
+    if execution_mode not in ("simulation", "live"):
+        return True
+    return live_size_cap_usd(station_icao, execution_mode) is not None

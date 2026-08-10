@@ -66,10 +66,30 @@ def _connect() -> sqlite3.Connection:
             exit_time TEXT,
             exit_reason TEXT,
             token_id TEXT,
-            is_paper INTEGER NOT NULL DEFAULT 0
+            is_paper INTEGER NOT NULL DEFAULT 0,
+            size_shares REAL,
+            execution_mode TEXT NOT NULL DEFAULT 'paper',
+            order_id TEXT
         )
         """
     )
+    # CREATE TABLE IF NOT EXISTS is a no-op against a database that already has
+    # a `positions` table from before these three columns existed -- it does
+    # NOT add columns to an existing table. Without this migration, an
+    # existing deployed database silently keeps the old schema and every read
+    # of the new fields (size_shares, execution_mode, order_id) fails or, for
+    # SELECT *, just returns short rows. Run on every connection so every
+    # code path (backtest scripts, tests, the live executor) gets migrated,
+    # and check PRAGMA table_info first so this stays idempotent -- ALTER
+    # TABLE ADD COLUMN errors if the column is already there.
+    existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(positions)").fetchall()}
+    for column_name, column_ddl in (
+        ("size_shares", "size_shares REAL"),
+        ("execution_mode", "execution_mode TEXT NOT NULL DEFAULT 'paper'"),
+        ("order_id", "order_id TEXT"),
+    ):
+        if column_name not in existing_columns:
+            conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
     return conn
 
 
@@ -241,6 +261,14 @@ def load_forecast_history(station_icao: str, source: str, limit: int = 90) -> Li
 
 
 def _row_to_position(r) -> Position:
+    # r may be short if it was read via a connection that opened before the
+    # size_shares/execution_mode/order_id migration ran in this process (or,
+    # in principle, before the migration ever ran against this file at all).
+    # Default the trailing values instead of indexing straight into r so a
+    # stale-length row degrades to "unknown" rather than raising IndexError.
+    size_shares = r[15] if len(r) > 15 else None
+    execution_mode = r[16] if len(r) > 16 else "paper"
+    order_id = r[17] if len(r) > 17 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -257,6 +285,9 @@ def _row_to_position(r) -> Position:
         exit_reason=r[12] or "",
         token_id=r[13],
         is_paper=bool(r[14]),
+        size_shares=size_shares,
+        execution_mode=execution_mode,
+        order_id=order_id,
     )
 
 

@@ -59,13 +59,11 @@ def blend_central_estimate(
     observations: List[ObservedReading],
     long_term_normal_c: float,
     forecast_bias_c: float = 0.0,
+    forecast_weight: float = None,
 ) -> float:
     """
-    Combine available forecast points and recent observed history into
-    a single central estimate, in degrees C. Weighting rationale (see
-    framework doc Section 3B): recent observed data is the
-    confirmed-accurate signal, so it gets more weight than forecast
-    text alone once we have enough of it.
+    Combine available forecast points and recent observed history into a
+    single central estimate, in degrees C.
 
     forecast_bias_c is this station's MEASURED mean (forecast - settled
     truth) and is subtracted from the forecast term before blending, so a
@@ -74,12 +72,20 @@ def blend_central_estimate(
     FORECAST term: the observed term is settled truth and has no bias to
     remove. Defaults to 0.0 = the pre-2026-08-09 uncorrected behaviour.
 
-    Note the 60/40 tilt toward observed history is NOT itself a bias
-    correction -- it is a level anchor tuned on Singapore, where the daily
-    max barely moves. At a station with real day-to-day variance it anchors
-    to recent weather instead, which is why the explicit term above is
-    needed rather than leaning harder on the blend.
+    forecast_weight is that term's share of the blend; None takes the
+    station-agnostic default. It used to be a hardcoded 0.4, justified by
+    the forecasts' known bias -- which made it a workaround for the very
+    thing forecast_bias_c now fixes properly, and left the two stacking:
+    at 0.4 a measured -1.66C bias moved the estimate only +0.66C. Measured
+    over 52 station-days (see config.FORECAST_BLEND_WEIGHT_DEFAULT), the
+    observed term alone is about half as accurate as the forecast alone,
+    so the old split put most of the weight on the worse predictor. The
+    exception is Singapore, where the daily max barely moves and
+    persistence genuinely is informative -- which is exactly where the 0.4
+    was originally tuned.
     """
+    if forecast_weight is None:
+        forecast_weight = config.FORECAST_BLEND_WEIGHT_DEFAULT
     valid_forecasts = [f.max_temp_c for f in forecasts if f.max_temp_c is not None]
     forecast_mean = statistics.fmean(valid_forecasts) if valid_forecasts else None
     if forecast_mean is not None and forecast_bias_c:
@@ -88,9 +94,7 @@ def blend_central_estimate(
     observed_mean = statistics.fmean(o.max_temp_c for o in observations) if observations else None
 
     if forecast_mean is not None and observed_mean is not None:
-        # 60/40 weight toward observed history over raw forecast text --
-        # tunable, but directionally justified by the measured NEA bias.
-        return round(0.4 * forecast_mean + 0.6 * observed_mean, 1)
+        return round(forecast_weight * forecast_mean + (1 - forecast_weight) * observed_mean, 1)
     if observed_mean is not None:
         return round(observed_mean, 1)
     if forecast_mean is not None:
@@ -151,8 +155,10 @@ def calibrate(
     the correction off is one flag and not a code change.
     """
     applied_bias = forecast_bias_c if config.ENABLE_FORECAST_BIAS_CORRECTION else 0.0
+    forecast_weight = config.forecast_blend_weight(station.icao)
     central = blend_central_estimate(
-        forecasts, observations, station.long_term_normal_max_c, forecast_bias_c=applied_bias
+        forecasts, observations, station.long_term_normal_max_c,
+        forecast_bias_c=applied_bias, forecast_weight=forecast_weight,
     )
     spread, spread_source = estimate_std_dev(forecasts, observations, ensemble_members)
 
@@ -168,6 +174,8 @@ def calibrate(
             f"Forecast term bias-corrected by {-applied_bias:+.2f}C "
             f"(measured mean forecast-minus-settled = {applied_bias:+.2f}C)."
         )
+    if forecasts and observations:
+        notes.append(f"Blend: {forecast_weight:.0%} forecast / {1 - forecast_weight:.0%} observed.")
 
     return CalibratedEstimate(
         station_icao=station.icao,

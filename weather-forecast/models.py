@@ -183,6 +183,21 @@ class Position:
                                        # needing rediscovery (see entry_manager -> executor wiring)
     is_paper: bool = False           # True for paper-trading positions -- never touches wallet_client,
                                        # tracked separately so paper P&L never mixes with real capital
+    size_shares: Optional[float] = None  # actual number of outcome-token SHARES held. size_usd alone is
+                                       # not enough to exit a real position: the exit must sell an exact
+                                       # share count, and re-deriving it as size_usd/entry_price at exit
+                                       # time uses the wrong price and asks to sell shares that do not
+                                       # exist. None for paper/manual_review positions, where no real
+                                       # shares exist.
+    execution_mode: str = "paper"    # which executor mode opened this position -- one of
+                                       # "manual_review", "paper", "simulation", "live". Replaces is_paper
+                                       # as the real discriminator now that there are four modes rather
+                                       # than two; is_paper is retained and stays True for every mode
+                                       # except "live", so existing paper-vs-real queries keep their
+                                       # current meaning.
+    order_id: Optional[str] = None   # exchange order id for a live fill, so a stored position can be
+                                       # reconciled against the exchange by hand. None in every non-live
+                                       # mode.
 
     def __post_init__(self):
         if self.high_water_mark is None:
