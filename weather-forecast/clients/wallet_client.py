@@ -52,14 +52,32 @@ dollar floor, which is the conservative reading -- but confirm it
 against a real book pull before the first live order, and do not
 assume a passing simulation run has confirmed it.
 
-SIGNATURE TYPE 3 IS BROKEN (unchanged, still current)
---------------------------------------------------------
-Polymarket/py-clob-client-v2 #70 (filed 2026-05-19): signature_type=3
-(POLY_1271, "deposit wallet") order placement fails for new accounts
--- L1 auth binds the API key to the EOA instead of the deposit wallet.
-The documented working path for a NEW account is signature_type=1
-(POLY_PROXY) via a Magic-wallet email account. DEFAULT_SIGNATURE_TYPE
-reflects this; do not change it to 3 without checking that issue.
+SIGNATURE TYPE: TWO SOURCES DISAGREE, AND THIS ONE IS UNPROVEN
+-----------------------------------------------------------------
+What this module has always said: Polymarket/py-clob-client-v2 #70
+(filed 2026-05-19) reports signature_type=3 (POLY_1271, "deposit
+wallet") order placement failing for new accounts -- L1 auth binds the
+API key to the EOA instead of the deposit wallet -- so the documented
+working path for a NEW account is signature_type=1 (POLY_PROXY) via a
+Magic-wallet email account.
+
+What contradicts it: the hermes bot on this same machine ships an
+.env.example (last edited 2026-07-19, i.e. two months AFTER issue #70)
+whose POLYMARKET_SIGNATURE_TYPE note says types 0 AND 1 are now both
+rejected since the CLOB V2 go-live with "maker address not allowed,
+please use the deposit wallet flow", leaving 3 as the only working
+option. That codebase also carries a setup_deposit_wallet.py and
+builder credentials, so it appears to have actually walked the
+deposit-wallet provisioning flow rather than only read about it.
+
+Neither claim has been confirmed against a live order FROM THIS
+codebase, and this codebase has never placed one. DEFAULT_SIGNATURE_TYPE
+stays at 1 because changing the default is a live-trading behaviour
+change that should not ride along with a config port -- but the value is
+now overridable via POLYMARKET_SIGNATURE_TYPE (see _signature_type()),
+so if the first real order comes back "maker address not allowed", that
+is the hermes note being right, and the fix is an environment change,
+not a code edit.
 
 THE TWO GATES
 --------------
@@ -89,10 +107,15 @@ logger = logging.getLogger(__name__)
 CLOB_HOST = "https://clob.polymarket.com"
 POLYGON_CHAIN_ID = 137
 
-# See SIGNATURE TYPE 3 note above. Kept as a plain int so that importing
+# See the SIGNATURE TYPE note above. Kept as a plain int so that importing
 # this module does not require py_clob_client_v2 to be installed; it is
-# converted at client-construction time.
+# converted at client-construction time. This is only the DEFAULT --
+# POLYMARKET_SIGNATURE_TYPE overrides it, see _signature_type().
 DEFAULT_SIGNATURE_TYPE = 1  # POLY_PROXY, Magic-wallet email account
+
+# 0 = EOA/MetaMask, 1 = POLY_PROXY (Magic-wallet email), 3 = POLY_1271
+# (deposit wallet). Anything else is a typo, not a mode.
+KNOWN_SIGNATURE_TYPES = (0, 1, 3)
 
 # Share counts are rounded to 2 decimals by the order builder at EVERY
 # tick size (ROUNDING_CONFIG, order_builder/builder.py:36). Mirrored here
@@ -156,6 +179,52 @@ def live_trading_enabled() -> bool:
     return os.environ.get("POLYMARKET_LIVE_TRADING", "").lower() == "true"
 
 
+def _signature_type() -> int:
+    """
+    Resolve the wallet signature type, POLYMARKET_SIGNATURE_TYPE overriding
+    DEFAULT_SIGNATURE_TYPE. Unset or empty keeps today's behaviour exactly.
+
+    Exists because the two claims in this module's header disagree about
+    which value works, and neither has been tested here. An operator who
+    hits "maker address not allowed" on the first live order needs to try
+    3 without editing the one module that can spend money.
+
+    THE PARSE GUARD IS NOT DEFENSIVE PADDING. It is ported from hermes'
+    build_client(), which learned it the hard way: systemd's
+    EnvironmentFile= parser does NOT strip inline "# comment" text the way
+    python-dotenv does (systemd issue #12527). If .env ever contains
+    POLYMARKET_SIGNATURE_TYPE=1 # some comment on one line, systemd passes
+    the ENTIRE remainder -- comment included -- as the literal value. That
+    matters more here than it did there: this codebase loads no .env at
+    all, so systemd's parser is the ONLY one that will ever read the file,
+    and there is no dotenv fallback to paper over the difference. Without
+    this guard the failure is an uncaught ValueError with no hint of the
+    cause.
+    """
+    raw = os.environ.get("POLYMARKET_SIGNATURE_TYPE")
+    if raw is None or not raw.strip():
+        return DEFAULT_SIGNATURE_TYPE
+
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        raise ValueError(
+            f"POLYMARKET_SIGNATURE_TYPE must be an integer, got: '{raw}'. "
+            f"If that looks like a number with trailing text, check the env "
+            f"file for an inline '# comment' on that line -- systemd's "
+            f"EnvironmentFile parser does not strip those, so the comment "
+            f"text is appended to the value. Put comments on their own line."
+        ) from None
+
+    if value not in KNOWN_SIGNATURE_TYPES:
+        logger.warning(
+            f"[wallet_client] POLYMARKET_SIGNATURE_TYPE={value} is not one of "
+            f"{KNOWN_SIGNATURE_TYPES}; passing it through, but this is almost "
+            f"certainly a typo and orders will be rejected."
+        )
+    return value
+
+
 def get_client():
     """
     Lazily construct and cache the authenticated ClobClient, reading
@@ -187,12 +256,19 @@ def get_client():
             "Refusing to proceed with partial/missing credentials."
         )
 
+    signature_type = _signature_type()
+    if signature_type != DEFAULT_SIGNATURE_TYPE:
+        logger.warning(
+            f"[wallet_client] signature_type={signature_type} from "
+            f"POLYMARKET_SIGNATURE_TYPE (default is {DEFAULT_SIGNATURE_TYPE})"
+        )
+
     lib = _clob()
     client = lib.ClobClient(
         CLOB_HOST,
         chain_id=POLYGON_CHAIN_ID,
         key=private_key,
-        signature_type=DEFAULT_SIGNATURE_TYPE,
+        signature_type=signature_type,
         funder=funder,
     )
     # create_or_derive_api_KEY, not ..._api_creds. The previous name does not
