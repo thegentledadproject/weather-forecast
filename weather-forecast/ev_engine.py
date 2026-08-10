@@ -147,16 +147,30 @@ def fetch_market_quotes(token_map: Dict[int, dict]) -> Dict[int, MarketQuote]:
     are independently quoted (NegRisk) and `1 - yes_price` is not the NO
     price. See clients/market_client.py's module docstring for what that
     assumption cost the last time it was made.
+
+    PRICED OFF THE ASK, NOT THE BID. These quotes feed compute_ev_table()
+    -> raw_edge -> EntryDecision.entry_price -> the limit price on the
+    order, i.e. they are ENTRY prices, and an entry pays the ask. This
+    used to call get_current_price_for_side(), which returns the bid: the
+    whole entry funnel was valuing trades at a price it could not get, by
+    the width of the spread. See market_client.get_entry_price_for_side()
+    for the measurement and for why the approval rate should be expected
+    to fall now that it is corrected.
     """
     quotes = {}
     for bucket_c, ids in token_map.items():
-        yes_price = market_client.get_current_price_for_side(ids["yes_token_id"], "YES")
-        no_price = market_client.get_current_price_for_side(ids["no_token_id"], "NO")
+        yes_price = market_client.get_entry_price_for_side(ids["yes_token_id"], "YES")
+        no_price = market_client.get_entry_price_for_side(ids["no_token_id"], "NO")
         # Advisory cross-check only -- see market_client's module docstring
         # for why this is a log line and not a gate: a derived (inverted)
         # price sums to exactly 1.00 and would pass, so the real guards
         # are the per-token fetch and MAX_PLAUSIBLE_RAW_EDGE. What a large
         # residual here DOES catch is a token-map mix-up or a stale side.
+        #
+        # Both sides are now asks, so the pair sums to slightly ABOVE 1.00
+        # by the two spreads rather than straddling it. The 0.10 tolerance
+        # absorbs that comfortably on any book worth trading; a residual
+        # large enough to trip it is still a real mix-up, not spread.
         if yes_price is not None and no_price is not None and abs(yes_price + no_price - 1.0) > 0.10:
             print(
                 f"[ev_engine] SANITY: bucket {bucket_c} yes+no = {yes_price + no_price:.2f} "

@@ -12,21 +12,38 @@ and stop-loss decisions are only as good as the live price feed
 they're checked against.
 
 Two responsibilities, kept separate from execution:
-  - get_token_price(): read-only price lookup for ONE outcome token,
-    used both for entry EV calculation (ev_engine.py) and for exit
-    monitoring (position_manager.py). get_current_price_for_side() is a
-    thin wrapper over it. There is deliberately NO two-sided "fetch the
-    whole bucket" helper: a caller wanting both sides asks for both token
-    ids, so the code never has a place where one side could be inferred
-    from the other. (The previous two-sided helper also could not have
-    caught a re-introduced inversion -- a NO price derived as `1 - yes`
-    sums to exactly 1.00 and sails through any yes+no consistency check.
-    The real guards are structural: each side is fetched from its own
-    token id, and config.MAX_PLAUSIBLE_RAW_EDGE vetoes the absurd edges a
-    price error produces.)
+  - Read-only quote lookup for ONE outcome token. There is deliberately
+    NO two-sided "fetch the whole bucket" helper: a caller wanting both
+    sides asks for both token ids, so the code never has a place where
+    one side could be inferred from the other. (The previous two-sided
+    helper also could not have caught a re-introduced inversion -- a NO
+    price derived as `1 - yes` sums to exactly 1.00 and sails through any
+    yes+no consistency check. The real guards are structural: each side
+    is fetched from its own token id, and config.MAX_PLAUSIBLE_RAW_EDGE
+    vetoes the absurd edges a price error produces.)
   - This module does NOT place orders -- that's executor.py's job.
     Keeping price-reading and order-placement in different modules
     means a bug here can't accidentally cause a bad trade.
+
+WHICH SIDE OF THE BOOK: ENTRIES PAY THE ASK, EXITS RECEIVE THE BID
+-------------------------------------------------------------------
+There is no such thing as "the price" of a token, and this module used to
+pretend there was. get_token_price() returned the BID under a neutral
+name, and BOTH the entry funnel and the exit monitor were built on it --
+so entries were valued at a price they could not get, by the width of the
+spread, while sizing and slippage were already being computed off the
+ASKS by get_available_depth_usd()/estimate_slippage(). It has been
+replaced by four explicitly-named functions:
+
+    get_token_bid()             raw best bid   -- what a sale receives
+    get_token_ask()             raw best ask   -- what a purchase pays
+    get_entry_price_for_side()  the ask, for entry EV/sizing/limit price
+    get_current_price_for_side() the bid, for marking an open position
+
+Pick by what the caller is about to do, never by which one is available.
+The API's own `side` parameter is the opposite of what it sounds like
+(`side=buy` returns the BID); that inversion is now confined to
+_fetch_quote() and documented on both wrappers.
 
 NEVER DERIVE ONE SIDE'S PRICE FROM THE OTHER'S
 ----------------------------------------------
@@ -44,14 +61,17 @@ an inferred substitute.
 
 IMPLEMENTATION NOTE
 --------------------
-Polymarket's public CLOB REST API is the intended real backing for
-this client. The endpoint/shape below is written against Polymarket's
-documented CLOB API structure but has NOT been exercised against a
-live pull in this environment (network to Polymarket's API was not
-available for testing here) -- treat get_token_price() as needing
-a real smoke-test against production before position_manager.py is
-trusted with real capital. Fails soft (returns None) so callers
-degrade gracefully rather than crash.
+Polymarket's public CLOB REST API is the real backing for this client.
+The /price endpoint and its bid/ask semantics WERE exercised against
+production on 2026-08-10: on a book with max bid 0.179 and min ask 0.180,
+/price?side=buy returned 0.179 and /price?side=sell returned 0.180. The
+same pull confirmed /book carries min_order_size (5 shares) and a
+per-token tick_size (0.001 on that market, not the 0.01 base).
+
+Still unexercised against production: the /book parsing in
+get_available_depth_usd()/estimate_slippage() below, whose bid/ask level
+field names are written against the documented shape. Everything here
+fails soft (returns None) so callers degrade gracefully rather than crash.
 
 DEPENDENCIES
 ------------
@@ -78,13 +98,18 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def get_token_price(token_id: str, timeout: int = 10) -> Optional[float]:
+def _fetch_quote(token_id: str, book_side: str, timeout: int = 10) -> Optional[float]:
     """
-    Fetch the current CLOB price for ONE outcome token -- the single
-    primitive every other price lookup in this module is built on.
+    One side of the book for ONE outcome token. The shared primitive under
+    get_token_bid() and get_token_ask().
 
-    The price returned is the price of the token id passed in, exactly
-    as quoted. No complement arithmetic, no assumption about whether
+    `book_side` is the API's own `side` parameter, and its meaning is the
+    opposite of what the word suggests -- see those two wrappers. Callers
+    must not pass it directly; use the named wrappers, which is the whole
+    point of making this private.
+
+    The value returned is the quote for the token id passed in, exactly as
+    the book gave it. No complement arithmetic, no assumption about whether
     this token is the YES or the NO side of its bucket: that is the
     caller's business, and the token id already encodes it.
 
@@ -102,7 +127,7 @@ def get_token_price(token_id: str, timeout: int = 10) -> Optional[float]:
     try:
         resp = requests.get(
             f"{CLOB_API_BASE}/price",
-            params={"token_id": token_id, "side": "buy"},
+            params={"token_id": token_id, "side": book_side},
             timeout=timeout,
         )
         if resp.status_code == 404:
@@ -117,28 +142,98 @@ def get_token_price(token_id: str, timeout: int = 10) -> Optional[float]:
         payload = resp.json()
         return float(payload.get("price"))
     except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
-        print(f"[market_client] get_token_price failed for token {token_id}: {exc}")
+        print(f"[market_client] {book_side}-side quote failed for token {token_id}: {exc}")
         return None
+
+
+def get_token_bid(token_id: str, timeout: int = 10) -> Optional[float]:
+    """
+    The best BID: the highest price anyone is currently offering to pay.
+    This is what you RECEIVE if you sell, so it is the correct price for
+    marking an open position and for every exit decision.
+
+    NOTE THE API PARAMETER. `side=buy` returns the BID, not the ask --
+    `side` names the side of the BOOK being read (the buy orders), not
+    what the caller intends to do. Verified against the live API
+    2026-08-10: on a book with max bid 0.179 and min ask 0.180,
+    /price?side=buy returned 0.179 and /price?side=sell returned 0.180.
+    """
+    return _fetch_quote(token_id, "buy", timeout=timeout)
+
+
+def get_token_ask(token_id: str, timeout: int = 10) -> Optional[float]:
+    """
+    The best ASK: the lowest price anyone is currently willing to sell at.
+    This is what you PAY to buy, so it is the correct price for entry EV,
+    entry sizing, and the limit price on an entry order.
+
+    See get_token_bid() for why this passes `side=sell`.
+    """
+    return _fetch_quote(token_id, "sell", timeout=timeout)
+
+
+def get_entry_price_for_side(token_id: str, side: str) -> Optional[float]:
+    """
+    The price an ENTRY on this token would actually pay -- the ask.
+
+    THIS IS THE FIX FOR A REAL, MEASURED MISPRICING.
+    -------------------------------------------------
+    Every entry-side price in this system used to come from the BID. The
+    bid became EVResult.market_price, then raw_edge = model_prob - price,
+    then EntryDecision.entry_price, then the limit price on the order --
+    while a buy actually fills at the ASK. The entire entry funnel was
+    valuing trades at a price it could not get.
+
+    The error is the spread, and the spread is not small relative to the
+    bar it was crossing: on the live WSSS book (bid 0.29 / ask 0.31) that
+    is 0.02 of overstated edge against a MIN_ABS_RAW_EDGE of 0.03 -- two
+    thirds of the minimum edge the system demands was spread it never
+    modelled. Worse, the module was already internally inconsistent about
+    it: get_available_depth_usd() and estimate_slippage() have always
+    walked the ASKS, so sizing and slippage were computed against one side
+    of the book and the edge against the other.
+
+    EXPECT THE APPROVAL RATE TO DROP once this is live. That is the
+    correction working, not a regression -- those trades were being
+    approved on an edge that did not exist.
+
+    CONTRACT: `token_id` IS that side's own token -- the NO token for a NO
+    entry, the YES token for a YES entry. It is NOT a canonical YES token
+    from which the other side gets derived. YES and NO are independently
+    quoted (NegRisk), so `1 - yes_price` is NOT the NO price; deriving it
+    that way is exactly the bug that recorded every NO position at
+    `1 - reality`.
+
+    `side` is used only for the failure log message -- it never changes
+    which value is returned.
+    """
+    price = get_token_ask(token_id)
+    if price is None:
+        print(f"[market_client] no live {side.upper()} ask available for token {token_id} this cycle")
+    return price
 
 
 def get_current_price_for_side(token_id: str, side: str) -> Optional[float]:
     """
-    The current live price for one Position's own side, or None on failure.
+    The current live price of one OPEN Position's own side -- the bid.
     This is the single call position_manager.py needs per open position.
 
-    CONTRACT: `token_id` IS that side's own token -- the NO token for a
-    NO position, the YES token for a YES position. It is NOT a canonical
-    YES token from which the other side gets derived. YES and NO are
-    independently quoted (NegRisk), so `1 - yes_price` is NOT the NO
-    price; deriving it that way is exactly the bug that recorded every
-    NO position at `1 - reality`.
+    DELIBERATELY THE BID, AND ALREADY CORRECT. An open position is marked
+    at what it could be sold for, which is the bid; using the ask here
+    would inflate every unrealized P&L by the spread and would make the
+    trailing stop and take-profit fire off a price the position cannot
+    actually realize. Entries use get_entry_price_for_side() instead --
+    the two sides of the book are not interchangeable, which is the whole
+    reason they are now two separate functions.
 
-    `side` is kept purely for call-site signature compatibility and for
-    the failure log message -- it never changes the value returned.
+    CONTRACT on `token_id`: identical to get_entry_price_for_side() --
+    that side's own token, never derived from the other side.
+
+    `side` is used only for the failure log message.
     """
-    price = get_token_price(token_id)
+    price = get_token_bid(token_id)
     if price is None:
-        print(f"[market_client] no live {side.upper()} price available for token {token_id} this cycle")
+        print(f"[market_client] no live {side.upper()} bid available for token {token_id} this cycle")
     return price
 
 
