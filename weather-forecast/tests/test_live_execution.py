@@ -723,3 +723,132 @@ def test_the_real_matched_response_shape_is_recognised():
     assert filled is True
     assert shares == pytest.approx(14.285713)
     assert price == pytest.approx(0.07, abs=0.001)
+
+
+# --------------------------------------------------------------------------
+# Ghost books (py-clob-client issue #180)
+# --------------------------------------------------------------------------
+
+GHOST = {"bids": [{"price": "0.01", "size": "10"}], "asks": [{"price": "0.99", "size": "10"}]}
+
+
+@pytest.mark.parametrize("book,expected", [
+    (GHOST, True),
+    # Real extremes trip ONE bound, never both -- these must stay tradeable.
+    ({"bids": [{"price": "0.000", "size": "99"}], "asks": [{"price": "0.001", "size": "99"}]}, False),
+    ({"bids": [{"price": "0.998", "size": "5"}], "asks": [{"price": "1.000", "size": "5"}]}, False),
+    ({"bids": [{"price": "0.38", "size": "40"}], "asks": [{"price": "0.39", "size": "40"}]}, False),
+    # A missing side is an ordinary thin market, already handled as no depth.
+    ({"bids": [], "asks": [{"price": "0.99", "size": "1"}]}, False),
+    ({"bids": [], "asks": []}, False),
+    (None, False),
+])
+def test_ghost_book_detection(book, expected):
+    assert market_client.is_ghost_book(book) is expected
+
+
+def test_a_ghost_book_reads_as_no_book_at_all(monkeypatch):
+    """
+    The guard lives in get_order_book(), so depth, slippage and the
+    tick/minimum lookup are all covered by one check rather than three.
+    """
+    class _Resp:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return GHOST
+
+    monkeypatch.setattr(market_client.requests, "get", lambda *a, **kw: _Resp())
+    monkeypatch.setattr(market_client, "_ghost_book_seen", set())
+
+    assert market_client.get_order_book("TOK") is None
+    assert market_client.get_available_depth_usd("TOK") is None
+
+
+def test_an_order_cannot_be_built_against_a_ghost_book(monkeypatch):
+    """
+    Fails closed. A 0.01/0.99 snapshot would otherwise price a bucket at
+    the extreme opposite of reality.
+    """
+    monkeypatch.setattr(market_client, "get_order_book", lambda *a, **kw: None)
+    spec = wallet_client.build_entry_order("TOK", 0.39, 1.00)
+
+    assert not spec.ok
+    assert "order book unavailable" in spec.reason
+
+
+def test_a_drift_check_could_not_have_caught_this():
+    """
+    Documents WHY a dedicated check is needed: the stale snapshot persists
+    unchanged across repeated fetches, so any "did the book move?" guard
+    sees zero drift and passes it through.
+    """
+    first, second = dict(GHOST), dict(GHOST)
+    assert first == second                       # zero drift between reads
+    assert market_client.is_ghost_book(first)    # ...and both are unusable
+
+
+# --------------------------------------------------------------------------
+# Balance propagation
+# --------------------------------------------------------------------------
+
+class _FakeClient:
+    def __init__(self, balances):
+        self.balances = list(balances)
+        self.syncs = 0
+        self.reads = 0
+
+    def update_balance_allowance(self, params):
+        self.syncs += 1
+
+    def get_balance_allowance(self, params):
+        self.reads += 1
+        return {"balance": self.balances[min(self.reads - 1, len(self.balances) - 1)]}
+
+
+def test_balance_poll_waits_for_the_refresh_to_propagate(monkeypatch):
+    """
+    update_balance_allowance() returning 200 does not mean post_order() will
+    see the new balance -- it only triggers a re-check. Poll until nonzero.
+    """
+    monkeypatch.setattr(wallet_client.time, "sleep", lambda s: None)
+    client = _FakeClient(["0", "0", "12.5"])
+
+    assert wallet_client._wait_for_balance(client) is True
+    assert client.syncs == 1
+    assert client.reads == 3
+
+
+def test_balance_poll_gives_up_and_lets_the_exchange_decide(monkeypatch):
+    """
+    A stuck-at-zero read must not block an order the operator asked for --
+    post_order() is the authority, and its rejection is the real signal.
+    """
+    import config as cfg
+
+    monkeypatch.setattr(wallet_client.time, "sleep", lambda s: None)
+    client = _FakeClient(["0"])
+
+    assert wallet_client._wait_for_balance(client) is False
+    assert client.reads == cfg.BALANCE_POLL_ATTEMPTS
+
+
+def test_balance_check_never_raises(monkeypatch):
+    class _Broken:
+        def update_balance_allowance(self, params):
+            raise RuntimeError("network down")
+        def get_balance_allowance(self, params):
+            raise RuntimeError("network down")
+
+    monkeypatch.setattr(wallet_client.time, "sleep", lambda s: None)
+    assert wallet_client._wait_for_balance(_Broken()) is False
+
+
+def test_simulation_never_touches_the_balance_api(monkeypatch):
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(wallet_client, "_wait_for_balance", _explode)
+    monkeypatch.setattr(wallet_client, "get_client", _explode)
+
+    spec = wallet_client.build_entry_order("TOK", 0.39, 1.00)
+    result = wallet_client.submit_order(spec, live=False)
+
+    assert result.simulated and not result.submitted

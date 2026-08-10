@@ -1177,3 +1177,40 @@ POOLED_SPREAD_CACHE_TTL_S = 3600
 # A station with fewer than MIN_SPREAD_PAIRS pairs now correctly has to
 # clear a higher bar. WSSS is unaffected -- it has its own measured spread.
 LOW_CONFIDENCE_SPREAD_SOURCES = {"fallback_default", "pooled_error"}
+
+
+# --- Order-book and balance defects in Polymarket's own API ---------------
+# Both of these are upstream bugs with production evidence behind them,
+# ported from a second Polymarket bot on this machine after it hit them
+# (~/Downloads/hermes/core/execution.py). Neither is theoretical.
+
+# THE "GHOST BOOK". get_order_book() intermittently returns bid=0.01 /
+# ask=0.99 for an active, liquid market while get_price() stays accurate --
+# Polymarket/py-clob-client issue #180, repo archived May 2026, no fix
+# coming. A book like that is not a market, it is a failed read wearing a
+# market's shape, and trading against it prices a bucket at the extreme
+# opposite of reality.
+#
+# Detection has to be a DEDICATED check, not a drift comparison: the stale
+# snapshot persists unchanged across repeated fetches, so any "did the book
+# move?" guard sees 0% drift and passes it.
+#
+# The signature is both sides pinned at once. A real far-tail bucket sits at
+# bid 0.000 / ask 0.001 and a near-resolved one at bid 0.998 / ask 1.000 --
+# each trips one bound but never both, which is what makes this safe to
+# apply to every book fetch rather than only to mid-priced ones.
+GHOST_BOOK_BID_MAX = 0.02
+GHOST_BOOK_ASK_MIN = 0.98
+
+# BALANCE PROPAGATION. update_balance_allowance() returning 200 OK does not
+# mean the refreshed balance is what post_order() will read: production logs
+# elsewhere show a 200, then a "balance: 0" rejection ~250ms later, then a
+# correct nonzero read ~10s after that. The sync call only TRIGGERS a
+# re-check on Polymarket's side. Poll until the balance reads nonzero rather
+# than racing straight into post_order() on the sync response alone.
+#
+# 3 x 0.5s is at most 1.5s of added latency, which is nothing next to the
+# FOK's own worst-price protection -- and the alternative is a rejected
+# order on a live entry that had already cleared every gate.
+BALANCE_POLL_ATTEMPTS = 3
+BALANCE_POLL_DELAY_SEC = 0.5

@@ -84,6 +84,8 @@ from typing import Optional
 
 import requests
 
+import config
+
 CLOB_API_BASE = "https://clob.polymarket.com"
 CLOB_BOOK_ENDPOINT = f"{CLOB_API_BASE}/book"
 
@@ -92,6 +94,11 @@ CLOB_BOOK_ENDPOINT = f"{CLOB_API_BASE}/book"
 # per scan cycle. In-memory on purpose: a token can gain an orderbook
 # any time, and a restart re-checking them all is correct behavior.
 _no_orderbook_seen = set()
+
+# Tokens a ghost book has been reported for, so a market stuck in that state
+# is logged once rather than on every fetch of every scan cycle. In-memory on
+# purpose: the snapshot clears on its own, and a restart re-checking is right.
+_ghost_book_seen = set()
 
 
 def _now_iso() -> str:
@@ -257,10 +264,54 @@ def get_order_book(market_token_id: str, timeout: int = 10) -> Optional[dict]:
             timeout=timeout,
         )
         resp.raise_for_status()
-        return resp.json()
+        book = resp.json()
     except (requests.RequestException, ValueError) as exc:
         print(f"[market_client] get_order_book failed for token {market_token_id}: {exc}")
         return None
+
+    # A ghost book is treated exactly like a failed fetch, and the check
+    # lives HERE rather than in each caller so depth, slippage and
+    # wallet_client's tick/minimum lookup are all covered by one guard.
+    # Everything downstream already handles None as "unusable", so this
+    # fails closed: an entry refuses to size, an order refuses to build.
+    if is_ghost_book(book):
+        if market_token_id not in _ghost_book_seen:
+            _ghost_book_seen.add(market_token_id)
+            print(
+                f"[market_client] GHOST BOOK for token {market_token_id}: both sides "
+                f"pinned at the extremes, which is a stale snapshot, not a market "
+                f"(py-clob-client issue #180). Treating as no book. Logged once per "
+                f"token per process."
+            )
+        return None
+    return book
+
+
+def is_ghost_book(book: Optional[dict]) -> bool:
+    """
+    Whether this book is the stale "ghost" snapshot rather than a market.
+
+    See config.GHOST_BOOK_BID_MAX for the upstream bug. True only when BOTH
+    sides are pinned at their extremes at the same time -- a real far-tail
+    bucket (bid 0.000 / ask 0.001) and a real near-resolved one (bid 0.998 /
+    ask 1.000) each trip one bound and never both.
+
+    A book missing a side entirely is NOT a ghost. That is an ordinary thin
+    market, already handled as zero depth by the callers, and calling it a
+    ghost would suppress the far-tail buckets this system legitimately
+    quotes every day.
+    """
+    if not book:
+        return False
+    bids, asks = book.get("bids") or [], book.get("asks") or []
+    if not bids or not asks:
+        return False
+    try:
+        best_bid = max(float(b["price"]) for b in bids)
+        best_ask = min(float(a["price"]) for a in asks)
+    except (KeyError, TypeError, ValueError):
+        return False
+    return best_bid <= config.GHOST_BOOK_BID_MAX and best_ask >= config.GHOST_BOOK_ASK_MIN
 
 
 def get_available_depth_usd(market_token_id: str, max_price_impact_pct: float = 0.10, timeout: int = 10) -> Optional[float]:

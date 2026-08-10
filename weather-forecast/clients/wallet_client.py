@@ -80,6 +80,7 @@ os, logging, math, dataclasses (standard library)
 import math
 import os
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -538,6 +539,7 @@ def submit_order(spec: OrderSpec, live: bool) -> OrderResult:
 
     lib = _clob()
     client = get_client()
+    _wait_for_balance(client)
     order_args = lib.OrderArgs(
         token_id=spec.token_id,
         price=spec.limit_price,
@@ -566,6 +568,75 @@ def submit_order(spec: OrderSpec, live: bool) -> OrderResult:
         fill_price=fill_price, fill_shares=fill_shares,
         raw=resp if isinstance(resp, dict) else {"response": str(resp)},
     )
+
+
+def _wait_for_balance(client) -> bool:
+    """
+    Refresh the CLOB's balance/allowance cache and WAIT for the refresh to
+    become visible before posting. Returns whether a nonzero balance was
+    seen; posting proceeds either way.
+
+    A 200 FROM update_balance_allowance() IS NOT A GUARANTEE. It only
+    triggers a re-check on Polymarket's side, and the result does not
+    necessarily reach what post_order() reads by the time it returns.
+    Production logs from another bot on this machine show the exact
+    sequence: update_balance_allowance() 200 OK, then post_order() rejected
+    with "balance: 0" about 250ms later, then a separate
+    get_balance_allowance() ~10s on reading the real, nonzero, on-chain-
+    correct balance. The cache also goes stale MID-PROCESS, not only across
+    restarts, so a sync done once at startup does not cover a daemon that
+    has been up for hours.
+
+    Polling costs at most BALANCE_POLL_ATTEMPTS x BALANCE_POLL_DELAY_SEC of
+    latency against a FOK that is already price-protected. Losing an entry
+    that cleared every gate to a stale cache costs the trade.
+
+    Never raises: a balance check that itself fails must not block an order
+    the operator asked for. It logs and lets post_order() be the authority,
+    which is what it was before this function existed.
+    """
+    import config
+
+    lib = _clob()
+    try:
+        params = lib.BalanceAllowanceParams(asset_type=lib.AssetType.COLLATERAL)
+    except Exception as exc:  # noqa: BLE001 -- older/newer SDK shapes
+        logger.warning(f"[wallet_client] could not build a balance query, skipping the check: {exc}")
+        return False
+
+    try:
+        client.update_balance_allowance(params)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[wallet_client] balance/allowance sync failed: {exc}")
+
+    for attempt in range(1, config.BALANCE_POLL_ATTEMPTS + 1):
+        try:
+            check = client.get_balance_allowance(params)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[wallet_client] balance read failed ({attempt}): {exc}")
+            return False
+
+        raw = check.get("balance") if isinstance(check, dict) else getattr(check, "balance", None)
+        try:
+            if raw is not None and float(raw) > 0:
+                return True
+        except (TypeError, ValueError):
+            logger.warning(f"[wallet_client] unparseable balance {raw!r} -- letting post_order decide")
+            return False
+
+        logger.warning(
+            f"[wallet_client] balance still reads 0 after sync "
+            f"(propagation check {attempt}/{config.BALANCE_POLL_ATTEMPTS})"
+        )
+        if attempt < config.BALANCE_POLL_ATTEMPTS:
+            time.sleep(config.BALANCE_POLL_DELAY_SEC)
+
+    logger.error(
+        "[wallet_client] balance still reads 0 after every propagation check -- "
+        "posting anyway and letting the exchange be the authority. A rejection "
+        "here means the funding wallet is genuinely empty or its allowances are unset."
+    )
+    return False
 
 
 def _extract(resp, *keys):
