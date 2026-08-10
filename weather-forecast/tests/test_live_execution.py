@@ -440,7 +440,15 @@ def _explode(*a, **kw):
 
 
 @pytest.mark.parametrize("response,expected_fill", [
-    ({"success": True, "status": "matched"}, True),
+    # "matched" with NO amount fields at all is NOT accepted. A fill has a
+    # size; a status string on its own is not evidence of one. The two
+    # errors are not symmetric -- treating a real fill as unfilled leaves an
+    # untracked position a human will see on the exchange, while treating a
+    # kill as a fill writes a phantom position the exit path will try to
+    # sell. Erring this way is deliberate, and matches the verified
+    # implementation in ~/Downloads/hermes/core/execution.py.
+    ({"success": True, "status": "matched"}, False),
+    ({"success": True, "status": "matched", "takingAmount": "12.8"}, True),
     ({"success": True, "status": "live"}, False),      # resting, not filled
     ({"success": True, "status": "delayed"}, False),
     ({"success": False, "status": "matched"}, False),
@@ -673,3 +681,45 @@ def test_simulation_exit_records_without_submitting(monkeypatch, mode, captured)
     executor.close_position(make_position(mode="simulation"), _exit_decision())
 
     assert len(captured["closed"]) == 1
+
+
+@pytest.mark.parametrize("response", [
+    {"status": "", "takingAmount": "0", "makingAmount": "0"},
+    {"takingAmount": "0"},
+    {"takingAmount": 0.0},
+    {"status": "matched", "takingAmount": "0"},
+    {"status": "matched", "success": True, "size_matched": "0"},
+])
+def test_a_zero_matched_amount_is_never_a_fill(response):
+    """
+    The exchange returns matched amounts as STRINGS, and bool('0') is True
+    in Python. Testing them for truthiness read a killed FOK as a fill and
+    wrote a position with no shares behind it -- the failure this whole
+    module is arranged to prevent. Parse as a number, require > 0.
+    """
+    spec = wallet_client.OrderSpec(
+        ok=True, token_id="TOK", side="BUY", limit_price=0.39,
+        size_shares=5.0, notional_usd=1.95,
+    )
+    filled, _, _ = wallet_client._interpret_fill(response, spec)
+    assert filled is False
+
+
+def test_the_real_matched_response_shape_is_recognised():
+    """
+    Verbatim from a real on-chain fill: no size_matched key, amounts as
+    strings, shares in takingAmount and USDC in makingAmount for a BUY.
+    """
+    spec = wallet_client.OrderSpec(
+        ok=True, token_id="TOK", side="BUY", limit_price=0.08,
+        size_shares=14.0, notional_usd=1.0,
+    )
+    filled, price, shares = wallet_client._interpret_fill({
+        "status": "matched", "success": True,
+        "takingAmount": "14.285713", "makingAmount": "0.999999",
+        "transactionsHashes": ["0xabc"], "orderID": "0xdef", "errorMsg": "",
+    }, spec)
+
+    assert filled is True
+    assert shares == pytest.approx(14.285713)
+    assert price == pytest.approx(0.07, abs=0.001)

@@ -594,13 +594,37 @@ def _interpret_fill(resp, spec: OrderSpec) -> tuple:
     success = resp.get("success")
     status = str(resp.get("status", "")).lower()
 
-    # FOK either matched or it did not. "live"/"delayed" mean the order is
-    # resting or queued, which for a FOK order should not happen -- and if
-    # it does, it is emphatically not a fill.
-    matched = status in ("matched", "filled") or bool(resp.get("takingAmount"))
+    # THE MATCHED AMOUNT IS PARSED AS A NUMBER, NEVER TESTED FOR TRUTHINESS.
+    # This used to read `bool(resp.get("takingAmount"))`, and the exchange
+    # returns these as STRINGS -- so a killed FOK reporting takingAmount='0'
+    # was read as a FILL, because bool('0') is True in Python. That wrote a
+    # position with no shares behind it, which the exit path would later try
+    # to sell: the single worst outcome this module can produce.
+    #
+    # The response shape is not guessed. A real matched FOK returns
+    #   {'status': 'matched', 'success': True, 'takingAmount': '14.285713',
+    #    'makingAmount': '0.999999', 'transactionsHashes': ['0x...'],
+    #    'orderID': '0x...', 'errorMsg': ''}
+    # with NO 'size_matched' key at all -- confirmed against a real on-chain
+    # fill by a separate Polymarket bot on this machine
+    # (~/Downloads/hermes/core/execution.py::_parse_fill_status), whose own
+    # history is the mirror-image bug: it read size_matched, always got the
+    # 0.0 default, and logged every genuine fill as a rejection. size_matched
+    # is still honoured first in case a different shape ever supplies it.
+    matched_raw = resp.get("size_matched")
+    if matched_raw is None:
+        matched_raw = resp.get("takingAmount") or resp.get("makingAmount")
+    try:
+        matched = float(matched_raw) if matched_raw is not None else 0.0
+    except (TypeError, ValueError):
+        matched = 0.0
+
+    # An affirmative status AND a positive matched amount. "live"/"delayed"
+    # mean the order is resting or queued, which for a FOK should not happen
+    # -- and if it does, it is emphatically not a fill.
     if success is False or status in ("unmatched", "cancelled", "canceled", "killed"):
         return False, None, None
-    if not matched:
+    if status not in ("matched", "filled") or matched <= 0:
         return False, None, None
 
     fill_shares = None
@@ -610,6 +634,7 @@ def _interpret_fill(resp, spec: OrderSpec) -> tuple:
     try:
         if taking is not None and making is not None:
             taking, making = float(taking), float(making)
+            # BUY: taking = shares received, making = USDC paid.
             if spec.side == "BUY" and taking > 0:
                 fill_shares, fill_price = taking, making / taking
             elif spec.side == "SELL" and making > 0:
