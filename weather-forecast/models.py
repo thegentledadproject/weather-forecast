@@ -220,13 +220,28 @@ class ExitDecision:
 
 @dataclass
 class MarketQuote:
-    """Live YES/NO prices (and, where available, book depth) for one bucket's market."""
+    """
+    Live YES/NO quotes (and, where available, book depth) for one bucket.
+
+    yes_price/no_price are ENTRY prices -- the ASK, what a purchase pays.
+    They feed raw_edge and the limit price on an order, both of which are
+    about buying. They were the BID until 2026-08-10, which overstated
+    every edge by the spread.
+
+    yes_bid/no_bid are the other side, carried alongside rather than
+    instead: the snapshot capture that feeds the backtest stores the bid
+    (its historical series is bids, and switching the column would make
+    old and new rows silently incomparable), while the entry path needs
+    the ask. One fetch pass, both sides, no ambiguity about which is which.
+    """
     bucket_c: int
-    yes_price: Optional[float]
-    no_price: Optional[float]
+    yes_price: Optional[float]              # ASK -- what an entry pays
+    no_price: Optional[float]               # ASK
     yes_depth_usd: Optional[float] = None   # top-of-book size available at yes_price, if known
     no_depth_usd: Optional[float] = None
     fetched_at: str = ""
+    yes_bid: Optional[float] = None         # BID -- what a sale receives
+    no_bid: Optional[float] = None
 
 
 @dataclass

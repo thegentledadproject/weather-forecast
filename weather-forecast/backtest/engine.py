@@ -298,6 +298,11 @@ class _PriceReader:
         self._cache: Dict[Tuple[str, int], Optional[dict]] = {}
         self.n_lookups = 0
         self.n_hits = 0
+        # How entry prices were sourced across this run. Reported in
+        # provenance because a run spanning 2026-08-10 mixes both, and a
+        # blended number with no label is indistinguishable from a clean one.
+        self.n_entry_priced_ask = 0
+        self.n_entry_priced_bid_fallback = 0
 
     def snapshot(self, token_id: Optional[str], ts: int) -> Optional[dict]:
         if not token_id:
@@ -312,8 +317,40 @@ class _PriceReader:
         return row
 
     def price(self, token_id: Optional[str], ts: int) -> Optional[float]:
+        """
+        The BID. Correct for marking an open position and for pricing an
+        exit -- both are about what a sale would receive. Entries must use
+        entry_price() instead.
+        """
         row = self.snapshot(token_id, ts)
         return None if row is None else row["price"]
+
+    def entry_price(self, token_id: Optional[str], ts: int) -> Optional[float]:
+        """
+        The ASK where it was captured, else the bid.
+
+        An entry pays the ask; pricing one off the bid overstates raw edge
+        by the spread, which on the live WSSS book runs 0.01-0.03 against a
+        MIN_ABS_RAW_EDGE of 0.03. That was fixed on the live path
+        2026-08-10 (market_client.get_entry_price_for_side).
+
+        Every snapshot captured BEFORE that date has ask_price = NULL,
+        because only one side was ever stored. The fallback is what lets
+        those replay at all -- but a replay that falls back is reproducing
+        the old overstatement, not correcting it, so the two cases are
+        counted separately and reported. Silently blending them would make
+        a run's edge figures depend on the calendar in a way nothing in the
+        output revealed.
+        """
+        row = self.snapshot(token_id, ts)
+        if row is None:
+            return None
+        ask = row.get("ask_price")
+        if ask is not None:
+            self.n_entry_priced_ask += 1
+            return ask
+        self.n_entry_priced_bid_fallback += 1
+        return row["price"]
 
 
 def _seed_observations(station) -> List[ObservedReading]:
@@ -606,6 +643,18 @@ def run(
         "min_depth_coverage_required": settings.MIN_DEPTH_COVERAGE,
         "price_lookups": prices.n_lookups,
         "price_lookup_cache_hits": prices.n_hits,
+        # How this run priced its entries. An entry pays the ask; snapshots
+        # captured before 2026-08-10 only ever stored the bid, so a replay
+        # over older data falls back and REPRODUCES the pre-fix
+        # edge overstatement rather than correcting it. A run whose
+        # entry_pricing is not "ask" is not comparable to one that is.
+        "n_entry_priced_ask": prices.n_entry_priced_ask,
+        "n_entry_priced_bid_fallback": prices.n_entry_priced_bid_fallback,
+        "entry_pricing": (
+            "ask" if prices.n_entry_priced_bid_fallback == 0 and prices.n_entry_priced_ask
+            else "bid_fallback" if prices.n_entry_priced_ask == 0
+            else "MIXED -- spans the 2026-08-10 ask-capture change; edges are not comparable across it"
+        ),
     }
 
     manifest = {
@@ -897,7 +946,10 @@ def _entry_pass(
 
             side_model_prob = model_prob if side == "YES" else (1 - model_prob)
             snapshot = prices.snapshot(token_id, tick.ts)
-            price = None if snapshot is None else snapshot["price"]
+            # The ASK -- this row becomes raw_edge and the entry price. See
+            # _PriceReader.entry_price() for the bid fallback on snapshots
+            # captured before both sides were stored.
+            price = prices.entry_price(token_id, tick.ts)
 
             if price is None:
                 counters["n_ev_rows_no_price"] = int(counters["n_ev_rows_no_price"]) + 1

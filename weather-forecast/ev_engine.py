@@ -176,11 +176,19 @@ def fetch_market_quotes(token_map: Dict[int, dict]) -> Dict[int, MarketQuote]:
                 f"[ev_engine] SANITY: bucket {bucket_c} yes+no = {yes_price + no_price:.2f} "
                 f"-- sides may be stale or the token map mismapped; edge veto is the backstop."
             )
+        # The BID for each side as well. Not used for any trading decision
+        # -- it exists so save_market_snapshot() can record the bid in the
+        # column that has always held bids, instead of quietly starting to
+        # write asks there the moment entry pricing moved to the ask side.
+        # That would have corrupted the backtest's price history invisibly:
+        # same column, same source string, different meaning by date.
         quotes[bucket_c] = MarketQuote(
             bucket_c=bucket_c,
             yes_price=yes_price,
             no_price=no_price,
             fetched_at=_now_iso(),
+            yes_bid=market_client.get_token_bid(ids["yes_token_id"]),
+            no_bid=market_client.get_token_bid(ids["no_token_id"]),
         )
     return quotes
 
@@ -516,9 +524,13 @@ def _capture_snapshots(
             if quote is None:
                 continue
 
-            for side, token_id, price, depth_usd in [
-                ("yes", ids.get("yes_token_id"), quote.yes_price, quote.yes_depth_usd),
-                ("no", ids.get("no_token_id"), quote.no_price, quote.no_depth_usd),
+            # bid -> the `price` column (what it has always held), ask ->
+            # `ask_price`. quote.yes_price/no_price are ASKS since the
+            # 2026-08-10 entry-pricing fix, so passing them as `price` here
+            # would silently change the meaning of the stored series.
+            for side, token_id, price, ask_price, depth_usd in [
+                ("yes", ids.get("yes_token_id"), quote.yes_bid, quote.yes_price, quote.yes_depth_usd),
+                ("no", ids.get("no_token_id"), quote.no_bid, quote.no_price, quote.no_depth_usd),
             ]:
                 if not token_id:
                     continue
@@ -548,6 +560,7 @@ def _capture_snapshots(
                     token_id=token_id,
                     ts=now_ts,
                     price=price,
+                    ask_price=ask_price,
                     depth_usd=depth_usd,
                     source="live_snapshot",
                     fidelity_min=settings.DEFAULT_SNAPSHOT_FIDELITY_MIN,

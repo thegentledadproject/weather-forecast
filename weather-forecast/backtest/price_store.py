@@ -50,6 +50,17 @@ from backtest import settings
 LIVE_SNAPSHOT_SOURCE = "live_snapshot"
 
 
+def _add_missing_columns(conn, table: str, columns: dict) -> None:
+    """
+    Idempotent ALTER TABLE ... ADD COLUMN for each column not already
+    present. Mirrors storage._connect()'s migration step.
+    """
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, decl in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
+
+
 def _connect(db_path=None) -> sqlite3.Connection:
     """
     Open the market-data database, creating the schema if absent -- same
@@ -82,11 +93,17 @@ def _connect(db_path=None) -> sqlite3.Connection:
             depth_usd REAL,
             source TEXT NOT NULL,
             fidelity_min INTEGER NOT NULL,
+            ask_price REAL,
             PRIMARY KEY (token_id, ts, source)
         )
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_ps_lookup ON price_snapshots(token_id, ts)")
+
+    # ask_price added 2026-08-10. CREATE TABLE IF NOT EXISTS does nothing to
+    # a table that already exists, so an existing market_data.sqlite3 keeps
+    # the old 6-column schema and every read of the new field fails.
+    _add_missing_columns(conn, "price_snapshots", {"ask_price": "REAL"})
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fetch_log (
@@ -167,6 +184,13 @@ def upsert_token(
         )
 
 
+_INSERT_SNAPSHOT = (
+    "INSERT OR REPLACE INTO price_snapshots "
+    "(token_id, ts, price, depth_usd, source, fidelity_min, ask_price) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+)
+
+
 def save_snapshot(
     token_id: str,
     ts: int,
@@ -175,34 +199,70 @@ def save_snapshot(
     source: str,
     fidelity_min: int,
     db_path=None,
+    ask_price: Optional[float] = None,
 ) -> None:
     """
     Persist one observed quote. INSERT OR REPLACE on (token_id, ts,
     source), so re-fetching a range is idempotent -- fetchers get
     interrupted and re-run constantly, and a re-run must not duplicate
     history or fail.
+
+    WHICH SIDE OF THE BOOK EACH COLUMN HOLDS
+    -----------------------------------------
+    `price` is the BID -- what a sale receives, and what every row written
+    before 2026-08-10 contains. It keeps that meaning permanently: switching
+    the column to the ask would have made every historical row incomparable
+    to every new one, silently, with nothing in the data to say which was
+    which.
+
+    `ask_price` is what a purchase PAYS, and is the correct price for an
+    ENTRY. It is nullable and NULL on every historical row, which is not a
+    defect but the honest representation of "not captured" -- see
+    engine._entry_price() for how a replay handles the gap and reports it.
+
+    The column names are deliberately asymmetric (`price` vs `ask_price`)
+    rather than a tidy bid_price/ask_price pair: renaming `price` would
+    touch every reader and every stored row for cosmetic gain, and the
+    docstring is a cheaper place to carry the meaning than a migration.
     """
     with _db(db_path) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO price_snapshots VALUES (?, ?, ?, ?, ?, ?)",
-            (token_id, int(ts), price, depth_usd, source, int(fidelity_min)),
+            _INSERT_SNAPSHOT,
+            (token_id, int(ts), price, depth_usd, source, int(fidelity_min), ask_price),
         )
 
 
 def save_snapshots(rows: Iterable[tuple], source: str, fidelity_min: int, db_path=None) -> int:
     """
-    Bulk variant of save_snapshot(). rows are
-    (token_id, ts, price, depth_usd) tuples sharing one source and
-    fidelity. Returns the number of rows written.
+    Bulk variant of save_snapshot(). Returns the number of rows written.
+
+    rows are either
+        (token_id, ts, price, depth_usd)              -- ask not captured
+        (token_id, ts, price, depth_usd, ask_price)   -- both sides
+
+    Both arities are accepted on purpose. The 4-tuple form is what
+    price_history_client produces (CLOB's history endpoint returns a
+    single traded-price series with no book behind it, so there IS no ask
+    to record) and what the synthetic test scenario builds. Rejecting it
+    would force every caller to pass a None that means the same thing.
     """
-    payload = [
-        (token_id, int(ts), price, depth_usd, source, int(fidelity_min))
-        for (token_id, ts, price, depth_usd) in rows
-    ]
+    payload = []
+    for row in rows:
+        if len(row) == 5:
+            token_id, ts, price, depth_usd, ask_price = row
+        elif len(row) == 4:
+            (token_id, ts, price, depth_usd), ask_price = row, None
+        else:
+            raise ValueError(
+                f"save_snapshots expects 4- or 5-tuples, got {len(row)} fields: {row!r}"
+            )
+        payload.append(
+            (token_id, int(ts), price, depth_usd, source, int(fidelity_min), ask_price)
+        )
     if not payload:
         return 0
     with _db(db_path) as conn:
-        conn.executemany("INSERT OR REPLACE INTO price_snapshots VALUES (?, ?, ?, ?, ?, ?)", payload)
+        conn.executemany(_INSERT_SNAPSHOT, payload)
     return len(payload)
 
 
@@ -229,11 +289,14 @@ def get_price_at(
     On an exact ts tie between sources, live order-book snapshots win over
     reconstructed series.
 
-    Returns {"price", "ts", "source", "depth_usd", "fidelity_min"} or None.
+    Returns {"price", "ask_price", "ts", "source", "depth_usd",
+    "fidelity_min"} or None. "price" is the BID; "ask_price" is what an
+    entry pays and is None on every row captured before 2026-08-10 --
+    see save_snapshot() for why the two are not symmetric.
     """
     with _db(db_path) as conn:
         row = conn.execute(
-            "SELECT price, ts, source, depth_usd, fidelity_min FROM price_snapshots "
+            "SELECT price, ts, source, depth_usd, fidelity_min, ask_price FROM price_snapshots "
             "WHERE token_id = ? AND ts <= ? "
             "ORDER BY ts DESC, (source = ?) DESC LIMIT 1",
             (token_id, int(ts), LIVE_SNAPSHOT_SOURCE),
@@ -242,7 +305,7 @@ def get_price_at(
     if row is None:
         return None
 
-    price, row_ts, source, depth_usd, fidelity_min = row
+    price, row_ts, source, depth_usd, fidelity_min, ask_price = row
 
     limit_s = max_staleness_s
     if limit_s is None:
@@ -252,6 +315,7 @@ def get_price_at(
 
     return {
         "price": price,
+        "ask_price": ask_price,
         "ts": row_ts,
         "source": source,
         "depth_usd": depth_usd,

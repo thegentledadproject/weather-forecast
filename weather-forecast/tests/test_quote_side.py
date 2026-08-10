@@ -13,6 +13,8 @@ swapped the two would still return plausible-looking numbers, and only a
 directional check catches it.
 """
 
+from datetime import date
+
 import pytest
 
 from clients import market_client
@@ -122,6 +124,42 @@ def test_ev_engine_prices_entries_off_the_ask(monkeypatch, stub_quotes):
     token_map = {32: {"yes_token_id": "Y", "no_token_id": "N"}}
     quotes = ev_engine.fetch_market_quotes(token_map)
 
+    # The trading fields are asks...
     assert quotes[32].yes_price == ASK
     assert quotes[32].no_price == ASK
-    assert "buy" not in stub_quotes, "entry pricing read the bid side"
+    # ...and the bid is carried alongside, NOT instead. It feeds only the
+    # backtest snapshot capture, whose `price` column has always held bids;
+    # writing asks there would silently change the meaning of the stored
+    # series by date. Nothing reads these for a trading decision.
+    assert quotes[32].yes_bid == BID
+    assert quotes[32].no_bid == BID
+
+
+def test_snapshot_capture_stores_bid_and_ask_in_the_right_columns(monkeypatch, stub_quotes):
+    """
+    The regression that nearly shipped: once entry pricing moved to the ask,
+    save_market_snapshot() was handing quote.yes_price -- now an ASK -- to
+    price_store's `price` column, which holds bids for every row before
+    2026-08-10. Same column, same source string, different meaning by date,
+    and nothing in the data to say which.
+    """
+    import ev_engine
+    import backtest.price_store as price_store
+    from models import MarketQuote
+
+    saved = []
+    monkeypatch.setattr(ev_engine, "_capture_pass_count_by_station", {})
+    monkeypatch.setattr(price_store, "upsert_token", lambda **kw: None)
+    monkeypatch.setattr(price_store, "save_snapshot", lambda **kw: saved.append(kw))
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda t, **kw: 100.0)
+
+    ev_engine._capture_snapshots(
+        "WSSS", date(2026, 8, 10),
+        {32: {"yes_token_id": "Y", "no_token_id": "N"}},
+        {32: MarketQuote(bucket_c=32, yes_price=ASK, no_price=ASK, yes_bid=BID, no_bid=BID)},
+    )
+
+    assert saved, "capture wrote nothing"
+    for row in saved:
+        assert row["price"] == BID, "the bid belongs in the column that has always held bids"
+        assert row["ask_price"] == ASK, "the ask belongs in ask_price"

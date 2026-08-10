@@ -28,7 +28,15 @@ import backtest.price_store as price_store
 
 
 TOKEN_MAP = {32: {"yes_token_id": "tok-yes", "no_token_id": "tok-no"}}
-QUOTES = {32: MarketQuote(bucket_c=32, yes_price=0.30, no_price=0.70)}
+# yes_price/no_price are ASKS (what an entry pays); yes_bid/no_bid are the
+# other side. Capture stores the bid in `price` and the ask in `ask_price`,
+# so a quote with no bid has nothing to put in the NOT NULL price column and
+# is skipped -- which is why this fixture has to carry both.
+QUOTES = {
+    32: MarketQuote(
+        bucket_c=32, yes_price=0.31, no_price=0.71, yes_bid=0.30, no_bid=0.70,
+    )
+}
 
 
 def _run_captures(monkeypatch, n_passes, depth_fn):

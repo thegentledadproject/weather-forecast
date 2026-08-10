@@ -95,34 +95,23 @@ def collect_once(station_icaos: List[str], days_ahead: int = 1, db_path=None) ->
                             db_path=db_path,
                         )
 
-                        # THE BID, EXPLICITLY -- and this is a KNOWN,
-                        # UNFIXED inconsistency with the live path, not an
-                        # oversight. This used to call get_token_price(),
-                        # which was the bid under an ambiguous name; the
-                        # call is now named, so the stored series has not
-                        # changed meaning and old rows stay comparable to
-                        # new ones.
-                        #
-                        # But the live entry path now prices off the ASK
-                        # (see market_client.get_entry_price_for_side),
-                        # so a backtest replaying these snapshots still
-                        # enters at the bid and still overstates edge by
-                        # the spread -- the exact bug that was just fixed
-                        # live. Fixing it here means capturing BOTH sides,
-                        # which needs an ask column on price_snapshots
-                        # (price_store.py:78) threaded through
-                        # save_snapshot/save_snapshots and the readers.
-                        # Deliberately deferred: switching this single
-                        # column to the ask instead would silently make
-                        # every historical row incomparable to every new
-                        # one, which is worse than a documented gap.
+                        # BOTH SIDES. The bid goes to `price`, which is what
+                        # that column has held since the series began; the
+                        # ask goes to `ask_price`, which a replay needs
+                        # because an entry pays the ask (see
+                        # market_client.get_entry_price_for_side). Storing
+                        # the ask in `price` instead would have been the
+                        # cheaper edit and would have made every row before
+                        # today silently incomparable to every row after.
                         price = market_client.get_token_bid(token_id)
+                        ask_price = market_client.get_token_ask(token_id)
                         depth_usd = market_client.get_available_depth_usd(token_id)
 
                         price_store.save_snapshot(
                             token_id=token_id,
                             ts=int(time.time()),
                             price=price,
+                            ask_price=ask_price,
                             depth_usd=depth_usd,
                             source="live_snapshot",
                             fidelity_min=settings.DEFAULT_SNAPSHOT_FIDELITY_MIN,
