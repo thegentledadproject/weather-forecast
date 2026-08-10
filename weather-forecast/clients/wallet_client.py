@@ -52,32 +52,40 @@ dollar floor, which is the conservative reading -- but confirm it
 against a real book pull before the first live order, and do not
 assume a passing simulation run has confirmed it.
 
-SIGNATURE TYPE: TWO SOURCES DISAGREE, AND THIS ONE IS UNPROVEN
------------------------------------------------------------------
-What this module has always said: Polymarket/py-clob-client-v2 #70
-(filed 2026-05-19) reports signature_type=3 (POLY_1271, "deposit
-wallet") order placement failing for new accounts -- L1 auth binds the
-API key to the EOA instead of the deposit wallet -- so the documented
-working path for a NEW account is signature_type=1 (POLY_PROXY) via a
-Magic-wallet email account.
+SIGNATURE TYPE 3, SETTLED BY A REAL ORDER ON 2026-08-11
+----------------------------------------------------------
+DEFAULT_SIGNATURE_TYPE is 3 (POLY_1271, deposit wallet). It was 1 until
+this codebase placed its first live order and got the answer directly.
 
-What contradicts it: the hermes bot on this same machine ships an
-.env.example (last edited 2026-07-19, i.e. two months AFTER issue #70)
-whose POLYMARKET_SIGNATURE_TYPE note says types 0 AND 1 are now both
-rejected since the CLOB V2 go-live with "maker address not allowed,
-please use the deposit wallet flow", leaving 3 as the only working
-option. That codebase also carries a setup_deposit_wallet.py and
-builder credentials, so it appears to have actually walked the
-deposit-wallet provisioning flow rather than only read about it.
+This module used to cite Polymarket/py-clob-client-v2 #70 (2026-05-19)
+-- type 3 failing for new accounts because L1 auth binds the API key to
+the EOA rather than the deposit wallet -- and default to 1 on that
+basis. hermes' .env.example, edited two months after that issue, said
+the opposite: 0 and 1 both rejected since the CLOB V2 go-live, 3 the
+only working option. hermes was right, at least for this account.
 
-Neither claim has been confirmed against a live order FROM THIS
-codebase, and this codebase has never placed one. DEFAULT_SIGNATURE_TYPE
-stays at 1 because changing the default is a live-trading behaviour
-change that should not ride along with a config port -- but the value is
-now overridable via POLYMARKET_SIGNATURE_TYPE (see _signature_type()),
-so if the first real order comes back "maker address not allowed", that
-is the hermes note being right, and the fix is an environment change,
-not a code edit.
+THE EVIDENCE, because "1 vs 3" is not something to re-litigate from
+memory later:
+
+  - type 1: L1 auth SUCCEEDS (create 400s because a key already exists,
+    the derive fallback returns real creds) -- so an auth check does NOT
+    detect the problem. The order is then rejected at submit with
+    400 "maker address not allowed, please use the deposit wallet flow".
+  - type 1: get_balance_allowance reads balance=0, allowances=0. THIS IS
+    A WRONG-ADDRESS ARTIFACT, NOT AN EMPTY WALLET. _wait_for_balance()
+    logs "balance still reads 0 after every propagation check" and
+    blames funding or allowances; under the wrong signature type that
+    message is misleading, so check the signature type FIRST.
+  - type 3: same credentials, same account -- real nonzero balance, and
+    max-uint256 allowances on all three spender contracts.
+
+That last line also closes the old "allowances are unverified and not
+detectable from the public book" caveat: they are set. get_balance_
+allowance() under the correct signature type is how you check.
+
+Still overridable via POLYMARKET_SIGNATURE_TYPE (see _signature_type())
+-- a different account, e.g. a fresh Magic-wallet one that never walked
+the deposit-wallet flow, may genuinely need 1.
 
 THE TWO GATES
 --------------
@@ -111,7 +119,7 @@ POLYGON_CHAIN_ID = 137
 # this module does not require py_clob_client_v2 to be installed; it is
 # converted at client-construction time. This is only the DEFAULT --
 # POLYMARKET_SIGNATURE_TYPE overrides it, see _signature_type().
-DEFAULT_SIGNATURE_TYPE = 1  # POLY_PROXY, Magic-wallet email account
+DEFAULT_SIGNATURE_TYPE = 3  # POLY_1271, deposit wallet -- proven 2026-08-11
 
 # 0 = EOA/MetaMask, 1 = POLY_PROXY (Magic-wallet email), 3 = POLY_1271
 # (deposit wallet). Anything else is a typo, not a mode.
@@ -184,10 +192,12 @@ def _signature_type() -> int:
     Resolve the wallet signature type, POLYMARKET_SIGNATURE_TYPE overriding
     DEFAULT_SIGNATURE_TYPE. Unset or empty keeps today's behaviour exactly.
 
-    Exists because the two claims in this module's header disagree about
-    which value works, and neither has been tested here. An operator who
-    hits "maker address not allowed" on the first live order needs to try
-    3 without editing the one module that can spend money.
+    Exists so the value can be changed without editing the one module
+    that can spend money. It earned its keep immediately: it is how 3 was
+    tested against the live account before becoming the default, and it
+    is the escape hatch for an account that needs a different type (a
+    fresh Magic-wallet account that never walked the deposit-wallet flow
+    would want 1).
 
     THE PARSE GUARD IS NOT DEFENSIVE PADDING. It is ported from hermes'
     build_client(), which learned it the hard way: systemd's
