@@ -226,21 +226,35 @@ class OrderSpec:
     ok: bool
     token_id: str
     side: str                      # "BUY" or "SELL"
-    limit_price: float             # tick-aligned
+    limit_price: float             # tick-aligned, PADDED -- the worst price accepted
     size_shares: float             # on the 2-decimal grid the builder uses
-    notional_usd: float            # limit_price * size_shares
+    notional_usd: float            # expected_price * size_shares -- the likely cost
     tick_size: str = ""
     min_order_size: Optional[float] = None
     requested_size_usd: float = 0.0
     requested_price: float = 0.0
     reason: str = ""
+    # The tick-aligned quote BEFORE padding: what this order is expected to
+    # fill at, and what size_shares/notional_usd are computed from. Padding
+    # widens only what we are willing to accept, never what we expect to
+    # pay -- see _pad_limit().
+    expected_price: float = 0.0
+
+    @property
+    def max_cost_usd(self) -> float:
+        """Worst case: every share filling at the padded limit."""
+        return round(self.size_shares * self.limit_price, 6)
 
     def describe(self) -> str:
         if not self.ok:
             return f"REFUSED ({self.reason})"
+        pad = ""
+        if self.expected_price and self.limit_price != self.expected_price:
+            pad = f", limit {self.limit_price:.4f} worst-case ${self.max_cost_usd:.4f}"
+        shown = self.expected_price or self.limit_price
         return (
-            f"{self.side} {self.size_shares:.2f} shares @ {self.limit_price:.4f} "
-            f"= ${self.notional_usd:.4f} (tick {self.tick_size}, "
+            f"{self.side} {self.size_shares:.2f} shares @ {shown:.4f} "
+            f"= ${self.notional_usd:.4f}{pad} (tick {self.tick_size}, "
             f"requested ${self.requested_size_usd:.2f} @ {self.requested_price:.4f})"
         )
 
@@ -253,6 +267,50 @@ def _round_up_to_grid(value: float, decimals: int) -> float:
     """
     factor = 10 ** decimals
     return math.ceil(value * factor - 1e-9) / factor
+
+
+def _pad_limit(price: float, tick_size: str, side: str) -> float:
+    """
+    Widen a tick-aligned limit in the direction that helps it fill.
+
+    A Polymarket limit is a WORST-PRICE bound, not a target -- the FOK fills
+    at the best price available up to it. Padding therefore does not mean
+    paying more, it means being willing to, and it costs exactly nothing
+    when the book has not moved. Submitting at the observed quote instead
+    means one adverse tick between reading the book and matching kills an
+    order that had already cleared every gate.
+
+    The pad is the SMALLER of config.LIVE_LIMIT_PAD_TICKS ticks and
+    LIVE_LIMIT_PAD_MAX_PCT of the price, and the result is then aligned
+    INWARD -- down for a BUY, up for a SELL -- so snapping to the grid can
+    never push it back past the cap. Aligning outward instead turned a
+    capped 3% pad into 5.1% at ask 0.39 on a 0.01 tick, which is how a cap
+    stops being one. Where the cap lands below a single tick the result is
+    the unpadded price: the previous behaviour, and the right one there.
+
+    BUY pads UP (accept paying more), SELL pads DOWN (accept receiving
+    less), and both stay inside [tick, 1 - tick].
+    """
+    import config
+
+    tick = float(tick_size)
+    decimals = len(tick_size.split(".")[-1]) if "." in tick_size else 0
+    by_ticks = config.LIVE_LIMIT_PAD_TICKS * tick
+    by_pct = price * config.LIVE_LIMIT_PAD_MAX_PCT
+    pad = min(by_ticks, by_pct)
+    if pad < tick:
+        return price
+
+    if side == "BUY":
+        # Align DOWN so the padded price stays at or under the cap.
+        padded = math.floor((price + pad) / tick + 1e-9) * tick
+    else:
+        padded = math.ceil((price - pad) / tick - 1e-9) * tick
+
+    padded = round(padded, decimals)
+    padded = min(max(padded, tick), 1.0 - tick)
+    # Never end up worse than where we started.
+    return max(padded, price) if side == "BUY" else min(padded, price)
 
 
 def _align_price_to_tick(price: float, tick_size: str, side: str) -> float:
@@ -338,18 +396,23 @@ def build_entry_order(token_id: str, price: float, size_usd: float) -> OrderSpec
             reason="order book unavailable -- cannot resolve tick size, refusing to guess it",
         )
 
-    limit_price = _align_price_to_tick(price, tick_size, "BUY")
+    expected_price = _align_price_to_tick(price, tick_size, "BUY")
+    # The submitted limit is padded; the SIZE is computed from the expected
+    # price. Sizing off the padded limit would buy fewer shares than the
+    # money asked for, on the assumption of a worst case that usually does
+    # not happen -- the pad is protection, not a forecast.
+    limit_price = _pad_limit(expected_price, tick_size, "BUY")
 
     # Round shares UP onto the builder's 2-decimal grid so the submitted
     # notional is >= the requested one and survives round_down() intact.
-    size_shares = _round_up_to_grid(size_usd / limit_price, SHARE_DECIMALS)
-    notional = round(size_shares * limit_price, 6)
+    size_shares = _round_up_to_grid(size_usd / expected_price, SHARE_DECIMALS)
+    notional = round(size_shares * expected_price, 6)
 
     spec = OrderSpec(
         ok=True, token_id=token_id, side="BUY", limit_price=limit_price,
         size_shares=size_shares, notional_usd=notional, tick_size=tick_size,
         min_order_size=min_order_size, requested_size_usd=size_usd,
-        requested_price=price,
+        requested_price=price, expected_price=expected_price,
     )
 
     # Minimum order size. Treated as a SHARE count -- probed against the live
@@ -361,7 +424,7 @@ def build_entry_order(token_id: str, price: float, size_usd: float) -> OrderSpec
     def _bump_to(target_shares: float, what: str) -> bool:
         """Raise the order to `target_shares`, or refuse. True if refused."""
         bumped_shares = _round_up_to_grid(target_shares, SHARE_DECIMALS)
-        bumped_notional = round(bumped_shares * limit_price, 6)
+        bumped_notional = round(bumped_shares * expected_price, 6)
         if not config.LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE:
             spec.ok = False
             spec.reason = (
@@ -374,7 +437,7 @@ def build_entry_order(token_id: str, price: float, size_usd: float) -> OrderSpec
         if bumped_notional > config.LIVE_SIZE_OVERSHOOT_CEILING_USD:
             spec.ok = False
             spec.reason = (
-                f"{what} costs ${bumped_notional:.2f} at {limit_price:.4f}, past the "
+                f"{what} costs ${bumped_notional:.2f} at {expected_price:.4f}, past the "
                 f"${config.LIVE_SIZE_OVERSHOOT_CEILING_USD:.2f} overshoot ceiling "
                 f"on a ${size_usd:.2f} trade -- declining rather than oversizing"
             )
@@ -388,7 +451,7 @@ def build_entry_order(token_id: str, price: float, size_usd: float) -> OrderSpec
             return spec
 
     if spec.notional_usd < ASSUMED_MIN_ORDER_USD:
-        if _bump_to(ASSUMED_MIN_ORDER_USD / limit_price,
+        if _bump_to(ASSUMED_MIN_ORDER_USD / expected_price,
                     f"${ASSUMED_MIN_ORDER_USD:.2f} notional floor"):
             return spec
 
@@ -396,6 +459,18 @@ def build_entry_order(token_id: str, price: float, size_usd: float) -> OrderSpec
         spec.ok = False
         spec.reason = (
             f"resolved notional ${spec.notional_usd:.2f} exceeds the "
+            f"${config.LIVE_SIZE_OVERSHOOT_CEILING_USD:.2f} overshoot ceiling"
+        )
+        return spec
+
+    # The padded limit is what the exchange may actually charge, so the
+    # ceiling has to bind on the WORST case, not the expected one --
+    # otherwise the pad is a hole in the only cap on trade size.
+    if spec.max_cost_usd > config.LIVE_SIZE_OVERSHOOT_CEILING_USD:
+        spec.ok = False
+        spec.reason = (
+            f"worst-case cost ${spec.max_cost_usd:.2f} at the padded limit "
+            f"{spec.limit_price:.4f} exceeds the "
             f"${config.LIVE_SIZE_OVERSHOOT_CEILING_USD:.2f} overshoot ceiling"
         )
         return spec
@@ -435,7 +510,8 @@ def build_exit_order(token_id: str, price: float, size_shares: float) -> OrderSp
             reason="order book unavailable -- cannot resolve tick size, refusing to guess it",
         )
 
-    limit_price = _align_price_to_tick(price, tick_size, "SELL")
+    expected_price = _align_price_to_tick(price, tick_size, "SELL")
+    limit_price = _pad_limit(expected_price, tick_size, "SELL")
     # Round the SELL size DOWN: selling more shares than are held fails
     # outright, and the residual dust is worth far less than a failed exit.
     factor = 10 ** SHARE_DECIMALS
@@ -444,9 +520,9 @@ def build_exit_order(token_id: str, price: float, size_shares: float) -> OrderSp
     spec = OrderSpec(
         ok=sell_shares > 0,
         token_id=token_id, side="SELL", limit_price=limit_price,
-        size_shares=sell_shares, notional_usd=round(sell_shares * limit_price, 6),
+        size_shares=sell_shares, notional_usd=round(sell_shares * expected_price, 6),
         tick_size=tick_size, min_order_size=min_order_size,
-        requested_price=price,
+        requested_price=price, expected_price=expected_price,
         reason="order resolved" if sell_shares > 0 else "share count rounds to zero",
     )
 

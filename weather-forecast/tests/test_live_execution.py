@@ -852,3 +852,98 @@ def test_simulation_never_touches_the_balance_api(monkeypatch):
     result = wallet_client.submit_order(spec, live=False)
 
     assert result.simulated and not result.submitted
+
+
+# --------------------------------------------------------------------------
+# FOK limit padding
+# --------------------------------------------------------------------------
+
+def test_buy_limit_is_padded_above_the_expected_fill(monkeypatch):
+    """
+    A FOK at exactly the observed ask dies on one adverse tick. The pad
+    widens what we ACCEPT, not what we expect -- expected_price stays the
+    real quote and size is computed from it.
+    """
+    stub_book(monkeypatch, tick="0.01")
+    spec = wallet_client.build_entry_order("TOK", 0.39, 1.00)
+
+    assert spec.expected_price == 0.39
+    assert spec.limit_price > spec.expected_price
+    assert spec.notional_usd == pytest.approx(spec.size_shares * spec.expected_price)
+
+
+def test_sell_limit_is_padded_below_the_expected_fill(monkeypatch):
+    stub_book(monkeypatch, tick="0.01")
+    spec = wallet_client.build_exit_order("TOK", 0.40, 10.0)
+
+    assert spec.expected_price == 0.40
+    assert spec.limit_price < spec.expected_price
+
+
+@pytest.mark.parametrize("price,tick", [
+    (0.39, "0.01"), (0.57, "0.01"), (0.95, "0.01"),
+    (0.18, "0.001"), (0.03, "0.001"), (0.05, "0.01"),
+])
+def test_the_pad_never_exceeds_its_percentage_cap(monkeypatch, price, tick):
+    """
+    Snapping to the tick grid must not push the pad back over the cap.
+    Aligning OUTWARD turned a capped 3% into 5.1% at ask 0.39 on a 0.01
+    tick -- which is how a cap stops being one.
+    """
+    stub_book(monkeypatch, tick=tick)
+    spec = wallet_client.build_entry_order("TOK", price, 1.00)
+
+    pad = (spec.limit_price - spec.expected_price) / spec.expected_price
+    assert 0 <= pad <= config.LIVE_LIMIT_PAD_MAX_PCT + 1e-9
+
+
+def test_a_cap_below_one_tick_leaves_the_price_unpadded(monkeypatch):
+    """3% of 0.05 is under a 0.01 tick -- pad nothing rather than overshoot."""
+    stub_book(monkeypatch, tick="0.01")
+    spec = wallet_client.build_entry_order("TOK", 0.05, 1.00)
+
+    assert spec.limit_price == spec.expected_price
+
+
+def test_the_pad_is_spent_from_the_slippage_budget():
+    """
+    The padded limit is money the exchange may take, so it must fit inside
+    the same budget a real adverse move is measured against -- and leave
+    room for one.
+    """
+    assert config.LIVE_LIMIT_PAD_MAX_PCT < config.MAX_ACCEPTABLE_SLIPPAGE_PCT
+
+
+def test_the_overshoot_ceiling_binds_on_the_worst_case(monkeypatch):
+    """
+    Otherwise the pad is a hole in the only cap on trade size: the expected
+    cost passes while the price actually payable does not.
+    """
+    monkeypatch.setattr(config, "LIVE_SIZE_OVERSHOOT_CEILING_USD", 4.80)
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+
+    spec = wallet_client.build_entry_order("TOK", 0.95, 1.00)
+
+    assert spec.notional_usd <= 4.80          # expected cost is under the ceiling
+    assert not spec.ok                         # ...but the worst case is not
+    assert "worst-case" in spec.reason
+
+
+def test_padding_does_not_change_the_recorded_fill_price(monkeypatch, mode, captured):
+    """
+    The pad is what we were willing to pay; entry_price must record what we
+    actually paid, parsed from the response.
+    """
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=True, simulated=False, spec=spec,
+            order_id="0x1", fill_price=spec.expected_price, fill_shares=spec.size_shares,
+        ),
+    )
+
+    executor.open_position(make_decision(price=0.39))
+
+    assert captured["opened"][0].entry_price == 0.39

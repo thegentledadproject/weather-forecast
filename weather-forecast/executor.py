@@ -194,6 +194,14 @@ def _price_drift_ok(spec_price: float, decided_price: float) -> tuple:
     all. entry_manager approved a specific net EV at a specific price; if
     alignment plus drift has eaten past the slippage the strategy allows,
     the approval no longer describes this trade.
+
+    THIS IS DELIBERATELY MEASURED ON THE PADDED LIMIT, not the expected
+    fill. config.LIVE_LIMIT_PAD_MAX_PCT (3%) is money the exchange is
+    permitted to take, so it must be spent from the same slippage budget as
+    a real adverse move -- otherwise the pad is a quiet 3% widening of the
+    only price protection the entry has. It leaves roughly 7 points of the
+    10% budget for genuine drift, and that ordering (pad capped well below
+    the budget) is what keeps the two compatible.
     """
     if not decided_price or decided_price <= 0:
         return False, "no decision price to compare the resolved limit against"

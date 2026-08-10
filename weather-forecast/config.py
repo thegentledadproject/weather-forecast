@@ -1214,3 +1214,27 @@ GHOST_BOOK_ASK_MIN = 0.98
 # order on a live entry that had already cleared every gate.
 BALANCE_POLL_ATTEMPTS = 3
 BALANCE_POLL_DELAY_SEC = 0.5
+
+
+# --- FOK limit padding (clients/wallet_client.py) --------------------------
+# The price on a Polymarket order is a WORST-PRICE LIMIT, not a target: the
+# FOK fills at the best available price up to it, or is killed. Submitting
+# at exactly the observed ask therefore means any single adverse tick
+# between reading the book and matching kills an order that had already
+# cleared every gate -- and padding costs NOTHING when the book has not
+# moved, because the fill still happens at the real price. Position.
+# entry_price records the fill parsed from the response, never the limit.
+#
+# Denominated in TICKS, not percent, because the failure is mechanical: the
+# book moved one price level. A flat percentage is meaningless across this
+# registry's tick sizes, which run 0.01 on mid-book buckets and 0.001 on the
+# tails -- 3% is three ticks in one place and none in the other.
+LIVE_LIMIT_PAD_TICKS = 2
+
+# ...but capped proportionally, because ticks are not proportional either.
+# Two 0.001 ticks on a 0.03 bucket is 6.7%, which is no longer "absorb a
+# tick" but "agree to pay a lot more". Whichever of the two binds first
+# wins, and the pad is then re-aligned onto the tick grid -- so where the
+# cap bites below one tick, the order simply goes out unpadded, exactly as
+# it did before.
+LIVE_LIMIT_PAD_MAX_PCT = 0.03
