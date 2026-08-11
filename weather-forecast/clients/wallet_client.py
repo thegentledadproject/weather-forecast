@@ -999,3 +999,201 @@ def check_allowances_reminder() -> str:
         "funding address. This is NOT automated by this module -- confirm "
         "allowances are set before enabling live trading."
     )
+
+
+# --------------------------------------------------------------------------
+# Reconciliation against the exchange
+# --------------------------------------------------------------------------
+
+@dataclass
+class Reconciliation:
+    """
+    What the exchange says, next to what the database says.
+
+    `ok` is the only field callers should gate on, and it is False whenever
+    the check could not run -- "I could not look" and "I looked and it was
+    wrong" are the same answer for the purpose of authorising real money.
+    """
+    ok: bool
+    checked: bool                      # did the comparison actually happen
+    reason: str = ""
+    verified: list = None              # (token_id, shares) agreeing on both sides
+    db_only: list = None               # DB says open, exchange shows no/too few shares
+    exchange_only: list = None         # exchange holds shares, DB has no open row
+
+    def __post_init__(self):
+        self.verified = self.verified or []
+        self.db_only = self.db_only or []
+        self.exchange_only = self.exchange_only or []
+
+    def describe(self) -> str:
+        if not self.checked:
+            return f"NOT CHECKED ({self.reason})"
+        if self.ok:
+            return f"clean -- {len(self.verified)} position(s) agree with the exchange"
+        bits = []
+        if self.db_only:
+            bits.append(
+                f"{len(self.db_only)} recorded but not held: "
+                + ", ".join(f"{t[:10]}... (db {d:.2f} sh, exchange {e:.2f})"
+                            for t, d, e in self.db_only)
+            )
+        if self.exchange_only:
+            bits.append(
+                f"{len(self.exchange_only)} held but NOT RECORDED: "
+                + ", ".join(f"{t[:10]}... ({s:.2f} sh)" for t, s in self.exchange_only)
+            )
+        return "; ".join(bits) or self.reason
+
+
+_reconcile_cache = {"at": 0.0, "result": None}
+
+
+def _held_shares(client, token_id: str) -> Optional[float]:
+    """
+    Outcome-token balance for one token, or None if it could not be read.
+    None is NOT zero -- a failed read must never look like "holds nothing".
+    """
+    lib = _clob()
+    try:
+        resp = client.get_balance_allowance(
+            lib.BalanceAllowanceParams(asset_type=lib.AssetType.CONDITIONAL, token_id=token_id)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[wallet_client] balance read failed for {token_id[:12]}...: {exc}")
+        return None
+
+    raw = resp.get("balance") if isinstance(resp, dict) else getattr(resp, "balance", None)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        logger.warning(f"[wallet_client] unparseable balance {raw!r} for {token_id[:12]}...")
+        return None
+
+
+def reconcile_live_positions(open_live_positions) -> Reconciliation:
+    """
+    Compare the database's open LIVE positions against what the funding
+    wallet actually holds, and hunt for holdings the database has never
+    heard of.
+
+    WHY THIS EXISTS. Every live cap in executor is computed from the local
+    positions table, which makes them caps on the database's recollection of
+    exposure rather than on exposure itself. On 2026-08-10 a real position
+    sat on the exchange while the daemon had no row for it; during that
+    window all three caps were one position light. Reading DB_PATH from a
+    different checkout produces the same blindness with none of the drama.
+
+    Two directions, both of which matter:
+
+      db_only        the DB says shares are held and the exchange disagrees.
+                     Usually a close that happened outside this system; the
+                     danger is the exit path trying to sell what is gone.
+      exchange_only  shares are held that the DB has no open row for. THIS
+                     IS THE ONE THAT BREAKS THE CAPS -- unrecorded exposure
+                     is exposure the backstops cannot see.
+
+    Discovery of exchange_only goes through get_trades() rather than any
+    "list my positions" call, because the CLOB has none: fills are
+    enumerable, holdings are only queryable one token at a time. A token
+    that traded in the window and still shows a balance, with no open DB
+    row, is a real unrecorded position. FOK entries mean get_open_orders()
+    is always empty and would find nothing at all.
+
+    FAILS CLOSED. Missing credentials, an unreadable balance, or an
+    unreachable trade history all return ok=False. Callers must treat that
+    as "do not open anything new", never as "nothing found".
+    """
+    import config
+
+    if not (os.environ.get("POLYMARKET_PRIVATE_KEY") and os.environ.get("POLYMARKET_FUNDER")):
+        return Reconciliation(
+            ok=False, checked=False,
+            reason="no credentials, so the exchange cannot be consulted",
+        )
+
+    try:
+        lib = _clob()
+        client = get_client()
+    except Exception as exc:  # noqa: BLE001
+        return Reconciliation(ok=False, checked=False, reason=f"client unavailable: {exc}")
+
+    verified, db_only = [], []
+    recorded_tokens = set()
+
+    for pos in open_live_positions:
+        token = getattr(pos, "token_id", None)
+        if not token:
+            return Reconciliation(
+                ok=False, checked=True,
+                reason=(f"open live position {pos.position_id} has no token_id -- "
+                        f"it cannot be checked against the exchange at all"),
+            )
+        recorded_tokens.add(token)
+        expected = getattr(pos, "size_shares", None) or 0.0
+        held = _held_shares(client, token)
+        if held is None:
+            return Reconciliation(
+                ok=False, checked=True,
+                reason=(f"could not read the exchange balance for {token[:12]}... -- "
+                        f"refusing to authorise against an unverified book"),
+            )
+        if held + config.RECONCILE_SHARE_TOLERANCE < expected:
+            db_only.append((token, expected, held))
+        else:
+            verified.append((token, held))
+
+    # Holdings the database has never recorded.
+    exchange_only = []
+    try:
+        cutoff = int(time.time()) - config.RECONCILE_TRADE_LOOKBACK_HOURS * 3600
+        trades = client.get_trades(lib.TradeParams(after=str(cutoff)))
+    except Exception as exc:  # noqa: BLE001
+        return Reconciliation(
+            ok=False, checked=True,
+            reason=(f"could not read trade history ({exc}) -- unrecorded positions "
+                    f"cannot be ruled out"),
+        )
+
+    seen = set()
+    for trade in trades or []:
+        asset = (trade.get("asset_id") if isinstance(trade, dict)
+                 else getattr(trade, "asset_id", None))
+        if not asset or asset in recorded_tokens or asset in seen:
+            continue
+        seen.add(asset)
+        held = _held_shares(client, asset)
+        if held is None:
+            return Reconciliation(
+                ok=False, checked=True,
+                reason=(f"traded token {asset[:12]}... has an unreadable balance -- "
+                        f"cannot rule out an unrecorded position"),
+            )
+        if held > config.RECONCILE_SHARE_TOLERANCE:
+            exchange_only.append((asset, held))
+
+    diverged = bool(db_only or exchange_only)
+    return Reconciliation(
+        ok=not diverged,
+        checked=True,
+        verified=verified, db_only=db_only, exchange_only=exchange_only,
+        reason="exchange and database agree" if not diverged else "divergence",
+    )
+
+
+def reconcile_cached(open_live_positions) -> Reconciliation:
+    """
+    reconcile_live_positions() with a short TTL. _live_budget_breach() runs
+    once per candidate entry and several candidates can clear the screen in
+    one cycle; without this each would re-scan every fill in the lookback
+    window.
+    """
+    import config
+
+    now = time.time()
+    cached = _reconcile_cache["result"]
+    if cached is not None and now - _reconcile_cache["at"] < config.RECONCILE_CACHE_TTL_S:
+        return cached
+    result = reconcile_live_positions(open_live_positions)
+    _reconcile_cache.update({"at": now, "result": result})
+    return result

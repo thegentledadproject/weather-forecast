@@ -1238,3 +1238,39 @@ LIVE_LIMIT_PAD_TICKS = 2
 # cap bites below one tick, the order simply goes out unpadded, exactly as
 # it did before.
 LIVE_LIMIT_PAD_MAX_PCT = 0.03
+
+
+# --- Exchange reconciliation (clients/wallet_client.py, executor.py) -------
+# The live blast-radius backstops (LIVE_MAX_CONCURRENT_POSITIONS,
+# LIVE_MAX_TOTAL_EXPOSURE_USD, LIVE_MAX_ORDERS_PER_DAY) are all computed from
+# the local positions table. That makes them caps on THIS DATABASE'S
+# RECOLLECTION of exposure, not on exposure -- and the two provably diverge:
+# on 2026-08-10 a real WSSS position (order 0x1ea0d2d8...) existed on the
+# exchange while the daemon, running in simulation, had no row for it. During
+# that window every cap read one position lighter than reality.
+#
+# DB_PATH is also relative to the checkout, so the same code run from a
+# different clone reads an empty positions table and every cap reads zero.
+#
+# Reconciliation asks the exchange directly before any live entry. It fails
+# CLOSED: an unexplained divergence, or an inability to check at all, blocks
+# new live entries. It never blocks an EXIT -- stranding a real position is
+# worse than the exposure that opened it, which is the same asymmetry
+# executor._live_budget_breach() already observes.
+
+# How far back to scan fills when hunting for positions the database does not
+# know about. Long enough to cover a weather market's whole life (listed ~48h
+# ahead, resolves next day) plus slack for a daemon that was down.
+RECONCILE_TRADE_LOOKBACK_HOURS = 96
+
+# Share-count tolerance when comparing a stored position against the
+# exchange's balance. Share counts are rounded to 2 decimals by the order
+# builder, and a partial fill is a real divergence rather than noise, so this
+# only absorbs representation error.
+RECONCILE_SHARE_TOLERANCE = 0.01
+
+# Reconciliation result cache, in seconds. _live_budget_breach() runs per
+# candidate entry and several candidates can clear the screen in one cycle;
+# without this each one would re-scan every fill. Short enough that a
+# position opened by another process is seen within a cycle.
+RECONCILE_CACHE_TTL_S = 60

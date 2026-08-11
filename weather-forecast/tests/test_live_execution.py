@@ -67,6 +67,24 @@ def captured(monkeypatch):
 
 
 @pytest.fixture
+def reconciled(monkeypatch):
+    """
+    Exchange agrees with the database, and the size re-check stays offline.
+
+    Both are now on the live entry path, and both reach the network if left
+    alone -- reconciliation needs credentials (correctly failing closed
+    without them) and the resolved-size re-check calls estimate_slippage().
+    Tests about what gets RECORDED after a fill should not also be testing
+    either of those; they have their own tests.
+    """
+    monkeypatch.setattr(
+        wallet_client, "reconcile_cached",
+        lambda positions: wallet_client.Reconciliation(ok=True, checked=True, reason="stubbed"),
+    )
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda token_id, size_usd: 0.01)
+
+
+@pytest.fixture
 def mode(monkeypatch):
     """Set every station's execution mode for one test."""
     def _set(station_mode, station="WSSS"):
@@ -488,7 +506,7 @@ def test_unfilled_live_order_records_no_position(monkeypatch, mode, captured):
     assert captured["opened"] == []
 
 
-def test_filled_live_order_records_shares_and_the_real_fill_price(monkeypatch, mode, captured):
+def test_filled_live_order_records_shares_and_the_real_fill_price(monkeypatch, mode, captured, reconciled):
     mode("live")
     stub_book(monkeypatch, tick="0.01")
     monkeypatch.setattr(
@@ -929,7 +947,7 @@ def test_the_overshoot_ceiling_binds_on_the_worst_case(monkeypatch):
     assert "worst-case" in spec.reason
 
 
-def test_padding_does_not_change_the_recorded_fill_price(monkeypatch, mode, captured):
+def test_padding_does_not_change_the_recorded_fill_price(monkeypatch, mode, captured, reconciled):
     """
     The pad is what we were willing to pay; entry_price must record what we
     actually paid, parsed from the response.
@@ -1042,3 +1060,196 @@ def test_the_upsize_recheck_runs_before_any_order_is_submitted(monkeypatch, mode
     executor.open_position(make_decision(size_usd=1.00, price=0.50))
 
     assert captured["opened"] == []
+
+
+# --------------------------------------------------------------------------
+# Exchange reconciliation
+# --------------------------------------------------------------------------
+
+class _Exchange:
+    """A fake CLOB: token -> shares held, plus a list of traded asset ids."""
+
+    def __init__(self, balances=None, traded=(), fail_balance=(), fail_trades=False):
+        self.balances = balances or {}
+        self.traded = list(traded)
+        self.fail_balance = set(fail_balance)
+        self.fail_trades = fail_trades
+
+    def get_balance_allowance(self, params):
+        token = params.token_id
+        if token in self.fail_balance:
+            raise RuntimeError("balance endpoint down")
+        return {"balance": str(self.balances.get(token, 0.0))}
+
+    def get_trades(self, params=None, **kw):
+        if self.fail_trades:
+            raise RuntimeError("trade history down")
+        return [{"asset_id": a} for a in self.traded]
+
+
+@pytest.fixture
+def exchange(monkeypatch):
+    """Wire a fake exchange in, with credentials present."""
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0xtest")
+    monkeypatch.setenv("POLYMARKET_FUNDER", "0xfunder")
+    monkeypatch.setattr(wallet_client, "_reconcile_cache", {"at": 0.0, "result": None})
+
+    def _install(ex):
+        monkeypatch.setattr(wallet_client, "get_client", lambda: ex)
+        return ex
+
+    return _install
+
+
+def _live_pos(token="TOK", shares=5.0):
+    p = make_position(mode="live", size_shares=shares)
+    p.token_id = token
+    return p
+
+
+def test_reconciliation_passes_when_the_exchange_agrees(exchange):
+    exchange(_Exchange(balances={"TOK": 5.0}, traded=["TOK"]))
+    r = wallet_client.reconcile_live_positions([_live_pos()])
+
+    assert r.ok and r.checked
+    assert r.verified == [("TOK", 5.0)]
+
+
+def test_unrecorded_holdings_are_caught(exchange):
+    """
+    THE case that breaks the caps: shares held that the database has no open
+    row for. Unrecorded exposure is exposure the backstops cannot see.
+    """
+    exchange(_Exchange(balances={"TOK": 5.0, "GHOST": 12.0}, traded=["TOK", "GHOST"]))
+    r = wallet_client.reconcile_live_positions([_live_pos()])
+
+    assert not r.ok
+    assert r.exchange_only == [("GHOST", 12.0)]
+    assert "NOT RECORDED" in r.describe()
+
+
+def test_a_position_the_exchange_no_longer_holds_is_caught(exchange):
+    """The other direction: the exit path would try to sell what is gone."""
+    exchange(_Exchange(balances={"TOK": 0.0}, traded=["TOK"]))
+    r = wallet_client.reconcile_live_positions([_live_pos(shares=5.0)])
+
+    assert not r.ok
+    assert r.db_only == [("TOK", 5.0, 0.0)]
+
+
+def test_a_traded_token_since_sold_is_not_flagged(exchange):
+    """
+    get_trades() returns fills, including closed ones. A token that traded
+    but is no longer held is not an unrecorded position.
+    """
+    exchange(_Exchange(balances={"TOK": 5.0, "SOLD": 0.0}, traded=["TOK", "SOLD"]))
+    r = wallet_client.reconcile_live_positions([_live_pos()])
+
+    assert r.ok
+    assert r.exchange_only == []
+
+
+@pytest.mark.parametrize("broken,expected", [
+    ({"fail_balance": ["TOK"]}, "could not read the exchange balance"),
+    ({"fail_trades": True}, "could not read trade history"),
+])
+def test_an_unreadable_exchange_fails_closed(exchange, broken, expected):
+    """
+    "I could not look" and "I looked and it was wrong" are the same answer
+    when the question is whether to spend more money.
+    """
+    exchange(_Exchange(balances={"TOK": 5.0}, traded=["TOK"], **broken))
+    r = wallet_client.reconcile_live_positions([_live_pos()])
+
+    assert not r.ok
+    assert expected in r.reason
+
+
+def test_missing_credentials_fail_closed_without_claiming_a_check(monkeypatch):
+    monkeypatch.delenv("POLYMARKET_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("POLYMARKET_FUNDER", raising=False)
+    monkeypatch.setattr(wallet_client, "_reconcile_cache", {"at": 0.0, "result": None})
+
+    r = wallet_client.reconcile_live_positions([_live_pos()])
+
+    assert not r.ok
+    assert not r.checked, "must not claim to have checked when it could not"
+    assert "NOT CHECKED" in r.describe()
+
+
+def test_a_position_with_no_token_id_cannot_be_verified(exchange):
+    exchange(_Exchange())
+    pos = _live_pos()
+    pos.token_id = None
+
+    r = wallet_client.reconcile_live_positions([pos])
+
+    assert not r.ok
+    assert "no token_id" in r.reason
+
+
+def test_reconciliation_is_cached_within_the_ttl(exchange):
+    ex = exchange(_Exchange(balances={"TOK": 5.0}, traded=["TOK"]))
+    calls = []
+    original = ex.get_trades
+    ex.get_trades = lambda params=None, **kw: (calls.append(1), original(params))[1]
+
+    wallet_client.reconcile_cached([_live_pos()])
+    wallet_client.reconcile_cached([_live_pos()])
+
+    assert len(calls) == 1, "the second call should have been served from cache"
+
+
+# --- enforcement -----------------------------------------------------------
+
+def test_a_divergent_exchange_blocks_new_live_entries(monkeypatch, mode, captured):
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
+    monkeypatch.setattr(
+        wallet_client, "reconcile_cached",
+        lambda positions: wallet_client.Reconciliation(
+            ok=False, checked=True, exchange_only=[("GHOST", 12.0)], reason="divergence"),
+    )
+    monkeypatch.setattr(wallet_client, "submit_order", _explode)
+
+    executor.open_position(make_decision())
+
+    assert captured["opened"] == []
+
+
+def test_reconciliation_never_blocks_an_exit(monkeypatch, mode, captured):
+    """
+    Entries only. Refusing to CLOSE a real position over a bookkeeping doubt
+    would strand actual money -- the same asymmetry the budget checks already
+    observe.
+    """
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(
+        wallet_client, "reconcile_cached",
+        lambda positions: wallet_client.Reconciliation(
+            ok=False, checked=True, exchange_only=[("GHOST", 12.0)], reason="divergence"),
+    )
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=True, simulated=False, spec=spec,
+            order_id="0x1", fill_price=spec.expected_price, fill_shares=spec.size_shares,
+        ),
+    )
+
+    executor.close_position(make_position(), _exit_decision())
+
+    assert len(captured["closed"]) == 1, "an exit was blocked by a reconciliation failure"
+
+
+def test_simulation_entries_never_consult_the_exchange(monkeypatch, mode, captured):
+    """Simulation must stay credential-free; reconciliation needs credentials."""
+    mode("simulation")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(wallet_client, "reconcile_cached", _explode)
+
+    executor.open_position(make_decision())
+
+    assert len(captured["opened"]) == 1

@@ -150,6 +150,26 @@ def _live_budget_breach(size_usd: float) -> Optional[str]:
         if getattr(p, "execution_mode", "paper") == "live"
     ]
 
+    # THE CAPS BELOW ARE ONLY AS TRUE AS THIS TABLE, so ask the exchange
+    # before trusting them. Every limit in this function is derived from
+    # storage, which makes them caps on the database's RECOLLECTION of
+    # exposure rather than on exposure -- and the two provably diverge: on
+    # 2026-08-10 a real position sat on the exchange while the daemon had no
+    # row for it, and during that window all three read one position light.
+    #
+    # Fails closed, including when the check itself cannot run. "I could not
+    # look" and "I looked and it was wrong" are the same answer when the
+    # question is whether to spend more money. This is also why it is here
+    # and not in close_position(): an exit must never be blocked by a
+    # bookkeeping doubt, only an entry.
+    recon = wallet_client.reconcile_cached(live_positions)
+    if not recon.ok:
+        return (
+            f"exchange reconciliation did not pass -- {recon.describe()}. "
+            f"Refusing to open anything new until the database and the exchange "
+            f"agree, because every backstop below is computed from the database"
+        )
+
     if len(live_positions) >= config.LIVE_MAX_CONCURRENT_POSITIONS:
         return (
             f"{len(live_positions)} live position(s) already open, at the "
