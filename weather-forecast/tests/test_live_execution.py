@@ -1253,3 +1253,132 @@ def test_simulation_entries_never_consult_the_exchange(monkeypatch, mode, captur
     executor.open_position(make_decision())
 
     assert len(captured["opened"]) == 1
+
+
+# --------------------------------------------------------------------------
+# Escalating a refused live close
+# --------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def _clear_refusals():
+    executor._consecutive_live_close_refusals.clear()
+    yield
+    executor._consecutive_live_close_refusals.clear()
+
+
+def test_a_refused_live_close_counts_and_shouts(monkeypatch, mode, captured, capsys):
+    """
+    Refusing is correct; refusing SILENTLY is not. The refusal used to be one
+    print and a return, repeated forever, with no counter and no instruction
+    -- on the one path where real shares have an unhonoured stop-loss.
+    """
+    mode("manual_review")
+    executor.close_position(make_position(mode="live"), _exit_decision())
+
+    out = capsys.readouterr().out
+    assert captured["closed"] == []
+    assert "[ACTION NEEDED]" in out
+    assert "REAL SHARES ARE HELD" in out
+    assert "POLYWEATHER_MODE=live" in out
+    assert executor._consecutive_live_close_refusals["p1"] == 1
+
+
+def test_consecutive_refusals_accumulate(monkeypatch, mode, captured, capsys):
+    mode("manual_review")
+    pos = make_position(mode="live")
+    for _ in range(3):
+        executor.close_position(pos, _exit_decision())
+
+    assert executor._consecutive_live_close_refusals["p1"] == 3
+    assert "Refused 3 cycle(s)" in capsys.readouterr().out
+
+
+def test_the_alert_carries_what_an_operator_needs(monkeypatch, mode, captured, capsys):
+    mode("manual_review")
+    pos = make_position(mode="live", size_shares=5.0, price=0.21)
+    pos.order_id = "0xdeadbeef"
+
+    executor.close_position(pos, _exit_decision(reason="trailing_stop", price=0.28))
+    out = capsys.readouterr().out
+
+    for needed in ("5.00 shares", "0.2100", "0xdeadbeef", "TRAILING_STOP", "0.2800", "WSSS"):
+        assert needed in out, f"alert is missing {needed!r}"
+
+
+def test_a_streak_can_be_cleared(mode, captured):
+    mode("manual_review")
+    executor.close_position(make_position(mode="live"), _exit_decision())
+    assert executor._consecutive_live_close_refusals
+
+    executor.forget_live_close_refusals("p1")
+    assert "p1" not in executor._consecutive_live_close_refusals
+
+
+# --- the startup check -----------------------------------------------------
+
+def test_unmanageable_positions_are_found_at_startup(monkeypatch, mode):
+    mode("simulation")
+    monkeypatch.setattr(storage, "load_open_positions",
+                        lambda **kw: [make_position(mode="live")])
+
+    assert len(executor.unmanageable_live_positions()) == 1
+
+
+def test_a_live_process_has_nothing_unmanageable(monkeypatch, mode):
+    mode("live")
+    monkeypatch.setattr(storage, "load_open_positions",
+                        lambda **kw: [make_position(mode="live")])
+
+    assert executor.unmanageable_live_positions() == []
+
+
+def test_paper_positions_are_never_unmanageable(monkeypatch, mode):
+    mode("simulation")
+    monkeypatch.setattr(storage, "load_open_positions",
+                        lambda **kw: [make_position(mode="paper"), make_position(mode="simulation")])
+
+    assert executor.unmanageable_live_positions() == []
+
+
+def test_the_startup_banner_names_the_exposure(monkeypatch, mode, capsys):
+    mode("simulation")
+    monkeypatch.setattr(storage, "load_open_positions",
+                        lambda **kw: [make_position(mode="live")])
+
+    n = executor.warn_about_unmanageable_live_positions()
+    out = capsys.readouterr().out
+
+    assert n == 1
+    assert "[ACTION NEEDED]" in out
+    assert "real exposure" in out
+    assert "stop-losses and profit-takes will NOT fire" in out
+
+
+def test_the_startup_check_never_stops_the_daemon(monkeypatch, mode, capsys):
+    """A boot-time diagnostic must not be the thing that prevents booting."""
+    mode("simulation")
+
+    def _broken(**kw):
+        raise RuntimeError("db unreadable")
+
+    monkeypatch.setattr(storage, "load_open_positions", _broken)
+
+    assert executor.warn_about_unmanageable_live_positions() == 0
+    assert "could not check" in capsys.readouterr().out
+
+
+def test_scheduler_warns_at_startup():
+    """Structural: the banner only helps if the daemon actually calls it."""
+    import ast
+    from pathlib import Path
+
+    import scheduler
+
+    tree = ast.parse(Path(scheduler.__file__).read_text(encoding="utf-8"))
+    called = {
+        n.func.attr for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+    }
+    assert "warn_about_unmanageable_live_positions" in called, (
+        "scheduler.py must run the unmanageable-live-position check at startup"
+    )

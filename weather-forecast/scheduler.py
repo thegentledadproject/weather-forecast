@@ -507,4 +507,12 @@ if __name__ == "__main__":
             executor.EXECUTION_MODE[icao] = "manual_review"
         print("[scheduler] Manual review mode active -- recommended actions will be printed for a human to execute.")
 
+    # Say it AT BOOT, not once the next scan cycle happens to reach one.
+    # An open live position this process cannot close is a silent condition
+    # by nature: the daemon runs perfectly normally, prints nothing unusual
+    # until an exit signal fires, and meanwhile real shares sit with no
+    # working stop-loss. The mode chosen above is exactly what determines
+    # whether that is the situation, so this is the moment to check.
+    executor.warn_about_unmanageable_live_positions()
+
     run_forever()

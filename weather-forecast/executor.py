@@ -60,7 +60,7 @@ models.py, storage.py, config.py, risk_manager.py, clients/wallet_client.py
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Dict, Optional
 
 from models import Position, ExitDecision, EntryDecision
 import storage
@@ -312,6 +312,130 @@ def _price_drift_ok(spec_price: float, decided_price: float) -> tuple:
 
 
 # --------------------------------------------------------------------------
+# Refused live closes
+# --------------------------------------------------------------------------
+
+# Consecutive cycles a live position's close has been refused because this
+# process is not authorised for live, keyed by position_id. In-memory and
+# per-process, matching position_manager._consecutive_price_failures: the
+# condition is about THIS process's authority, so a restart re-deciding from
+# scratch is correct rather than something to persist.
+_consecutive_live_close_refusals: Dict[str, int] = {}
+
+# Refusals before the log escalates from a routine line to the full
+# ACTION NEEDED block. Deliberately 1: unlike an unreadable price feed, which
+# is usually transient and self-heals, an unauthorised process does not
+# become authorised by waiting. There is nothing to give the benefit of the
+# doubt to, and the first refusal already means a real stop-loss went
+# unhonoured on real shares.
+LIVE_CLOSE_REFUSAL_ESCALATE_AFTER = 1
+
+
+def _note_live_close_refused(position: Position, decision: ExitDecision) -> int:
+    """
+    Record and announce one refused live close. Returns the new consecutive
+    count.
+
+    WHY THIS IS LOUD. Refusing is correct -- see the dispatch comment in
+    close_position() -- but the refusal used to be a single print() and a
+    return, repeated every cycle forever, with no counter and no operator
+    instruction. position_manager escalates its two comparable conditions
+    (_note_price_failure, _note_unknown_resolution) and the manual_review
+    branch of this very function emits an ACTION NEEDED block; the one path
+    where REAL SHARES have an unhonoured stop-loss did neither.
+
+    The asymmetry the original design got right is that leaving the position
+    open beats recording a close that did not happen. The asymmetry it got
+    wrong is that a safe failure still has to be a NOISY one.
+    """
+    count = _consecutive_live_close_refusals.get(position.position_id, 0) + 1
+    _consecutive_live_close_refusals[position.position_id] = count
+    running_mode = EXECUTION_MODE.get(position.station_icao, "manual_review")
+
+    if count < LIVE_CLOSE_REFUSAL_ESCALATE_AFTER:
+        print(
+            f"[executor] refused to close LIVE position {position.position_id} "
+            f"({running_mode} process, needs live) -- refusal {count}"
+        )
+        return count
+
+    shares = getattr(position, "size_shares", None)
+    shares_text = f"{shares:.2f} shares" if shares else "an unrecorded share count"
+    print(
+        f"\n[ACTION NEEDED] {position.station_icao} {position.bucket_c}°C "
+        f"({position.side}) -- LIVE POSITION CANNOT BE CLOSED BY THIS PROCESS\n"
+        f"  Position:  {position.position_id}\n"
+        f"  Held:      {shares_text} @ {position.entry_price:.4f} "
+        f"(${position.size_usd:.2f}), order {position.order_id or 'unrecorded'}\n"
+        f"  Signal:    {decision.reason.upper()} at {decision.current_price:.4f} "
+        f"({decision.pnl_pct:+.1%})\n"
+        f"  Why:       this process has {position.station_icao} in '{running_mode}' mode, "
+        f"not 'live', so it may not act on real shares.\n"
+        f"  REAL SHARES ARE HELD AND THIS EXIT SIGNAL IS GOING UNHONOURED. "
+        f"Refused {count} cycle(s) in a row.\n"
+        f"  Do one of: SELL/REDEEM this position on the exchange by hand and close its\n"
+        f"  row, or set POLYWEATHER_MODE=live in /etc/polyweather/mode.env and restart\n"
+        f"  so the daemon may act on it.\n"
+    )
+    return count
+
+
+def forget_live_close_refusals(position_id: str) -> None:
+    """Clear a position's refusal streak once it is genuinely dealt with."""
+    _consecutive_live_close_refusals.pop(position_id, None)
+
+
+def unmanageable_live_positions() -> list:
+    """
+    Open live positions this process is NOT authorised to close.
+
+    A startup check, so an operator learns at boot rather than from a log
+    line buried in the next scan cycle -- the failure this reports is silent
+    by nature, since the daemon otherwise runs perfectly normally while real
+    shares sit with no working stop-loss behind them.
+    """
+    try:
+        positions = storage.load_open_positions(is_paper=False)
+    except Exception as exc:  # noqa: BLE001 -- a startup check must not stop the daemon
+        print(f"[executor] could not check for unmanageable live positions: {exc}")
+        return []
+    return [
+        p for p in positions
+        if getattr(p, "execution_mode", "paper") == "live"
+        and EXECUTION_MODE.get(p.station_icao) != "live"
+    ]
+
+
+def warn_about_unmanageable_live_positions() -> int:
+    """
+    Print a startup banner for every live position this process cannot
+    close. Returns how many there were, so a caller can decide to be
+    louder still.
+    """
+    stranded = unmanageable_live_positions()
+    if not stranded:
+        return 0
+
+    total = sum(p.size_usd for p in stranded)
+    print(
+        f"\n[ACTION NEEDED] {len(stranded)} OPEN LIVE POSITION(S) THIS PROCESS CANNOT CLOSE "
+        f"-- ${total:.2f} of real exposure\n"
+        f"  Their stop-losses and profit-takes will NOT fire while this daemon runs in a "
+        f"non-live mode.\n"
+    )
+    for p in stranded:
+        print(
+            f"    {p.station_icao} {p.bucket_c}°{p.side}  {p.size_shares or '?'} shares "
+            f"@ {p.entry_price:.4f} (${p.size_usd:.2f})  order {p.order_id or 'unrecorded'}\n"
+            f"      {p.position_id}"
+        )
+    print(
+        f"  Close them on the exchange and close their rows, or set POLYWEATHER_MODE=live\n"
+        f"  in /etc/polyweather/mode.env and restart.\n"
+    )
+    return len(stranded)
+
+# --------------------------------------------------------------------------
 # Entries
 # --------------------------------------------------------------------------
 
@@ -533,13 +657,7 @@ def close_position(
     # Leaving it open is the safe failure: it stays visible, stays monitored,
     # and gets closed correctly by the next authorized run.
     if mode == "live" and EXECUTION_MODE.get(position.station_icao) != "live":
-        print(
-            f"[executor] REFUSING to close LIVE position {position.position_id}: this "
-            f"process has {position.station_icao} in "
-            f"'{EXECUTION_MODE.get(position.station_icao, 'manual_review')}' mode, not "
-            f"'live'. Real shares are held. Leaving the position OPEN rather than "
-            f"recording a close that did not happen -- restart with --mode live to act on it."
-        )
+        _note_live_close_refused(position, decision)
         return
 
     exit_time = datetime.now(timezone.utc).isoformat()
