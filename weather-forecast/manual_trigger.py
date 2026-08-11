@@ -26,7 +26,15 @@ So every non-model safeguard still runs:
   - executor._price_drift_ok()   abandons if the resolved limit drifted past
                                  config.MAX_ACCEPTABLE_SLIPPAGE_PCT
   - executor._live_budget_breach()  concurrent-position, total-exposure and
-                                 orders-per-day backstops
+                                 orders-per-day backstops, plus the exchange
+                                 reconciliation those caps depend on
+  - MAX_OPEN_POSITIONS_PER_BUCKET  checked here explicitly, because building
+                                 an approved EntryDecision by hand skips
+                                 entry_manager.evaluate_entry() where it
+                                 normally lives. Without it, repeated
+                                 invocations STACKED the same bucket -- the
+                                 same bet sized up by accident, which is the
+                                 exact failure that gate was added for
   - fill-only recording          an unfilled FOK writes NOTHING, because a
                                  stored position with no shares behind it is
                                  the worst thing this codebase can produce
@@ -38,6 +46,20 @@ step it skips is the POST.
 --mode live PLACES A REAL ORDER WITH REAL FUNDS. It additionally requires
 POLYMARKET_LIVE_TRADING=true in the environment -- the second gate, checked
 inside wallet_client.submit_order() itself, not merely here.
+
+WHO MANAGES WHAT THIS OPENS
+----------------------------
+Not this script: it sets its own executor.EXECUTION_MODE, opens the position
+and exits. Whether the position is ever exited depends on a DIFFERENT,
+long-running daemon, and executor.close_position() refuses to act on a live
+position unless that daemon is itself in live mode.
+
+This used to print "position_manager will now manage its exits on the normal
+cycle" unconditionally. That is false whenever the daemon is not live --
+which is its deployed state -- and it is how a real position came to sit
+unmanaged with nobody expecting it to. Both the confirmation prompt and the
+post-fill output now read the deployed mode from /etc/polyweather/mode.env
+and say plainly which case this is.
 
 Usage:
     python manual_trigger.py --station WSSS --bucket 31 --side YES
@@ -74,11 +96,45 @@ import sys
 from datetime import date
 
 import config
+import entry_manager
 import executor
 import storage
 import market_discovery
 from models import EntryDecision
 from clients import market_client, wallet_client
+
+# Where the DEPLOYED daemon's mode lives. deploy_daemon.sh creates this file
+# once and never rewrites it, and the systemd unit expands POLYWEATHER_MODE
+# from it into ExecStart -- so this, not executor.EXECUTION_MODE, is what
+# decides whether anything will manage a position opened here.
+MODE_FILE = "/etc/polyweather/mode.env"
+
+
+def _daemon_mode() -> str:
+    """
+    The mode the DEPLOYED daemon runs in, or "unknown" if it cannot be read.
+
+    This process sets executor.EXECUTION_MODE for itself and then exits;
+    whether the position it opens is ever managed depends entirely on a
+    DIFFERENT, long-running process. This script used to print
+    "position_manager will now manage its exits on the normal cycle"
+    unconditionally, which is false whenever the daemon is not in live mode
+    -- its deployed state -- and it is how a real position came to sit
+    unmanaged with nobody expecting it to.
+
+    "unknown" is reported as such rather than assumed live: on a box without
+    the mode file the honest answer is that this cannot be determined, and
+    the caller phrases the warning accordingly.
+    """
+    try:
+        with open(MODE_FILE, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line.startswith("POLYWEATHER_MODE="):
+                    return line.split("=", 1)[1].strip().strip('"') or "unknown"
+    except OSError:
+        return "unknown"
+    return "unknown"
 
 
 def _parse_args():
@@ -128,6 +184,33 @@ def main():
     station = config.STATIONS[args.station]
     target_date = date.fromisoformat(args.date) if args.date else config.local_today(station)
 
+    # PER-BUCKET CAP. This script builds its own approved EntryDecision, so it
+    # never passes through entry_manager.evaluate_entry() and never met this
+    # gate -- which meant repeated invocations STACKED the same bucket,
+    # bounded only by the LIVE_MAX_* backstops. Repeat entries on one bucket
+    # are not independent bets, they are the same bet sized up by accident,
+    # which is the exact failure MAX_OPEN_POSITIONS_PER_BUCKET exists to stop
+    # (it was added after day 1 in production entered one bucket four times).
+    #
+    # The model gates are bypassed here on purpose; this one is not a model
+    # gate. Counted on the track this order will actually be filed under --
+    # is_paper is False only for live, matching executor.open_position().
+    open_count = entry_manager.count_open_positions_for_bucket(
+        args.station, target_date, args.bucket, args.side,
+        is_paper=(args.mode != "live"),
+    )
+    if open_count is None:
+        print("ERROR: could not read open positions, so the per-bucket cap cannot be "
+              "enforced -- refusing to open blind.")
+        return 1
+    if open_count >= config.MAX_OPEN_POSITIONS_PER_BUCKET:
+        print(f"ERROR: {open_count} position(s) already open on {args.station} "
+              f"{args.bucket}°{args.side} for {target_date}, at the "
+              f"MAX_OPEN_POSITIONS_PER_BUCKET limit of "
+              f"{config.MAX_OPEN_POSITIONS_PER_BUCKET}. Another leg on the same "
+              f"bucket is the same bet twice, not a second opinion.")
+        return 1
+
     print(f"Discovering {args.station} markets for {target_date} ...")
     token_map = market_discovery.discover_token_map(station, target_date)
     if not token_map:
@@ -170,6 +253,17 @@ def main():
         gate = wallet_client.live_trading_enabled()
         print(f"  env gate       POLYMARKET_LIVE_TRADING="
               f"{'true -- THIS WILL SUBMIT' if gate else 'unset -- submit_order() will refuse'}")
+        daemon = _daemon_mode()
+        if daemon == "live":
+            print("  exits          the daemon runs in 'live' mode and WILL manage this")
+        else:
+            print(
+                f"  exits          NOBODY. The daemon runs in '{daemon}' mode, so\n"
+                f"                 close_position() will REFUSE to act on real shares --\n"
+                f"                 no stop-loss, no take-profit. You would have to sell or\n"
+                f"                 redeem it by hand. Set POLYWEATHER_MODE=live in\n"
+                f"                 {MODE_FILE} and restart the daemon to have it managed."
+            )
 
     if not args.yes:
         expected = "spend" if args.mode == "live" else "yes"
@@ -220,7 +314,17 @@ def main():
           f"({'REAL MONEY' if not pos.is_paper else pos.execution_mode})")
     if pos.order_id:
         print(f"  order_id {pos.order_id}")
-    print("  position_manager will now manage its exits on the normal cycle.")
+    daemon = _daemon_mode()
+    if pos.execution_mode == "live" and daemon != "live":
+        print(
+            f"\n  *** NOTHING WILL MANAGE THIS POSITION'S EXITS ***\n"
+            f"  The daemon runs in '{daemon}' mode, so close_position() refuses to act on\n"
+            f"  real shares. Its stop-loss and take-profit will NOT fire. Sell or redeem it\n"
+            f"  by hand, or set POLYWEATHER_MODE=live in {MODE_FILE} and restart the daemon.\n"
+            f"  (The daemon now warns about this at startup and on every refused exit.)"
+        )
+    else:
+        print("  position_manager will manage its exits on the normal cycle.")
     return 0
 
 
