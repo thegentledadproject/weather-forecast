@@ -70,24 +70,103 @@ if [ -f /usr/local/bin/generate_dashboard.py ]; then
     sudo systemctl start polyweather-dashboard.service 2>/dev/null || true
 fi
 
+echo "== execution mode (persisted OUTSIDE this script) =="
+# THE MODE IS HOST STATE, NOT REPO STATE.
+#
+# This script rewrites the unit file from a heredoc on every run. When the
+# mode was baked into that heredoc, promoting the daemon to --mode live was
+# destroyed by the next `git pull && deploy` -- and after the restart,
+# executor.close_position() refuses to close every open LIVE position,
+# forever, because the process is no longer authorised for live. That
+# demotion fired with ZERO operator error: an ordinary deploy silently
+# disarmed the daemon and stranded whatever it was holding.
+#
+# So the mode lives in a file this script CREATES IF ABSENT and NEVER
+# OVERWRITES. Changing modes means editing that file, not this one.
+MODE_FILE=/etc/polyweather/mode.env
+if [ ! -f "$MODE_FILE" ]; then
+    echo "-- first deploy: seeding $MODE_FILE with the safe default"
+    sudo mkdir -p "$(dirname "$MODE_FILE")"
+    sudo tee "$MODE_FILE" >/dev/null <<MODEENV
+# Execution mode for the polyweather daemon. Host state: deploy_daemon.sh
+# creates this file once and never rewrites it, so a promotion survives
+# deploys. systemd expands these into ExecStart.
+#
+# POLYWEATHER_MODE:          manual_review | paper | simulation | live
+# POLYWEATHER_FALLBACK_MODE: manual_review | paper  (stations not eligible
+#                            for simulation/live)
+#
+# "live" ALSO requires POLYWEATHER_LIVE_ARGS below to carry the explicit
+# acknowledgement flag, and POLYMARKET_LIVE_TRADING=true from the drop-in at
+# polyweather.service.d/. Three separate places, on purpose.
+POLYWEATHER_MODE=simulation
+POLYWEATHER_FALLBACK_MODE=paper
+POLYWEATHER_LIVE_ARGS=
+MODEENV
+fi
+sudo chmod 644 "$MODE_FILE"
+CURRENT_MODE=$(sudo grep -E '^POLYWEATHER_MODE=' "$MODE_FILE" | cut -d= -f2)
+echo "-- mode: ${CURRENT_MODE:-unset}"
+
+echo "== refusing to demote a daemon holding live positions =="
+# The other half of the same failure: even with the mode persisted, a
+# deliberate demotion while real shares are held strands them. Refuse, and
+# say what is at stake. POLYWEATHER_ALLOW_DEMOTION=1 overrides for the case
+# where the deploy IS the fix.
+if [ "$CURRENT_MODE" != "live" ] && [ -f "$PKG_DIR/data/polyweather.sqlite3" ]; then
+    OPEN_LIVE=$("$VENV/bin/python" - <<'PYCHECK' || echo "ERROR"
+import sqlite3, sys
+try:
+    c = sqlite3.connect("data/polyweather.sqlite3")
+    n, = c.execute(
+        "SELECT COUNT(*) FROM positions WHERE status='open' AND execution_mode='live'"
+    ).fetchone()
+    print(n)
+except Exception:
+    print("ERROR")
+PYCHECK
+)
+    if [ "$OPEN_LIVE" = "ERROR" ]; then
+        echo "!! could not read open live positions -- continuing, but verify by hand"
+    elif [ "${OPEN_LIVE:-0}" -gt 0 ]; then
+        if [ "${POLYWEATHER_ALLOW_DEMOTION:-}" = "1" ]; then
+            echo "!! $OPEN_LIVE open LIVE position(s) and mode is '$CURRENT_MODE' -- "
+            echo "!! proceeding because POLYWEATHER_ALLOW_DEMOTION=1. They stay unmanageable."
+        else
+            echo "REFUSING TO DEPLOY: $OPEN_LIVE open LIVE position(s) exist and the mode is"
+            echo "'$CURRENT_MODE', not 'live'. Restarting now would leave real shares that this"
+            echo "daemon cannot close -- executor.close_position() will refuse them every cycle."
+            echo
+            echo "Resolve them (redeem/sell on the exchange and close the rows), or set the mode"
+            echo "to live in $MODE_FILE, or re-run with POLYWEATHER_ALLOW_DEMOTION=1 if you"
+            echo "accept leaving them stranded."
+            exit 1
+        fi
+    fi
+fi
+
 echo "== systemd service =="
 sudo tee /etc/systemd/system/$SERVICE.service >/dev/null <<UNIT
 [Unit]
-Description=polyweather scheduler (WSSS simulation, all other stations paper)
+Description=polyweather scheduler (mode from /etc/polyweather/mode.env)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 User=ubuntu
 WorkingDirectory=$PKG_DIR
+# The mode comes from /etc/polyweather/mode.env, which this deploy script
+# creates once and never rewrites -- see the "execution mode" step above for
+# why baking it in here was a silent-demotion bug. \${VAR} form so each
+# expands to exactly one argument.
+#
 # --mode simulation promotes ONLY the stations config.live_mode_is_permitted()
-# allows (today: WSSS alone) onto the real order path; --fallback-mode paper
-# keeps the other twelve exactly where they were. Nothing here submits an
-# order: that additionally requires --mode live, the
-# --i-understand-this-spends-real-money flag, AND POLYMARKET_LIVE_TRADING=true
-# in this unit's environment. None of those three are set by this script, and
-# adding them is a deliberate manual edit, not a deploy step.
-ExecStart=$VENV/bin/python scheduler.py --mode simulation --fallback-mode paper
+# allows (today: WSSS alone) onto the real order path; --fallback-mode keeps
+# the rest where they were. Nothing here submits an order: that additionally
+# requires mode=live, the acknowledgement flag in POLYWEATHER_LIVE_ARGS, AND
+# POLYMARKET_LIVE_TRADING=true from the polyweather.service.d/ drop-in.
+EnvironmentFile=/etc/polyweather/mode.env
+ExecStart=$VENV/bin/python scheduler.py --mode \${POLYWEATHER_MODE} --fallback-mode \${POLYWEATHER_FALLBACK_MODE} \$POLYWEATHER_LIVE_ARGS
 Restart=on-failure
 RestartSec=30
 

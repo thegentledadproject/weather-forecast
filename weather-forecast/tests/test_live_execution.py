@@ -947,3 +947,98 @@ def test_padding_does_not_change_the_recorded_fill_price(monkeypatch, mode, capt
     executor.open_position(make_decision(price=0.39))
 
     assert captured["opened"][0].entry_price == 0.39
+
+
+# --------------------------------------------------------------------------
+# Re-checking size after the exchange-minimum upsize
+# --------------------------------------------------------------------------
+
+def _spec(notional, price=0.40, shares=5.0):
+    return wallet_client.OrderSpec(
+        ok=True, token_id="TOK", side="BUY", limit_price=price,
+        size_shares=shares, notional_usd=notional, expected_price=price,
+    )
+
+
+def test_an_unchanged_size_is_not_rechecked(monkeypatch):
+    monkeypatch.setattr(market_client, "estimate_slippage", _explode)
+    ok, note = executor._resolved_size_ok(_spec(1.00), make_decision(size_usd=1.00))
+    assert ok and note == ""
+
+
+def test_upsized_order_is_rejected_when_it_blows_the_depth_cap(monkeypatch):
+    """
+    The entry cleared depth at $1. The exchange minimum makes it $3.75, and
+    nothing re-ran the check -- so a trade approved against the book at one
+    size was submitted at up to 3.75x it.
+    """
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
+    decision = make_decision(size_usd=1.00)
+    decision.available_depth_usd = 8.0          # 25% of 8 = $2.00 ceiling
+
+    ok, note = executor._resolved_size_ok(_spec(3.75), decision)
+
+    assert not ok
+    assert "visible depth" in note
+
+
+def test_upsized_order_is_rejected_when_slippage_now_fails(monkeypatch):
+    monkeypatch.setattr(market_client, "estimate_slippage",
+                        lambda t, s: config.MAX_ACCEPTABLE_SLIPPAGE_PCT + 0.01)
+    ok, note = executor._resolved_size_ok(_spec(3.75), make_decision(size_usd=1.00))
+
+    assert not ok
+    assert "hard gate" in note
+
+
+def test_upsized_order_is_rejected_when_net_ev_goes_negative(monkeypatch):
+    """
+    Only slippage moves with size, so the net-EV change is exactly the
+    slippage increase -- no field the EntryDecision lacks.
+    """
+    decision = make_decision(size_usd=1.00)
+    decision.net_ev_at_size = 0.02
+    decision.slippage_at_size_pct = 0.01
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.05)
+
+    ok, note = executor._resolved_size_ok(_spec(3.75), decision)
+
+    assert not ok
+    assert "net EV falls" in note
+
+
+def test_an_upsize_that_still_clears_everything_is_allowed(monkeypatch):
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.011)
+    decision = make_decision(size_usd=1.00)
+    decision.available_depth_usd = 1000.0
+    decision.net_ev_at_size = 0.30
+    decision.slippage_at_size_pct = 0.01
+
+    ok, note = executor._resolved_size_ok(_spec(3.75), decision)
+
+    assert ok
+    assert "exchange minimum" in note
+
+
+def test_a_failed_slippage_recheck_rejects_rather_than_passes(monkeypatch):
+    """A re-check that cannot run must not count as a re-check that passed."""
+    def boom(t, s):
+        raise RuntimeError("book endpoint down")
+
+    monkeypatch.setattr(market_client, "estimate_slippage", boom)
+    ok, note = executor._resolved_size_ok(_spec(3.75), make_decision(size_usd=1.00))
+
+    assert not ok
+    assert "refusing to guess" in note
+
+
+def test_the_upsize_recheck_runs_before_any_order_is_submitted(monkeypatch, mode, captured):
+    mode("live")
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    monkeypatch.setattr(market_client, "estimate_slippage",
+                        lambda t, s: config.MAX_ACCEPTABLE_SLIPPAGE_PCT + 0.01)
+    monkeypatch.setattr(wallet_client, "submit_order", _explode)
+
+    executor.open_position(make_decision(size_usd=1.00, price=0.50))
+
+    assert captured["opened"] == []

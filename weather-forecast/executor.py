@@ -66,15 +66,21 @@ from models import Position, ExitDecision, EntryDecision
 import storage
 import risk_manager
 import config
-from clients import wallet_client
+from clients import market_client, wallet_client
 
 # Per-station execution mode. See the ladder in the module docstring.
 #
-# WSSS sits at "simulation": the real order path runs every cycle against
-# the real book, and nothing is submitted. Promoting it to "live" is a
-# one-word edit here PLUS setting POLYMARKET_LIVE_TRADING=true in the
-# daemon environment -- deliberately two separate places, so neither a
-# stray commit nor a stray environment variable is sufficient alone.
+# THIS LITERAL IS THE FALLBACK, NOT THE DEPLOYED CONFIGURATION. scheduler.py
+# overwrites EXECUTION_MODE for every station in config.STATIONS on startup,
+# in all four of its --mode branches, and manual_trigger.py sets it directly.
+# So editing the dict below changes nothing about the running daemon, and an
+# earlier version of this comment -- which said promoting WSSS was "a
+# one-word edit here" -- was simply wrong. A reader trusting it would believe
+# repo state was deployed state.
+#
+# The deployed mode lives in /etc/polyweather/mode.env on the box, which
+# deploy_daemon.sh creates once and never rewrites. What this dict actually
+# governs is any process that does NOT go through scheduler.py's CLI.
 EXECUTION_MODE = {
     "WSSS": "simulation",
     "WMKK": "manual_review",
@@ -181,6 +187,76 @@ def _all_live_positions() -> list:
     for icao in config.STATIONS:
         positions += storage.load_position_history(icao, limit=1000, is_paper=False)
     return [p for p in positions if getattr(p, "execution_mode", "paper") == "live"]
+
+
+def _resolved_size_ok(spec, decision) -> tuple:
+    """
+    Re-check the size-dependent gates at the notional that will ACTUALLY be
+    submitted. Returns (ok, note); an empty note means the size did not move.
+
+    THE HOLE THIS CLOSES. config.LIVE_TRADE_SIZE_USD is clamped in
+    entry_manager.size_position() ABOVE the depth, slippage and net-EV
+    re-checks, and config.py argues at length that this keeps "every
+    downstream number about the order that actually gets built". That
+    argument is defeated one layer down: wallet_client.build_entry_order()
+    then raises the share count to the exchange minimum, which at
+    MAX_ENTRY_PRICE and a 5-share floor is $3.75 -- up to 3.75x the size
+    every one of those gates cleared. _price_drift_ok() already re-validates
+    PRICE after resolution; nothing re-validated SIZE.
+
+    Only the ABSOLUTE gates are re-run. The original min_net_ev threshold is
+    a per-window figure that does not reach this layer, so the net-EV test
+    here is the weaker "still positive" floor rather than the bar the entry
+    was approved against -- stated plainly because it is a real gap, not a
+    silently equivalent substitute. The two config-driven gates
+    (MAX_ACCEPTABLE_SLIPPAGE_PCT, MAX_DEPTH_UTILIZATION_PCT) are absolute and
+    are re-run exactly as entry_manager runs them.
+
+    Net EV is re-derived rather than recomputed: net_ev = edge/price -
+    slippage - fee, and of those only slippage moves with size, so the
+    change is exactly the slippage increase. That needs no field the
+    EntryDecision does not already carry.
+    """
+    requested = decision.recommended_size_usd or 0.0
+    resolved = spec.notional_usd
+    if resolved <= requested + 1e-9:
+        return True, ""
+
+    note = f"${requested:.2f} -> ${resolved:.2f} by the exchange minimum"
+
+    depth = decision.available_depth_usd
+    if depth is not None:
+        ceiling = depth * config.MAX_DEPTH_UTILIZATION_PCT
+        if resolved > ceiling:
+            return False, (
+                f"resolved notional ${resolved:.2f} is past {config.MAX_DEPTH_UTILIZATION_PCT:.0%} "
+                f"of the ${depth:.2f} visible depth (${ceiling:.2f}); the entry was sized "
+                f"at ${requested:.2f} and never cleared the book at this size"
+            )
+
+    try:
+        slippage = market_client.estimate_slippage(decision.token_id, resolved)
+    except Exception as exc:  # noqa: BLE001 -- a failed re-check must not pass by default
+        return False, f"could not re-estimate slippage at ${resolved:.2f} ({exc}) -- refusing to guess"
+
+    if slippage > config.MAX_ACCEPTABLE_SLIPPAGE_PCT:
+        return False, (
+            f"slippage at the resolved ${resolved:.2f} is {slippage:.1%}, past the "
+            f"{config.MAX_ACCEPTABLE_SLIPPAGE_PCT:.0%} hard gate (was "
+            f"{(decision.slippage_at_size_pct or 0):.1%} at ${requested:.2f})"
+        )
+
+    if decision.net_ev_at_size is not None and decision.slippage_at_size_pct is not None:
+        net_ev = decision.net_ev_at_size - (slippage - decision.slippage_at_size_pct)
+        if net_ev <= 0:
+            return False, (
+                f"net EV falls to {net_ev:+.1%} at the resolved ${resolved:.2f} "
+                f"(was {decision.net_ev_at_size:+.1%} at ${requested:.2f}) -- the size the "
+                f"exchange forces is not the trade that was approved"
+            )
+        note += f", slippage {slippage:.1%}, net EV {decision.net_ev_at_size:+.1%} -> {net_ev:+.1%}"
+
+    return True, note
 
 
 def _price_drift_ok(spec_price: float, decided_price: float) -> tuple:
@@ -315,6 +391,13 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
     if not drift_ok:
         print(f"[executor] {tag}: {label} order abandoned -- {drift_note}")
         return
+
+    size_ok, size_note = _resolved_size_ok(spec, decision)
+    if not size_ok:
+        print(f"[executor] {tag}: {label} order abandoned -- {size_note}")
+        return
+    if size_note:
+        print(f"[executor] {tag}: {label} resized -- {size_note}")
 
     if mode == "live":
         breach = _live_budget_breach(spec.notional_usd)
