@@ -915,21 +915,15 @@ MAX_OPEN_POSITIONS_PER_BUCKET = 1
 # entry_manager defaults unlisted stations to "exploratory" anyway; the
 # explicit entries below exist so a promotion is a deliberate, greppable
 # one-line edit, never an accident of a missing key.
-STATION_MATURITY = {
-    "WSSS": "mature",
-    "WMKK": "exploratory",
-    "RJTT": "exploratory",
-    "RKSI": "exploratory",
-    "RKPK": "exploratory",
-    "VHHH": "exploratory",
-    "RPLL": "exploratory",
-    "RCSS": "exploratory",
-    "ZSPD": "exploratory",
-    "ZBAA": "exploratory",
-    "ZGGG": "exploratory",
-    "ZGSZ": "exploratory",
-    "OPKC": "exploratory",
-}
+# STATION_MATURITY IS NOW DERIVED -- see station_maturity() at the foot of
+# this file. It used to be a hand-typed dict here, which made the one gate
+# authorising real money the only unmeasured gate in the system.
+#
+# The name is kept as a read-only mapping so existing readers (the backtest
+# manifest, reports) still work, but it is built from the measured criteria
+# rather than typed. Anything gating on maturity should call
+# station_maturity(icao) so it gets the live answer, not a snapshot.
+
 EXPLORATORY_SIZE_MULTIPLIER = 0.20  # exploratory stations get 20% of what mature-station sizing would suggest
 
 # A station may not open ANY position until this many stored observations
@@ -1274,3 +1268,268 @@ RECONCILE_SHARE_TOLERANCE = 0.01
 # without this each one would re-scan every fill. Short enough that a
 # position opened by another process is seen within a cycle.
 RECONCILE_CACHE_TTL_S = 60
+
+
+# --- Station maturity: MEASURED, not asserted -----------------------------
+# STATION_MATURITY used to be a hand-typed dict, and it was the master key:
+# config.live_mode_is_permitted() ANDs it with LIVE_TRADING_STATIONS, and
+# manual_trigger.py honours it and nothing else. So every gate that asked
+# "is this TRADE sound?" was measured from data -- collection count, bias
+# pairs, bias stderr, depth, slippage, net EV -- while the one gate that
+# asked "may this STATION risk real money?" was a string somebody edited.
+# That is the wrong way round for the only irreversible decision here.
+#
+# station_maturity() derives it instead. The criteria below are the ones
+# that can be honestly computed from what is stored today.
+#
+# WHAT IS DELIBERATELY *NOT* A CRITERION
+# ---------------------------------------
+# REALISED P&L. At a plausible per-trade edge the sample needed to
+# distinguish it from zero is in the hundreds of closed trades; this
+# registry has 1-20 per station. Measured 2026-08-10, the whole book's P&L
+# comparison was formally unmeasurable at n=3-9, and backtest/compare.py
+# refuses to call a winner below 30. Writing a P&L threshold here would
+# either never pass or, worse, pass on noise. It is named here so nobody
+# assumes it is implied by the word "mature".
+#
+# WHAT IS MISSING AND WOULD MATTER MOST
+# --------------------------------------
+# CALIBRATION AGAINST THE MARKET: brier_model < brier_market on this
+# station's own settled days. Beating a uniform guess (measured 2026-08-10:
+# Brier 0.72 vs 0.91, +11.6% skill) says nothing about beating the book, and
+# the book is the counterparty. It is not a criterion below because scoring
+# it honestly needs point-in-time model probabilities -- the same
+# reconstruction problem that keeps forecast_bias_c pinned at 0.0 inside the
+# backtest -- and a criterion computed with lookahead is worse than none.
+#
+# So "mature" here means THE MODEL IS MEASURABLY WELL-BEHAVED AT THIS
+# STATION. It does not mean the station makes money. Those are different
+# claims and only one of them is currently checkable.
+
+# Settlement-grade observations. Same threshold the collection-first entry
+# gate uses; a station that cannot open a paper position has no business
+# being called mature.
+MATURITY_MIN_OBSERVATIONS = MIN_RESOLUTION_OBS_BEFORE_ENTRY
+
+# Forecast/observation pairs. HIGHER than MIN_BIAS_PAIRS_BEFORE_ENTRY (5):
+# five pairs is enough to start correcting a bias, not enough to certify a
+# station for real money.
+MATURITY_MIN_BIAS_PAIRS = 8
+
+# The bias must be pinned precisely...
+MATURITY_MAX_BIAS_STDERR_C = MAX_BIAS_STANDARD_ERROR_C
+
+# ...and be the SAME BIAS over time. stderr asks how tightly the mean is
+# pinned; it does not ask whether the mean is stationary. A station whose
+# bias drifts has a correction fitted to its past rather than measured, and
+# that failure is invisible to stderr alone. Split the pairs chronologically
+# and require the halves to agree within this many combined standard errors.
+MATURITY_BIAS_SPLIT_HALF_SIGMAS = 2.0
+
+# Simulated orders that RESOLVED against the real book. This is the
+# graduation criterion "simulation" was built to supply and never had: proof
+# that the order path -- tick size, share rounding, the exchange minimum,
+# the drift check -- actually works for THIS station's markets.
+#
+# Three is deliberately a floor, and is a smoke test rather than a
+# statistical claim. It is not fitted to make any particular station pass:
+# a station running in simulation accumulates these every cycle, so the bar
+# is a question of days, not of luck.
+MATURITY_MIN_SIMULATED_ORDERS = 3
+
+# Explicit operator overrides: {icao: (maturity, justification)}.
+#
+# Deliberately EMPTY. An override is a decision to trade on something other
+# than the evidence, so it should be visible in a diff, require a written
+# reason, and get logged loudly every time it is used -- never be the quiet
+# default it was when the whole thing was a literal.
+MATURITY_OVERRIDE: dict = {}
+
+# Frozen snapshot for the BACKTEST replica only. backtest/entry_sim.py must
+# stay a pure function of its injected state -- it cannot read storage
+# without (a) breaking the parity contract it exists to hold and (b) reading
+# the whole stored record, which is lookahead of exactly the kind the engine
+# refuses for forecast_bias_c. So replays use this frozen dict, which is
+# what station_maturity() evaluated to on 2026-08-11, and any drift between
+# the two shows up as a parity failure rather than silently.
+MATURITY_SNAPSHOT = {
+    "WSSS": "mature",
+    "WMKK": "exploratory",
+    "RJTT": "exploratory",
+    "RKSI": "exploratory",
+    "RKPK": "exploratory",
+    "VHHH": "exploratory",
+    "RPLL": "exploratory",
+    "RCSS": "exploratory",
+    "ZSPD": "exploratory",
+    "ZBAA": "exploratory",
+    "ZGGG": "exploratory",
+    "ZGSZ": "exploratory",
+    "OPKC": "exploratory",
+}
+
+_maturity_cache: dict = {}
+
+
+def _bias_split_half(errors) -> tuple:
+    """
+    (is_stable, detail) for a station's forecast errors, split chronologically.
+
+    Returns (None, reason) when there are too few pairs to split at all --
+    which counts as NOT stable, since an unmeasurable property is not a
+    satisfied one.
+    """
+    import statistics
+
+    if len(errors) < 6:
+        return None, f"only {len(errors)} pair(s), need 6 to split"
+    mid = len(errors) // 2
+    first, second = errors[:mid], errors[mid:]
+    if len(first) < 2 or len(second) < 2:
+        return None, "a half has fewer than 2 pairs"
+
+    mean_a, mean_b = statistics.fmean(first), statistics.fmean(second)
+    se_a = statistics.stdev(first) / (len(first) ** 0.5)
+    se_b = statistics.stdev(second) / (len(second) ** 0.5)
+    combined = (se_a ** 2 + se_b ** 2) ** 0.5
+    gap = abs(mean_a - mean_b)
+    if combined <= 0:
+        return None, "zero variance in a half -- cannot compare"
+    stable = gap <= MATURITY_BIAS_SPLIT_HALF_SIGMAS * combined
+    return stable, (f"{mean_a:+.2f} then {mean_b:+.2f}, gap {gap:.2f} vs "
+                    f"{MATURITY_BIAS_SPLIT_HALF_SIGMAS:.0f}x{combined:.2f} combined SE")
+
+
+def maturity_report(station_icao: str) -> dict:
+    """
+    Every maturity criterion for one station, with its value and verdict.
+
+    Reads storage, so it is NOT usable from backtest/entry_sim.py -- see
+    MATURITY_SNAPSHOT. Never raises: an unreadable criterion is a FAILED
+    criterion, because "I could not check" must not read as "it passed".
+    """
+    import calibration
+    import storage
+
+    criteria = {}
+    try:
+        station = get_station(station_icao)
+    except KeyError:
+        return {"station": station_icao, "mature": False,
+                "criteria": {"registered": (False, "not in the station registry")}}
+
+    try:
+        obs = storage.count_observations_from_source(station_icao, station.resolution_grade_source)
+        criteria["observations"] = (
+            obs >= MATURITY_MIN_OBSERVATIONS,
+            f"{obs} settlement-grade, need {MATURITY_MIN_OBSERVATIONS}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        criteria["observations"] = (False, f"unreadable ({exc})")
+
+    try:
+        errors = storage.forecast_error_samples(station_icao, station.resolution_grade_source)
+        bias, n_pairs, stderr = calibration.bias_stats(errors)
+        criteria["bias_pairs"] = (
+            (n_pairs or 0) >= MATURITY_MIN_BIAS_PAIRS,
+            f"{n_pairs or 0} pair(s), need {MATURITY_MIN_BIAS_PAIRS}",
+        )
+        criteria["bias_precision"] = (
+            stderr is not None and stderr <= MATURITY_MAX_BIAS_STDERR_C,
+            f"stderr {stderr:.2f}C, need <= {MATURITY_MAX_BIAS_STDERR_C}"
+            if stderr is not None else "no bias measured",
+        )
+        stable, detail = _bias_split_half(errors)
+        criteria["bias_stability"] = (bool(stable), detail)
+    except Exception as exc:  # noqa: BLE001
+        criteria["bias_pairs"] = (False, f"unreadable ({exc})")
+        criteria["bias_precision"] = (False, "not evaluated")
+        criteria["bias_stability"] = (False, "not evaluated")
+
+    try:
+        history = storage.load_position_history(station_icao, limit=1000)
+        sims = [p for p in history if getattr(p, "execution_mode", "") == "simulation"]
+        criteria["order_path"] = (
+            len(sims) >= MATURITY_MIN_SIMULATED_ORDERS,
+            f"{len(sims)} simulated order(s) resolved, need {MATURITY_MIN_SIMULATED_ORDERS}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        criteria["order_path"] = (False, f"unreadable ({exc})")
+
+    return {
+        "station": station_icao,
+        "mature": all(passed for passed, _ in criteria.values()),
+        "criteria": criteria,
+    }
+
+
+def station_maturity(station_icao: str) -> str:
+    """
+    "mature" or "exploratory", DERIVED from stored evidence.
+
+    Cached per process: it reads storage and is consulted once per candidate
+    entry. The criteria move on the timescale of days, so a long-lived
+    daemon picking up a promotion at its next restart is the correct
+    granularity -- and it means a station cannot be promoted mid-cycle by a
+    row landing halfway through an evaluation.
+    """
+    override = MATURITY_OVERRIDE.get(station_icao)
+    if override:
+        maturity, why = override
+        print(
+            f"[config] MATURITY OVERRIDE: {station_icao} forced to '{maturity}' by "
+            f"config.MATURITY_OVERRIDE, bypassing the measured criteria. Reason: {why}"
+        )
+        return maturity
+
+    if station_icao in _maturity_cache:
+        return _maturity_cache[station_icao]
+    result = "mature" if maturity_report(station_icao)["mature"] else "exploratory"
+    _maturity_cache[station_icao] = result
+    return result
+
+
+def print_maturity_report(station_icao: str) -> None:
+    """Human-readable criterion-by-criterion breakdown."""
+    report = maturity_report(station_icao)
+    verdict = "MATURE" if report["mature"] else "exploratory"
+    print(f"{station_icao}: {verdict}")
+    for name, (passed, detail) in report["criteria"].items():
+        print(f"  [{'ok' if passed else '--'}] {name:<16} {detail}")
+
+
+# Built from the measured criteria, for readers that want the whole mapping
+# (the backtest manifest, paper_trading_report). Gating code must call
+# station_maturity() instead: this is evaluated once at import, and a
+# station promoted later in the process's life would not appear here.
+class _MaturityMapping(dict):
+    """dict-alike that derives on access, so .get() stays honest."""
+
+    def __getitem__(self, key):
+        return station_maturity(key)
+
+    def get(self, key, default="exploratory"):
+        if key not in STATIONS:
+            return default
+        return station_maturity(key)
+
+    def items(self):
+        return [(icao, station_maturity(icao)) for icao in STATIONS]
+
+    def __contains__(self, key):
+        return key in STATIONS
+
+    def keys(self):
+        return STATIONS.keys()
+
+    def values(self):
+        return [station_maturity(icao) for icao in STATIONS]
+
+    def __iter__(self):
+        return iter(STATIONS)
+
+    def __len__(self):
+        return len(STATIONS)
+
+
+STATION_MATURITY = _MaturityMapping()

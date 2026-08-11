@@ -51,10 +51,31 @@ def test_every_station_has_a_maturity_entry():
         assert icao in config.STATION_MATURITY, f"{icao}: missing from config.STATION_MATURITY"
 
 
-def test_exactly_one_mature_station():
-    mature = [icao for icao, m in config.STATION_MATURITY.items() if m == "mature"]
-    assert mature == ["WSSS"], (
-        f"expected only WSSS to be 'mature' (confirmed bias-correction edge), got: {mature}"
+def test_exactly_one_mature_station_in_the_frozen_snapshot():
+    """
+    The SNAPSHOT, which is what the backtest replica reads. The live answer
+    comes from config.station_maturity() and is measured from storage -- it
+    is not pinned here, because pinning a derived value to a literal is how
+    the literal became the authority in the first place.
+    """
+    mature = [icao for icao, m in config.MATURITY_SNAPSHOT.items() if m == "mature"]
+    assert mature == ["WSSS"], f"expected only WSSS in the snapshot, got: {mature}"
+
+
+def test_the_snapshot_covers_the_whole_registry():
+    """A station missing from the snapshot would replay as exploratory silently."""
+    assert set(config.MATURITY_SNAPSHOT) == set(config.STATIONS)
+
+
+def test_maturity_overrides_are_empty_by_default():
+    """
+    An override trades on something other than the evidence. It should be
+    visible in a diff and require a written reason -- never be the quiet
+    default the whole thing used to be.
+    """
+    assert config.MATURITY_OVERRIDE == {}, (
+        f"maturity overrides in effect: {config.MATURITY_OVERRIDE} -- each bypasses "
+        f"the measured criteria for the gate that authorises real money"
     )
 
 

@@ -63,6 +63,14 @@ def captured(monkeypatch):
     )
     monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [])
     monkeypatch.setattr(storage, "load_position_history", lambda *a, **kw: [])
+    # The audit trail too. Without this, every test that exercises a live
+    # entry writes a real row into whatever config.DB_PATH points at -- the
+    # dev database -- and repeated suite runs accumulate past
+    # LIVE_MAX_ORDERS_PER_DAY, so tests start failing on yesterday's runs.
+    # Tests that mean to exercise the audit trail use the live_db fixture,
+    # which points DB_PATH at a tmp_path instead.
+    monkeypatch.setattr(storage, "record_live_order_attempt", lambda **kw: None)
+    monkeypatch.setattr(storage, "count_live_order_attempts", lambda kind, since: 0)
     return {"opened": opened, "closed": closed}
 
 

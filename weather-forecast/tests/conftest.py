@@ -369,3 +369,25 @@ def quiet_run():
             return engine.run(**kwargs)
 
     return _run
+
+
+@pytest.fixture(autouse=True)
+def _deterministic_maturity(monkeypatch):
+    """
+    Pin station maturity to config.MATURITY_SNAPSHOT for every test.
+
+    config.station_maturity() is DERIVED from stored evidence -- observation
+    counts, bias pairs and stability, resolved simulated orders. That is the
+    right behaviour and the whole point of it being measured, but it makes
+    every test that merely needs "WSSS is mature" depend on ambient database
+    state: on an empty dev database nothing is mature, and forty tests about
+    order mechanics fail for a reason that has nothing to do with what they
+    are testing.
+
+    Pre-seeding the cache rather than stubbing the function keeps the real
+    code path intact. Tests about the CRITERION itself clear the cache and
+    let it compute for real.
+    """
+    import config
+
+    monkeypatch.setattr(config, "_maturity_cache", dict(config.MATURITY_SNAPSHOT))
