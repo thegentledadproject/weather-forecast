@@ -183,30 +183,29 @@ def _live_budget_breach(size_usd: float) -> Optional[str]:
             f"LIVE_MAX_TOTAL_EXPOSURE_USD ceiling of ${config.LIVE_MAX_TOTAL_EXPOSURE_USD:.2f}"
         )
 
+    # SUBMISSIONS, not fills. This used to count rows in `positions`, and an
+    # unfilled FOK writes no position -- deliberately, since a stored position
+    # with no shares behind it is the worst thing this module can produce. The
+    # consequence was that a day of two hundred killed orders consumed none of
+    # the ten-order budget: a rate limit meant to bound how hard this system
+    # hammers the exchange after an upstream fault, measured on the one
+    # outcome a fault does not produce.
+    #
+    # Exits are counted in the same table but NOT against this cap. An exit
+    # must never be rate-limited; the audit trail still wants them.
     today = datetime.now(timezone.utc).date().isoformat()
-    todays_orders = [
-        p for p in _all_live_positions()
-        if p.entry_time and p.entry_time[:10] == today
-    ]
-    if len(todays_orders) >= config.LIVE_MAX_ORDERS_PER_DAY:
+    submitted = storage.count_live_order_attempts("entry", today)
+    if submitted is None:
         return (
-            f"{len(todays_orders)} live order(s) already submitted today, at the "
+            "could not read today's live order count -- refusing to authorise on an "
+            "unenforceable rate limit (a cap that fails open is not a cap)"
+        )
+    if submitted >= config.LIVE_MAX_ORDERS_PER_DAY:
+        return (
+            f"{submitted} live order(s) already SUBMITTED today (filled or not), at the "
             f"LIVE_MAX_ORDERS_PER_DAY limit of {config.LIVE_MAX_ORDERS_PER_DAY}"
         )
     return None
-
-
-def _all_live_positions() -> list:
-    """
-    Every live position, open or closed. The daily order counter has to
-    include closed ones: a position opened and stopped out an hour later
-    still consumed one of the day's orders, and counting only open
-    positions would let a bad day reset its own limit by losing.
-    """
-    positions = list(storage.load_open_positions(is_paper=False))
-    for icao in config.STATIONS:
-        positions += storage.load_position_history(icao, limit=1000, is_paper=False)
-    return [p for p in positions if getattr(p, "execution_mode", "paper") == "live"]
 
 
 def _resolved_size_ok(spec, decision) -> tuple:
@@ -277,6 +276,42 @@ def _resolved_size_ok(spec, decision) -> tuple:
         note += f", slippage {slippage:.1%}, net EV {decision.net_ev_at_size:+.1%} -> {net_ev:+.1%}"
 
     return True, note
+
+
+def _record_attempt(kind, station_icao, spec, result, target_date=None,
+                    bucket_c=None, side="") -> None:
+    """
+    Append one real-money submission to the audit trail.
+
+    Called for LIVE submissions only, on every outcome -- filled, killed and
+    errored alike. That is the whole point: the daily cap counts submissions,
+    and a rejected order previously left no trace anywhere outside the
+    process log.
+
+    Never raises. Failing to write the audit row must not undo an order that
+    has already reached the exchange; the loud complaint is the right
+    outcome, a traceback here is not.
+    """
+    if result.filled:
+        outcome = "filled"
+    elif result.submitted:
+        outcome = "killed"
+    else:
+        outcome = "not_submitted"
+    try:
+        storage.record_live_order_attempt(
+            kind=kind, station_icao=station_icao, outcome=outcome,
+            target_date=target_date, bucket_c=bucket_c, side=side,
+            notional_usd=spec.notional_usd, size_shares=spec.size_shares,
+            limit_price=spec.limit_price, order_id=result.order_id,
+            detail=result.error or spec.reason,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[executor] WARNING: could not record the live {kind} attempt for "
+            f"{station_icao} ({outcome}): {exc}. The order itself is unaffected, but "
+            f"LIVE_MAX_ORDERS_PER_DAY is now under-counting."
+        )
 
 
 def _price_drift_ok(spec_price: float, decided_price: float) -> tuple:
@@ -551,6 +586,11 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
 
     result = wallet_client.submit_order(spec, live=(mode == "live"))
 
+    if mode == "live":
+        _record_attempt("entry", decision.station_icao, spec, result,
+                        target_date=decision.target_date, bucket_c=decision.bucket_c,
+                        side=decision.side)
+
     if mode == "simulation":
         print(
             f"[executor] SIMULATION: {label} order fully resolved but NOT submitted -- "
@@ -757,6 +797,11 @@ def _close_via_order_path(
         return
 
     result = wallet_client.submit_order(spec, live=(mode == "live"))
+
+    if mode == "live":
+        _record_attempt("exit", position.station_icao, spec, result,
+                        target_date=position.target_date, bucket_c=position.bucket_c,
+                        side=position.side)
 
     if mode == "simulation":
         print(

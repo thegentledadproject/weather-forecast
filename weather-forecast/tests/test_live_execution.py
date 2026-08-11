@@ -1382,3 +1382,156 @@ def test_scheduler_warns_at_startup():
     assert "warn_about_unmanageable_live_positions" in called, (
         "scheduler.py must run the unmanageable-live-position check at startup"
     )
+
+
+# --------------------------------------------------------------------------
+# The daily cap counts SUBMISSIONS, not fills
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def live_db(tmp_path, monkeypatch):
+    """A real throwaway database, so the audit table is genuinely exercised."""
+    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
+    storage._connect().close()
+    monkeypatch.setattr(
+        wallet_client, "reconcile_cached",
+        lambda positions: wallet_client.Reconciliation(ok=True, checked=True, reason="stubbed"),
+    )
+
+
+def _attempt(kind="entry", outcome="killed"):
+    storage.record_live_order_attempt(
+        kind=kind, station_icao="WSSS", outcome=outcome,
+        bucket_c=33, side="YES", notional_usd=1.95,
+    )
+
+
+def test_killed_orders_consume_the_daily_budget(live_db):
+    """
+    THE defect. An unfilled FOK writes no position -- correctly -- so a cap
+    counting `positions` never decremented on a killed order. A day of two
+    hundred rejections consumed none of the ten-order budget.
+    """
+    for _ in range(config.LIVE_MAX_ORDERS_PER_DAY):
+        _attempt(outcome="killed")
+
+    breach = executor._live_budget_breach(1.95)
+
+    assert breach is not None
+    assert "SUBMITTED today" in breach
+    assert "filled or not" in breach
+
+
+def test_a_fresh_day_starts_with_a_full_budget(live_db):
+    assert executor._live_budget_breach(1.95) is None
+
+
+def test_exits_do_not_consume_the_entry_budget(live_db):
+    """An exit must never be rate-limited, though it is still audited."""
+    for _ in range(config.LIVE_MAX_ORDERS_PER_DAY * 2):
+        _attempt(kind="exit", outcome="filled")
+
+    assert executor._live_budget_breach(1.95) is None
+    assert storage.count_live_order_attempts("exit", "2000-01-01") == config.LIVE_MAX_ORDERS_PER_DAY * 2
+
+
+def test_an_unreadable_count_fails_closed(live_db, monkeypatch):
+    """A rate limit that fails open is not a rate limit."""
+    monkeypatch.setattr(storage, "count_live_order_attempts", lambda kind, since: None)
+
+    breach = executor._live_budget_breach(1.95)
+
+    assert breach is not None
+    assert "unenforceable rate limit" in breach
+
+
+def test_yesterdays_orders_do_not_count_against_today(live_db):
+    with storage._db() as conn:
+        conn.execute(
+            "INSERT INTO live_order_attempts (ts, kind, station_icao, outcome) VALUES (?,?,?,?)",
+            ("2020-01-01T00:00:00+00:00", "entry", "WSSS", "filled"),
+        )
+    assert executor._live_budget_breach(1.95) is None
+
+
+# --- the audit trail -------------------------------------------------------
+
+def test_a_live_submission_is_recorded_whatever_the_outcome(live_db, monkeypatch, mode, capsys):
+    mode("live")
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=False, simulated=False, spec=spec, error="killed unfilled",
+        ),
+    )
+
+    executor.open_position(make_decision(size_usd=1.00, price=0.30))
+
+    rows = storage.load_live_order_attempts()
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "entry"
+    assert rows[0]["outcome"] == "killed"
+    assert rows[0]["detail"] == "killed unfilled"
+    # ...and no position, because nothing filled.
+    assert storage.load_open_positions() == []
+
+
+def test_a_filled_submission_records_its_order_id(live_db, monkeypatch, mode):
+    mode("live")
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=True, simulated=False, spec=spec,
+            order_id="0xfeed", fill_price=spec.expected_price, fill_shares=spec.size_shares,
+        ),
+    )
+
+    executor.open_position(make_decision(size_usd=1.00, price=0.30))
+
+    rows = storage.load_live_order_attempts()
+    assert rows[0]["outcome"] == "filled"
+    assert rows[0]["order_id"] == "0xfeed"
+
+
+def test_simulation_submissions_are_not_audited(live_db, monkeypatch, mode):
+    """The table is the REAL-money audit trail; simulation would pollute it."""
+    mode("simulation")
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
+
+    executor.open_position(make_decision(size_usd=1.00, price=0.30))
+
+    assert storage.load_live_order_attempts() == []
+
+
+def test_a_failed_audit_write_does_not_undo_the_order(live_db, monkeypatch, mode, capsys):
+    """
+    The order has already reached the exchange. Losing the bookkeeping must
+    complain loudly, not raise.
+    """
+    mode("live")
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=True, simulated=False, spec=spec,
+            order_id="0xfeed", fill_price=spec.expected_price, fill_shares=spec.size_shares,
+        ),
+    )
+
+    def _broken(**kw):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(storage, "record_live_order_attempt", _broken)
+
+    executor.open_position(make_decision(size_usd=1.00, price=0.30))
+    out = capsys.readouterr().out
+
+    assert "could not record the live entry attempt" in out
+    assert "under-counting" in out
+    assert len(storage.load_open_positions()) == 1, "the fill must still be recorded"

@@ -17,7 +17,7 @@ config.py, models.py (local)
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import List, Optional
 
 import config
@@ -128,6 +128,29 @@ def _connect() -> sqlite3.Connection:
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
+
+    # Every real-money order SUBMISSION, filled or not. Separate from
+    # `positions` because an unfilled FOK deliberately writes no position --
+    # see record_live_order_attempt() for why that broke the daily cap.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS live_order_attempts (
+            ts TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            station_icao TEXT NOT NULL,
+            target_date TEXT,
+            bucket_c INTEGER,
+            side TEXT,
+            notional_usd REAL,
+            size_shares REAL,
+            limit_price REAL,
+            outcome TEXT NOT NULL,
+            order_id TEXT,
+            detail TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_loa_ts ON live_order_attempts(kind, ts)")
     return conn
 
 
@@ -410,3 +433,99 @@ def load_position_history(station_icao: str, limit: int = 100, is_paper: Optiona
         params.append(limit)
         rows = conn.execute(query, params).fetchall()
     return [_row_to_position(r) for r in rows]
+
+
+# --------------------------------------------------------------------------
+# Live order attempts
+# --------------------------------------------------------------------------
+
+def record_live_order_attempt(
+    kind: str,
+    station_icao: str,
+    outcome: str,
+    target_date=None,
+    bucket_c: Optional[int] = None,
+    side: str = "",
+    notional_usd: Optional[float] = None,
+    size_shares: Optional[float] = None,
+    limit_price: Optional[float] = None,
+    order_id: Optional[str] = None,
+    detail: str = "",
+) -> None:
+    """
+    Append one real-money order SUBMISSION to the audit trail.
+
+    WHY THIS TABLE EXISTS SEPARATELY FROM `positions`. An unfilled FOK
+    writes no position, deliberately -- a stored position with no shares
+    behind it is the worst thing this codebase can produce. But that left
+    config.LIVE_MAX_ORDERS_PER_DAY, documented as "submitted entries per UTC
+    day", counting rows in `positions`, i.e. counting FILLS. A day of two
+    hundred killed orders consumed none of the ten-order budget. The rate
+    limit that exists to bound how hard this system hammers the exchange
+    after an upstream fault was measured on the one outcome a fault does not
+    produce.
+
+    It is also the only record of a rejected order anywhere: before this,
+    an order that was built, submitted and refused left no trace at all
+    outside the process log.
+
+    APPEND-ONLY, and never updated. `kind` is "entry" or "exit"; only
+    entries feed the daily cap (an exit must never be rate-limited), but
+    both are recorded because both are real requests to the exchange.
+    """
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO live_order_attempts "
+            "(ts, kind, station_icao, target_date, bucket_c, side, notional_usd, "
+            " size_shares, limit_price, outcome, order_id, detail) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                kind,
+                station_icao,
+                target_date.isoformat() if hasattr(target_date, "isoformat") else (target_date or ""),
+                bucket_c,
+                side,
+                notional_usd,
+                size_shares,
+                limit_price,
+                outcome,
+                order_id,
+                detail[:500],
+            ),
+        )
+
+
+def count_live_order_attempts(kind: str, since_iso: str) -> Optional[int]:
+    """
+    How many live orders of one kind were SUBMITTED at or after `since_iso`.
+
+    Returns None if the count could not be read. None is not zero: callers
+    gating on this must treat an unreadable count as "cannot authorise",
+    the same way the reconciliation check does -- a rate limit that fails
+    open is not a rate limit.
+    """
+    try:
+        with _db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM live_order_attempts WHERE kind = ? AND ts >= ?",
+                (kind, since_iso),
+            ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"[storage] could not count live order attempts: {exc}")
+        return None
+
+
+def load_live_order_attempts(limit: int = 50) -> List[dict]:
+    """Most recent submissions first -- the audit trail, for humans."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT ts, kind, station_icao, target_date, bucket_c, side, notional_usd, "
+            "       size_shares, limit_price, outcome, order_id, detail "
+            "FROM live_order_attempts ORDER BY ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    keys = ("ts", "kind", "station_icao", "target_date", "bucket_c", "side",
+            "notional_usd", "size_shares", "limit_price", "outcome", "order_id", "detail")
+    return [dict(zip(keys, r)) for r in rows]
