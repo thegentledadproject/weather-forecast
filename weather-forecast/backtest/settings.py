@@ -67,7 +67,17 @@ PESSIMISTIC_DEPTH_USD = 300.0
 
 # Minimum fraction of simulated ticks that must have usable depth data
 # before a depth-constrained run's results are worth reporting at all.
-MIN_DEPTH_COVERAGE = 0.5
+#
+# MUST stay at or below the structural ceiling set by
+# ev_engine.DEPTH_CAPTURE_EVERY_N_PASSES: capture fetches order-book depth
+# on every Nth pass, so at N=3 at most ~1/3 of captured rows can ever
+# carry depth (observed 28-30%/day since 2026-08-06). The original 0.5 was
+# therefore unsatisfiable -- it suppressed the headline metrics of every
+# observed-depth run no matter how much data accumulated. 0.25 sits under
+# the ceiling while still refusing runs built on almost no depth at all,
+# which is what this gate is actually for. Raising it above ~0.30 requires
+# lowering N first (and paying 3x the /book traffic for backtest-only data).
+MIN_DEPTH_COVERAGE = 0.25
 
 # Backtest fee assumption. 0.0 matches ev_engine's current live default;
 # override per-run to test fee sensitivity rather than editing this.
