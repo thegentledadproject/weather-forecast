@@ -150,11 +150,24 @@ OBSERVATION_WINDOW_DAYS = 30
 # Rejection reasons are long human sentences; the funnel needs stable
 # short keys. Matched by prefix, longest-lived first, so a reworded tail
 # of a reason string cannot silently reclassify a gate.
+# One entry per rejection site in entry_sim.evaluate_entry_sim, plus the
+# post-hoc reasons apply_portfolio_budget appends. MUST be kept in step
+# with entry_sim's GATE_COUNT: a gate whose reason string is missing here
+# lands in "other", and a funnel that says "other=191" cannot tell you
+# why a station traded nothing. That is exactly what happened to the four
+# gates added between 2026-08-05 and 2026-08-09 (entry-price ceiling,
+# edge materiality, stop-out cooldown, position-history unreadable) --
+# the 2026-08-12 cohort run reported 100% "other" for nine stations and
+# the reason had to be reverse-engineered from source.
 _REASON_PREFIXES: Tuple[Tuple[str, str], ...] = (
     ("VETOED: raw edge", "raw_edge_veto"),
     ("VETOED: same-bucket YES+NO conflict", "same_bucket_conflict"),
+    ("Entry price", "entry_price_ceiling"),
+    ("Absolute edge", "edge_immaterial"),
     ("Open positions unreadable", "open_positions_unreadable"),
     ("Per-bucket cap", "per_bucket_cap"),
+    ("Position history unreadable", "position_history_unreadable"),
+    ("Stop-out cooldown", "stop_out_cooldown"),
     ("No positive edge", "no_positive_edge"),
     ("Order book depth unavailable", "depth_unavailable"),
     ("Depth-capped size", "depth_capped_too_small"),
@@ -193,7 +206,17 @@ class BacktestRun:
 
 
 def _reason_key(reason: str) -> str:
-    """Stable funnel key for an EntryDecision reason string."""
+    """
+    Stable funnel key for an EntryDecision reason string.
+
+    The budget check is first because apply_portfolio_budget() APPENDS to
+    a decision's existing reason rather than replacing it, so a leg that
+    was approved on its own merits and then refused for budget still
+    starts with "Approved:" -- prefix matching alone files it under
+    `approved` and the funnel undercounts budget refusals.
+    """
+    if "budget exhausted" in reason:
+        return "station_day_budget_exhausted"
     for prefix, key in _REASON_PREFIXES:
         if reason.startswith(prefix):
             return key
