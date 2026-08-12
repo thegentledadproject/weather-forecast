@@ -151,3 +151,40 @@ def test_the_cap_runs_before_any_market_call(monkeypatch):
 
     monkeypatch.setattr(manual_trigger.market_discovery, "discover_token_map", _explode)
     assert _run(monkeypatch, open_count=config.MAX_OPEN_POSITIONS_PER_BUCKET) == 1
+
+
+def test_no_model_means_net_ev_is_none_not_zero(monkeypatch):
+    """
+    None is "unknown"; 0.0 is "measured as exactly break-even". Conflating
+    them made executor._resolved_size_ok() -- which refuses an upsized order
+    whose net EV is not positive -- reject EVERY manual order, including on a
+    bucket with $216 of visible depth. Found by running the chain end to end.
+    """
+    import inspect
+
+    src = inspect.getsource(manual_trigger.main)
+    assert "net_ev_at_size=None" in src, (
+        "manual_trigger must report net EV as None when no model ran; a 0.0 "
+        "sentinel is read downstream as a real break-even measurement"
+    )
+
+
+def test_the_size_recheck_skips_the_ev_test_when_there_is_no_model_number(monkeypatch):
+    import executor
+    from clients import market_client
+    from models import EntryDecision
+    from datetime import date as _date
+
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.0)
+    decision = EntryDecision(
+        station_icao="WSSS", target_date=_date(2026, 8, 12), bucket_c=32, side="YES",
+        kelly_fraction_raw=0.0, kelly_fraction_applied=0.0, recommended_size_usd=1.0,
+        available_depth_usd=216.0, slippage_at_size_pct=0.0, net_ev_at_size=None,
+        approved=True, reason="manual", station_maturity="mature",
+        entry_price=0.69, token_id="TOK",
+    )
+    spec = type("S", (), {"notional_usd": 3.45, "limit_price": 0.70, "size_shares": 5.0})()
+
+    ok, note = executor._resolved_size_ok(spec, decision)
+
+    assert ok, f"an upsized manual order was refused for lack of a model number: {note}"

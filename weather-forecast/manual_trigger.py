@@ -289,7 +289,14 @@ def main():
         recommended_size_usd=size_usd,
         available_depth_usd=depth,
         slippage_at_size_pct=slippage,
-        net_ev_at_size=0.0,
+        # None, NOT 0.0. There is no model number here and the two are
+        # different claims: None is "unknown", 0.0 is "measured as exactly
+        # break-even". executor._resolved_size_ok() re-checks net EV when the
+        # exchange minimum upsizes an order and refuses anything that is not
+        # positive -- fed a sentinel 0.0 it refused every manual order,
+        # including on a bucket with $216 of depth. Caught by running the
+        # chain end to end; the guard skips the EV test when it is None.
+        net_ev_at_size=None,
         approved=True,
         reason="manual_trigger -- operator asserted, model gates bypassed",
         station_maturity=config.STATION_MATURITY.get(args.station, "exploratory"),

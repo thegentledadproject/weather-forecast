@@ -208,6 +208,18 @@ def _live_budget_breach(size_usd: float) -> Optional[str]:
     return None
 
 
+def _fmt_net_ev(value) -> str:
+    """
+    Net EV for display, tolerating None.
+
+    None is not 0.0 here: manual_trigger.py bypasses the model entirely and
+    reports None because no EV was computed, while 0.0 would claim it was
+    measured at exactly break-even. Formatting one as the other is how a
+    sentinel becomes a number nobody questions.
+    """
+    return "unknown (no model ran)" if value is None else format(value, "+.1%")
+
+
 def _resolved_size_ok(spec, decision) -> tuple:
     """
     Re-check the size-dependent gates at the notional that will ACTUALLY be
@@ -521,7 +533,7 @@ def open_position(decision: EntryDecision) -> None:
             f"\n[ACTION NEEDED] {decision.station_icao} {decision.bucket_c}°C ({decision.side}) -- OPEN ENTRY\n"
             f"  Price: {decision.entry_price:.3f}  Size: ${decision.recommended_size_usd:.2f}  "
             f"({decision.station_maturity} station)\n"
-            f"  Net EV at size: {decision.net_ev_at_size:+.1%}\n"
+            f"  Net EV at size: {_fmt_net_ev(decision.net_ev_at_size)}\n"
             f"  Recommended: BUY {decision.recommended_size_usd:.2f} USD of this position now.\n"
         )
         storage.open_position(_position(decision.recommended_size_usd))
@@ -531,7 +543,7 @@ def open_position(decision: EntryDecision) -> None:
         print(
             f"[executor] PAPER FILL: {decision.station_icao} {decision.bucket_c}°{decision.side} "
             f"@ {decision.entry_price:.3f}, size=${decision.recommended_size_usd:.2f} "
-            f"(net EV at entry: {decision.net_ev_at_size:+.1%}) -- zero real risk, auto-filled."
+            f"(net EV at entry: {_fmt_net_ev(decision.net_ev_at_size)}) -- zero real risk, auto-filled."
         )
         storage.open_position(_position(decision.recommended_size_usd))
         return
