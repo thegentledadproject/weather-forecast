@@ -1102,14 +1102,26 @@ def live_mode_is_permitted(station_icao: str, execution_mode: str) -> bool:
     """
     Whether `station_icao` may run in `execution_mode` at all.
 
-    Distinct from live_size_cap_usd(): this is the admission check executor
-    uses to REFUSE a simulation/live mode set on a station that has not
-    earned it, rather than silently falling back to Kelly sizing on the
-    real-money path.
+    SIMULATION REQUIRES THE ALLOWLIST ONLY. LIVE ALSO REQUIRES MATURITY.
+    That asymmetry is load-bearing, and getting it wrong creates a trap:
+    maturity depends on order_path evidence, order_path evidence comes from
+    resolved SIMULATED orders, so gating simulation behind maturity means a
+    station that loses its certification can never regain it -- it is barred
+    from the only activity that produces the evidence.
+
+    Simulation submits nothing and spends nothing, so there is no risk to
+    gate. The thing worth gating is real money, and that is what maturity
+    now gates. A station demoted by the measured criteria therefore keeps
+    building its record and stops being able to spend, which is the correct
+    direction for both.
     """
     if execution_mode not in ("simulation", "live"):
         return True
-    return live_size_cap_usd(station_icao, execution_mode) is not None
+    if station_icao not in LIVE_TRADING_STATIONS:
+        return False
+    if execution_mode == "simulation":
+        return True
+    return station_maturity(station_icao) == "mature"
 
 
 # --- Predictive spread (calibration.estimate_std_dev) ----------------------
@@ -1292,19 +1304,16 @@ RECONCILE_CACHE_TTL_S = 60
 # either never pass or, worse, pass on noise. It is named here so nobody
 # assumes it is implied by the word "mature".
 #
-# WHAT IS MISSING AND WOULD MATTER MOST
-# --------------------------------------
-# CALIBRATION AGAINST THE MARKET: brier_model < brier_market on this
-# station's own settled days. Beating a uniform guess (measured 2026-08-10:
-# Brier 0.72 vs 0.91, +11.6% skill) says nothing about beating the book, and
-# the book is the counterparty. It is not a criterion below because scoring
-# it honestly needs point-in-time model probabilities -- the same
-# reconstruction problem that keeps forecast_bias_c pinned at 0.0 inside the
-# backtest -- and a criterion computed with lookahead is worse than none.
+# CALIBRATION AGAINST THE MARKET is now a criterion -- see
+# calibration_vs_market() below. It reads brier_model vs brier_market from
+# the station's most recent backtest, which is the only honest source of
+# point-in-time model probabilities. That closes the gap this section used
+# to describe.
 #
-# So "mature" here means THE MODEL IS MEASURABLY WELL-BEHAVED AT THIS
-# STATION. It does not mean the station makes money. Those are different
-# claims and only one of them is currently checkable.
+# "mature" therefore now means: the model is measurably well-behaved at this
+# station AND its probabilities have beaten the market on a replayed window
+# under the current code. It still does not mean the station makes money --
+# see the P&L note above.
 
 # Settlement-grade observations. Same threshold the collection-first entry
 # gate uses; a station that cannot open a paper position has no business
@@ -1400,6 +1409,165 @@ def _bias_split_half(errors) -> tuple:
                     f"{MATURITY_BIAS_SPLIT_HALF_SIGMAS:.0f}x{combined:.2f} combined SE")
 
 
+# --- Maturity criterion: does the model beat the MARKET? ------------------
+# The criterion that most deserves the word "mature", and the one the first
+# measured version shipped without.
+#
+# Beating a uniform guess proves nothing: measured 2026-08-10 the bucket
+# probabilities scored Brier 0.72 against 0.91 for uniform, +11.6% skill, and
+# that number is compatible with losing money on every trade. The market is
+# the counterparty. If its prices are better-calibrated than the model's
+# probabilities, then every "edge" the EV table reports is the model being
+# wrong in a direction the book already knows about.
+#
+# THE SOURCE IS THE BACKTEST, deliberately. Scoring this needs POINT-IN-TIME
+# model probabilities -- what the model believed on the morning of a day that
+# has since settled -- and the live path keeps only the latest EV snapshot
+# (ev_engine.save_ev_snapshot overwrites ev_latest_<ICAO>.json). Recomputing
+# past probabilities from today's record would be lookahead, the same
+# reconstruction problem that keeps forecast_bias_c pinned at 0.0 inside the
+# engine. backtest/report._brier_scores() already computes both numbers
+# honestly, over the entries a replay actually took, scoring the model's
+# side-adjusted probability and the price paid against the settled bucket.
+#
+# WHAT THIS INHERITS FROM THE BACKTEST, and cannot fix here: replays price
+# entries off the BID for any snapshot captured before 2026-08-10, because no
+# ask was stored. brier_market is therefore scoring a price that was not
+# always achievable. Both arms see the same prices so the comparison is not
+# meaningless, but it is not clean either, and it will only become clean once
+# enough ask-captured history accumulates.
+
+# Scored entries required before the comparison means anything. A Brier
+# difference over a handful of trades is noise; this is the same reasoning
+# behind backtest/compare.py's refusal to call a winner below 30, set lower
+# here because a Brier score uses every entry rather than every closed trade.
+MATURITY_MIN_BRIER_ENTRIES = 20
+
+# The replayed window must END within this many days of today. A model
+# certified on July's weather is not certified on today's.
+MATURITY_BRIER_MAX_WINDOW_AGE_DAYS = 14
+
+# The run's manifest git_sha must match the current checkout.
+#
+# DELIBERATELY STRICT: the code is what produced the number, so changing the
+# code invalidates it. This session alone changed the blend weight, replaced
+# the spread estimator and moved entry pricing to the ask -- every one of
+# which moves brier_model, and all four runs on the box predate them.
+# Certifying a station on a number produced by superseded code is exactly
+# the kind of stale evidence the whole measured-maturity change exists to
+# stop.
+#
+# The operational cost is real: after any commit, a station is uncertified
+# until a fresh backtest runs. Set False to accept older evidence, knowing
+# what that means.
+MATURITY_BRIER_REQUIRE_CURRENT_CODE = True
+
+
+def _latest_backtest_summary(station_icao: str):
+    """
+    The most recently generated backtest summary for one station, as
+    (summary_dict, manifest_dict), or (None, reason).
+    """
+    import json
+
+    from backtest import settings as bt_settings
+
+    base = Path(bt_settings.BACKTESTS_OUT_DIR)
+    if not base.is_dir():
+        return None, f"no backtest output directory at {base}"
+
+    best = None
+    for run_dir in base.iterdir():
+        summary_path = run_dir / "summary.json"
+        if not summary_path.is_file():
+            continue
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if summary.get("station_icao") != station_icao:
+            continue
+        if best is None or str(summary.get("generated_at", "")) > str(best[0].get("generated_at", "")):
+            manifest = {}
+            manifest_path = run_dir / "manifest.json"
+            if manifest_path.is_file():
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    manifest = {}
+            best = (summary, manifest)
+
+    if best is None:
+        return None, f"no backtest run found for {station_icao}"
+    return best, ""
+
+
+def _current_git_sha() -> Optional[str]:
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(Path(__file__).resolve().parent),
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def calibration_vs_market(station_icao: str) -> tuple:
+    """
+    (passed, detail) for "does this station's model beat the market?"
+
+    Fails on every kind of absence -- no run, too few entries, an unscorable
+    run, a stale window, superseded code. An unmeasured criterion is not a
+    satisfied one, and this is the criterion standing between a station and
+    real money.
+    """
+    from datetime import date as _date
+
+    found, reason = _latest_backtest_summary(station_icao)
+    if found is None:
+        return False, f"{reason} -- run `python -m backtest.cli run --station {station_icao} ...`"
+
+    summary, manifest = found
+    extras = summary.get("extras") or {}
+    model = extras.get("brier_model")
+    market = extras.get("brier_market")
+    n_entries = (summary.get("counters") or {}).get("n_entries") or 0
+    window = f"{summary.get('start_date')}..{summary.get('end_date')}"
+
+    if model is None or market is None:
+        return False, f"run {summary.get('run_id')} ({window}) scored nothing"
+
+    if n_entries < MATURITY_MIN_BRIER_ENTRIES:
+        return False, (f"only {n_entries} entry(s) scored in {window}, "
+                       f"need {MATURITY_MIN_BRIER_ENTRIES}")
+
+    if MATURITY_BRIER_REQUIRE_CURRENT_CODE:
+        run_sha = manifest.get("git_sha")
+        head = _current_git_sha()
+        if not run_sha or not head:
+            return False, "cannot confirm the run was produced by the current code"
+        if run_sha != head:
+            return False, (f"run was produced by {run_sha[:8]}, HEAD is {head[:8]} -- "
+                           f"the code that made this number has changed; re-run the backtest")
+
+    try:
+        end = _date.fromisoformat(str(summary.get("end_date")))
+        age = (_date.today() - end).days
+        if age > MATURITY_BRIER_MAX_WINDOW_AGE_DAYS:
+            return False, (f"window {window} ended {age} days ago, "
+                           f"stale past {MATURITY_BRIER_MAX_WINDOW_AGE_DAYS}")
+    except (TypeError, ValueError):
+        return False, f"unparseable window {window}"
+
+    if model < market:
+        return True, (f"model {model:.4f} beats market {market:.4f} "
+                      f"by {market - model:.4f} over {n_entries} entries in {window}")
+    return False, (f"model {model:.4f} LOSES to market {market:.4f} "
+                   f"by {model - market:.4f} over {n_entries} entries in {window}")
+
+
 def maturity_report(station_icao: str) -> dict:
     """
     Every maturity criterion for one station, with its value and verdict.
@@ -1455,6 +1623,11 @@ def maturity_report(station_icao: str) -> dict:
         )
     except Exception as exc:  # noqa: BLE001
         criteria["order_path"] = (False, f"unreadable ({exc})")
+
+    try:
+        criteria["beats_market"] = calibration_vs_market(station_icao)
+    except Exception as exc:  # noqa: BLE001
+        criteria["beats_market"] = (False, f"unreadable ({exc})")
 
     return {
         "station": station_icao,

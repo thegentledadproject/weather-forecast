@@ -28,6 +28,11 @@ def measured_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
     monkeypatch.setattr(config, "_maturity_cache", {})
     monkeypatch.setattr(config, "MATURITY_OVERRIDE", {})
+    # The beats-market criterion reads persisted backtest artifacts, which a
+    # tmp database has none of. Tests about the OTHER criteria pass it; the
+    # ones about this criterion patch it back and exercise it for real.
+    monkeypatch.setattr(config, "calibration_vs_market",
+                        lambda icao: (True, "stubbed for this test"))
     storage._connect().close()
 
 
@@ -227,3 +232,140 @@ def test_the_allowlist_is_still_required_as_well():
         "WMKK is not in LIVE_TRADING_STATIONS and must not be live-eligible "
         "however good its evidence"
     )
+
+
+# --------------------------------------------------------------------------
+# Does the model beat the MARKET?
+# --------------------------------------------------------------------------
+
+def _write_run(tmp_path, monkeypatch, station="WSSS", model=0.10, market=0.20,
+               n_entries=30, end="2026-08-09", sha=None, generated="2026-08-11T00:00:00+00:00"):
+    """A persisted backtest artifact set, the way report.write_artifacts lays it out."""
+    import json
+
+    from backtest import settings as bt_settings
+
+    base = tmp_path / "backtests"
+    run_dir = base / f"bt_{station}_{n_entries}_{model}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "summary.json").write_text(json.dumps({
+        "run_id": run_dir.name, "station_icao": station,
+        "start_date": "2026-07-28", "end_date": end,
+        "generated_at": generated,
+        "counters": {"n_entries": n_entries},
+        "extras": {"brier_model": model, "brier_market": market},
+    }), encoding="utf-8")
+    (run_dir / "manifest.json").write_text(json.dumps({
+        "git_sha": sha if sha is not None else (config._current_git_sha() or "deadbeef"),
+    }), encoding="utf-8")
+    monkeypatch.setattr(bt_settings, "BACKTESTS_OUT_DIR", str(base))
+    return run_dir
+
+
+@pytest.fixture
+def real_market_criterion(monkeypatch):
+    """Undo the autouse stub so the criterion computes for real."""
+    monkeypatch.setattr(config, "calibration_vs_market",
+                        config.__dict__["calibration_vs_market"].__wrapped__
+                        if hasattr(config.calibration_vs_market, "__wrapped__")
+                        else _real_calibration_vs_market)
+
+
+import config as _cfg_module
+_real_calibration_vs_market = _cfg_module.calibration_vs_market
+
+
+def test_a_model_that_beats_the_market_passes(tmp_path, monkeypatch, real_market_criterion):
+    _write_run(tmp_path, monkeypatch, model=0.10, market=0.20, n_entries=30)
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert passed
+    assert "beats market" in detail
+
+
+def test_a_model_that_loses_to_the_market_fails(tmp_path, monkeypatch, real_market_criterion):
+    """
+    The real WSSS result under current code on 2026-08-11: model 0.2046,
+    market 0.1318. Beating a uniform guess is not the test -- the market is
+    the counterparty, and if its prices are better calibrated then every
+    "edge" the EV table reports is the model being wrong in a direction the
+    book already knows about.
+    """
+    _write_run(tmp_path, monkeypatch, model=0.2046, market=0.1318, n_entries=30)
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert not passed
+    assert "LOSES to market" in detail
+
+
+def test_too_few_scored_entries_fails(tmp_path, monkeypatch, real_market_criterion):
+    """A Brier difference over five entries is noise, whichever way it points."""
+    _write_run(tmp_path, monkeypatch, model=0.10, market=0.20,
+               n_entries=config.MATURITY_MIN_BRIER_ENTRIES - 1)
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert not passed
+    assert "need" in detail
+
+
+def test_a_run_from_superseded_code_fails(tmp_path, monkeypatch, real_market_criterion):
+    """
+    The code is what produced the number. This session alone changed the
+    blend weight, the spread estimator and entry pricing -- each moves
+    brier_model, and every run on the box predated them.
+    """
+    _write_run(tmp_path, monkeypatch, model=0.10, market=0.20, n_entries=30, sha="0" * 40)
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert not passed
+    assert "code that made this number has changed" in detail
+
+
+def test_a_stale_window_fails(tmp_path, monkeypatch, real_market_criterion):
+    """A model certified on July's weather is not certified on today's."""
+    _write_run(tmp_path, monkeypatch, model=0.10, market=0.20, n_entries=30, end="2020-01-01")
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert not passed
+    assert "stale" in detail
+
+
+def test_no_backtest_at_all_fails_with_the_command_to_fix_it(tmp_path, monkeypatch,
+                                                             real_market_criterion):
+    from backtest import settings as bt_settings
+
+    monkeypatch.setattr(bt_settings, "BACKTESTS_OUT_DIR", str(tmp_path / "empty"))
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert not passed
+    assert "backtest.cli run" in detail
+
+
+def test_another_stations_run_does_not_certify_this_one(tmp_path, monkeypatch,
+                                                        real_market_criterion):
+    _write_run(tmp_path, monkeypatch, station="WMKK", model=0.10, market=0.20, n_entries=30)
+    passed, _ = config.calibration_vs_market("WSSS")
+
+    assert not passed
+
+
+# --------------------------------------------------------------------------
+# Simulation must not be gated on maturity
+# --------------------------------------------------------------------------
+
+def test_a_demoted_station_may_still_simulate():
+    """
+    THE TRAP this avoids: maturity needs order_path evidence, order_path
+    evidence comes from resolved SIMULATED orders. Gating simulation behind
+    maturity would mean a demoted station is barred from the only activity
+    that could restore it.
+    """
+    config._maturity_cache["WSSS"] = "exploratory"
+
+    assert config.live_mode_is_permitted("WSSS", "simulation") is True
+    assert config.live_mode_is_permitted("WSSS", "live") is False
+
+
+def test_simulation_still_requires_the_allowlist():
+    """Zero-risk is not the same as ungated."""
+    assert config.live_mode_is_permitted("WMKK", "simulation") is False
