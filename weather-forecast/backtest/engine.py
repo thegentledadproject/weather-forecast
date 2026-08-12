@@ -162,6 +162,10 @@ OBSERVATION_WINDOW_DAYS = 30
 _REASON_PREFIXES: Tuple[Tuple[str, str], ...] = (
     ("VETOED: raw edge", "raw_edge_veto"),
     ("VETOED: same-bucket YES+NO conflict", "same_bucket_conflict"),
+    # Emitted by entry_manager.collection_only_reason via
+    # collection_only_decision, not by an entry_sim reason= site -- which
+    # is why the AST test below scans both modules.
+    ("Collection-only", "collection_only"),
     ("Entry price", "entry_price_ceiling"),
     ("Absolute edge", "edge_immaterial"),
     ("Open positions unreadable", "open_positions_unreadable"),

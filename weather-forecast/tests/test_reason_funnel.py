@@ -26,12 +26,22 @@ PKG = Path(__file__).resolve().parent.parent
 
 def _literal_reason_prefixes():
     """
-    The literal head of every `reason=` string entry_sim assigns, taken
+    The literal head of every reason string the entry path can emit, taken
     from source so a new gate shows up here without anyone updating a
     fixture list. f-strings contribute their leading literal chunk, which
     is what _reason_key prefix-matches on.
+
+    Scans entry_manager too, not just entry_sim: the collection-first gate
+    builds its EntryDecision in entry_manager.collection_only_reason /
+    collection_only_decision and entry_sim returns it verbatim, so an
+    entry_sim-only scan missed "Collection-only" -- which is exactly the
+    string nine stations were rejected with while the funnel said "other".
     """
-    tree = ast.parse((PKG / "backtest" / "entry_sim.py").read_text(encoding="utf-8"))
+    sources = [
+        PKG / "backtest" / "entry_sim.py",
+        PKG / "entry_manager.py",
+    ]
+    tree = ast.parse("\n".join(p.read_text(encoding="utf-8") for p in sources))
     heads = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.keyword) or node.arg != "reason":
@@ -43,19 +53,35 @@ def _literal_reason_prefixes():
             first = value.values[0] if value.values else None
             if isinstance(first, ast.Constant) and isinstance(first.value, str):
                 heads.append(first.value)
+    def head_of(node):
+        """Leading string literal of a str constant or f-string, else None."""
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, ast.JoinedStr):
+            first = node.values[0] if node.values else None
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                return first.value
+        return None
+
     # _rejected(...) call sites pass the reason positionally.
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_rejected":
-            if not node.args:
-                continue
-            arg = node.args[0]
-            if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
-                heads.append(arg.value)
-            elif isinstance(arg, ast.JoinedStr):
-                first = arg.values[0] if arg.values else None
-                if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                    heads.append(first.value)
-    return [h for h in heads if h.strip()]
+            if node.args:
+                heads.append(head_of(node.args[0]))
+
+    # Functions that RETURN a reason string rather than assigning one --
+    # entry_manager.collection_only_reason is the load-bearing case: its
+    # returns are the collection-first gate's wording, and an earlier
+    # version of this scanner missed them entirely while still passing,
+    # which is how "Collection-only" stayed unmapped.
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.FunctionDef) and "reason" in node.name):
+            continue
+        for inner in ast.walk(node):
+            if isinstance(inner, ast.Return) and inner.value is not None:
+                heads.append(head_of(inner.value))
+
+    return [h for h in heads if h and h.strip()]
 
 
 def test_every_entry_sim_reason_is_classified():
