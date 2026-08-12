@@ -66,8 +66,22 @@ try:
         closed_positions.extend(storage.load_position_history(icao, is_paper=True))
     closed_positions.sort(key=lambda p: p.exit_time or "", reverse=True)
     open_n, closed_n = len(open_positions), len(closed_positions)
+
+    # REAL-MONEY TRACK, loaded separately and never summed into the paper
+    # numbers. is_paper stays True for every execution_mode except "live"
+    # (see models.Position), so is_paper=False is exactly the set of
+    # positions that spent real capital. Before this, every read on this
+    # page was is_paper=True -- a real position could be open on WSSS and
+    # the page would show nothing at all, while the header still claimed
+    # "paper mode -- no live orders".
+    live_open = storage.load_open_positions(is_paper=False)
+    live_closed = []
+    for icao in config.STATIONS:
+        live_closed.extend(storage.load_position_history(icao, is_paper=False))
+    live_closed.sort(key=lambda p: p.exit_time or "", reverse=True)
 except Exception as exc:  # noqa: BLE001
     open_positions, closed_positions = [], []
+    live_open, live_closed = [], []
     warnings.append(f"position read failed: {exc}")
 
 # Registry size, computed once and reused everywhere the page used to say
@@ -96,6 +110,54 @@ if closed_n:
             pnl_note = f"{pnl_usd / staked_usd:+.1%} dollar-weighted on ${staked_usd:,.0f} staked"
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"P&L summary failed: {exc}")
+
+# --- real-money track --------------------------------------------------------
+# Which stations would ACTUALLY be permitted to send a real order right now.
+# Asked of config.live_mode_is_permitted() rather than re-reading
+# LIVE_TRADING_STATIONS here: the allowlist alone is not the gate (live also
+# requires maturity), and a dashboard that reproduces half of a safety rule
+# is a dashboard that will eventually disagree with the executor.
+def _live_armed_stations():
+    armed = []
+    for icao in config.STATIONS:
+        try:
+            if config.live_mode_is_permitted(icao, "live"):
+                armed.append(icao)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"live-permission check failed for {icao}: {exc}")
+    return sorted(armed)
+
+
+try:
+    live_stations = _live_armed_stations()
+except Exception as exc:  # noqa: BLE001
+    live_stations = []
+    warnings.append(f"live station check failed: {exc}")
+
+live_at_risk = sum(float(p.size_usd or 0.0) for p in live_open)
+live_cap_usd = float(getattr(config, "LIVE_MAX_TOTAL_EXPOSURE_USD", 0.0) or 0.0)
+live_cap_n = getattr(config, "LIVE_MAX_CONCURRENT_POSITIONS", None)
+live_size_usd = float(getattr(config, "LIVE_TRADE_SIZE_USD", 0.0) or 0.0)
+
+# Realized real-money P&L, computed by summarize_positions() -- the same
+# arithmetic paper_trading_report uses for the paper track, so the two
+# tracks are comparable without ever being added together.
+live_pnl_usd = 0.0
+live_staked_usd = 0.0
+if live_closed:
+    try:
+        import paper_trading_report as ptr  # noqa: E402,F811
+
+        by_station = {}
+        for p in live_closed:
+            by_station.setdefault(p.station_icao, []).append(p)
+        for _icao, _ps in by_station.items():
+            s = ptr.summarize_positions(_ps)
+            if isinstance(s, dict):
+                live_pnl_usd += float(s.get("total_pnl_usd") or 0.0)
+                live_staked_usd += float(s.get("total_staked_usd") or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"real-money P&L summary failed: {exc}")
 
 # --- live dependency probes --------------------------------------------------
 # Actively probed from this instance on every regeneration (5 min), so the
@@ -407,7 +469,7 @@ def _hm(iso_ts, utc_offset_hours=8):
         return html.escape(str(iso_ts)[:16])
 
 
-def _pos_row(p):
+def _pos_row(p, with_order_id=False):
     is_open = p.status == "open"
     label, cls = status_label(p.status)
     # Entered/exited times render in THIS position's own station's local
@@ -435,18 +497,29 @@ def _pos_row(p):
         else:
             ret, ret_cls = "&mdash;", ""
         when = _hm(p.exit_time, station_offset)
+    # Real money is sized in dollars and cents ($1.00 an entry), so the paper
+    # table's whole-dollar format would render every live stake as "$1".
+    size = f"${p.size_usd:,.2f}" if with_order_id else f"${p.size_usd:,.0f}"
+    # Exchange order id, truncated -- enough to reconcile a real fill against
+    # the exchange by hand, which is the whole reason models.Position keeps it.
+    order_cell = ""
+    if with_order_id:
+        oid = p.order_id or ""
+        order_cell = (f"<td class='mono dim2' title='{html.escape(oid)}'>{html.escape(oid[:10])}</td>"
+                      if oid else "<td class='mono dim2'>&mdash;</td>")
     return (
         "<tr>"
         f"<td class='mono'>{html.escape(p.station_icao)}</td>"
         f"<td class='mono'>{html.escape(str(p.target_date))}</td>"
         f"<td class='mono'>{p.bucket_c}&deg;C</td>"
         f"<td class='mono'>{html.escape(p.side)}</td>"
-        f"<td class='mono num'>${p.size_usd:,.0f}</td>"
+        f"<td class='mono num'>{size}</td>"
         f"<td class='mono num'>{p.entry_price:.2f}</td>"
         f"<td class='mono num'>{last_price}</td>"
         f"<td class='mono num {ret_cls}'>{ret}</td>"
         f"<td><span class='st {cls}'>{html.escape(label)}</span></td>"
         f"<td class='mono dim2'>{when}</td>"
+        f"{order_cell}"
         "</tr>"
     )
 
@@ -483,6 +556,75 @@ except Exception as exc:  # noqa: BLE001
     positions_html = "<div class='empty'>positions table unavailable</div>"
     positions_cap = ""
 
+# --- real-money card ---------------------------------------------------------
+# Deliberately the FIRST card on the page and visually the loudest. Everything
+# below it is paper; this is the only section where a number moving means real
+# capital moved. Open real positions are the headline -- an operator glancing
+# at this page should never have to work out whether money is currently at
+# risk, which was impossible when the page read is_paper=True everywhere.
+MAX_LIVE_CLOSED_SHOWN = 10
+LIVE_COLS = ("<thead><tr><th>Station</th><th>Market date</th><th>Bucket</th><th>Side</th>"
+             "<th class='num'>Size</th><th class='num'>Entry</th><th class='num'>Last/exit</th>"
+             "<th class='num'>Return</th><th>Status</th><th>Entered/exited</th>"
+             "<th>Order id</th></tr></thead>")
+try:
+    blocks = []
+    if live_open:
+        cap_bits = []
+        if live_cap_usd:
+            pct_of_cap = live_at_risk / live_cap_usd if live_cap_usd else 0
+            cap_bits.append(f"{pct_of_cap:.0%} of the ${live_cap_usd:,.2f} exposure cap")
+        if live_cap_n:
+            cap_bits.append(f"{len(live_open)} of {live_cap_n} concurrent slots")
+        blocks.append(
+            "<div class='moneybar'>"
+            f"<div class='mb-amt'>${live_at_risk:,.2f}</div>"
+            f"<div class='mb-lab'>real capital at risk right now<br>"
+            f"<span class='mb-sub'>{' &middot; '.join(cap_bits)}</span></div>"
+            "</div>"
+        )
+        blocks.append(
+            "<div class='tablewrap'><table class='ptable'>" + LIVE_COLS +
+            f"<tbody>{''.join(_pos_row(p, with_order_id=True) for p in live_open)}</tbody>"
+            "</table></div>"
+        )
+    else:
+        blocks.append(
+            "<div class='moneybar flat'>"
+            "<div class='mb-amt'>$0.00</div>"
+            "<div class='mb-lab'>no real capital at risk right now<br>"
+            f"<span class='mb-sub'>{html.escape(', '.join(live_stations)) if live_stations else 'no station'} "
+            f"armed for live orders at ${live_size_usd:,.2f} per entry</span></div>"
+            "</div>"
+        )
+
+    if live_closed:
+        shown_live = live_closed[:MAX_LIVE_CLOSED_SHOWN]
+        realized = f"{'-' if live_pnl_usd < 0 else '+'}${abs(live_pnl_usd):,.2f}"
+        realized_cls = "neg" if live_pnl_usd < 0 else "pos"
+        pct = f" ({live_pnl_usd / live_staked_usd:+.1%})" if live_staked_usd else ""
+        blocks.append(
+            f"<p class='cap' style='margin:16px 0 6px'>Closed real-money trades &mdash; realized "
+            f"<span class='{realized_cls}'><b>{realized}</b></span> on ${live_staked_usd:,.2f} staked"
+            f"{pct}, {len(live_closed)} trade(s)</p>"
+            "<div class='tablewrap'><table class='ptable'>" + LIVE_COLS +
+            f"<tbody>{''.join(_pos_row(p, with_order_id=True) for p in shown_live)}</tbody>"
+            "</table></div>"
+        )
+
+    realmoney_html = "".join(blocks)
+    if live_stations:
+        realmoney_cap = (f"live-armed: {html.escape(', '.join(live_stations))} &middot; "
+                         f"${live_size_usd:,.2f} per entry &middot; separate from every paper number "
+                         "on this page, never summed with them")
+    else:
+        realmoney_cap = ("no station passes config.live_mode_is_permitted() &mdash; "
+                         "the whole book below is paper")
+except Exception as exc:  # noqa: BLE001
+    warnings.append(f"real-money card failed: {exc}")
+    realmoney_html = "<div class='empty'>real-money view unavailable</div>"
+    realmoney_cap = ""
+
 now_utc = datetime.now(timezone.utc)
 snap_sgt = now_utc.astimezone(timezone.utc).strftime("%d %b %Y, ")
 snap_sgt += f"{(now_utc.hour + 8) % 24:02d}:{now_utc.minute:02d} SGT"
@@ -491,6 +633,26 @@ run_days = max(0, (now_utc.timestamp() * 1000 - deploy_epoch_ms) / 86400000) if 
 service_ok = active_state == "active"
 pill_cls = "active" if service_ok else "down"
 pill_txt = "service active" if service_ok else f"service {html.escape(active_state)}"
+
+# The mode pill used to be the hardcoded string "paper mode -- no live orders".
+# That is a claim about where real money can go, and it went stale the moment
+# a station was armed for live trading -- the worst possible way for this
+# particular sentence to be wrong. Derived from the live gate now.
+if live_stations:
+    mode_pill = ("<span class='pill livem'><span class='dot'></span>LIVE &mdash; real money: "
+                 f"{html.escape(', '.join(live_stations))}</span>")
+else:
+    mode_pill = "<span class='pill paperm'><span class='dot'></span>paper mode &mdash; no live orders</span>"
+
+live_at_risk_display = f"${live_at_risk:,.2f}"
+if live_open:
+    live_note = f"{len(live_open)} open"
+    if live_cap_usd:
+        live_note += f" &middot; cap ${live_cap_usd:,.2f}"
+elif live_stations:
+    live_note = f"{html.escape(', '.join(live_stations))} armed &middot; ${live_size_usd:,.2f}/entry"
+else:
+    live_note = "no live stations armed"
 
 warn_html = ""
 if warnings:
@@ -538,10 +700,15 @@ def _station_table():
             pnl_cell, pnl_cls, ret, ret_cls = "&mdash;", "", "&mdash;", ""
         n_open = open_count.get(icao, 0)
         at_risk = f"${open_staked.get(icao, 0.0):,.0f}" if n_open else "&mdash;"
+        # Which track this station's orders actually go to. Without it the
+        # table's paper-only stats silently imply WSSS is paper like the rest.
+        track = ("<span class='badge live'>real money</span>" if icao in live_stations
+                 else "<span class='badge paper'>paper</span>")
         rows.append(
             "<tr>"
             f"<td class='mono'>{html.escape(icao)}</td>"
             f"<td>{html.escape(st.display_name)}</td>"
+            f"<td>{track}</td>"
             f"<td><span class='badge {badge_cls}'>{html.escape(maturity)}</span></td>"
             f"<td class='mono num'>{n_trades}</td>"
             f"<td class='mono num'>{win}</td>"
@@ -553,7 +720,7 @@ def _station_table():
         )
     return (
         "<div class='tablewrap'><table class='ptable'>"
-        "<thead><tr><th>Station</th><th>Name</th><th>Maturity</th>"
+        "<thead><tr><th>Station</th><th>Name</th><th>Track</th><th>Maturity</th>"
         "<th class='num'>Trades</th><th class='num'>Win rate</th>"
         "<th class='num'>Open</th><th class='num'>At risk</th>"
         "<th class='num'>Realized P&amp;L</th><th class='num'>Return</th></tr></thead>"
@@ -563,8 +730,9 @@ def _station_table():
 
 try:
     stations_table_html = _station_table()
-    stations_cap = ("closed paper trades per station &middot; Return is dollar-weighted realized P&amp;L "
-                    "per dollar staked &middot; At risk sums open paper stakes")
+    stations_cap = ("PAPER track only &mdash; real-money trades are in the card at the top, never "
+                    "mixed in here &middot; Return is dollar-weighted realized P&amp;L per dollar "
+                    "staked &middot; At risk sums open paper stakes")
 except Exception as exc:  # noqa: BLE001
     warnings.append(f"station table failed: {exc}")
     stations_table_html = "<div class='empty'>station table unavailable</div>"
@@ -644,7 +812,7 @@ page = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="300">
-<title>polyweather &mdash; paper trading monitor</title>
+<title>polyweather &mdash; trading monitor</title>
 <style>
   :root {
     --paper:#F2F4F6; --card:#FBFCFD; --ink:#182230; --ink-2:#4A5866;
@@ -682,6 +850,23 @@ page = """<!doctype html>
   .pill.down .dot { background:var(--bad); }
   .pill.paperm { border-color:var(--teal); color:var(--teal); background:var(--teal-faint); }
   .pill.paperm .dot { background:var(--teal); }
+  /* Real-money accent -- deliberately the only heat-coloured, heavier-bordered
+     surface on the page, so "money is at stake here" is legible at a glance
+     rather than something you read your way into. */
+  .pill.livem { border-color:var(--heat); color:var(--heat); background:transparent; font-weight:700; }
+  .pill.livem .dot { background:var(--heat); }
+  .card.money, .tile.money { border-color:var(--heat); border-width:2px; }
+  .card.money h2 { color:var(--heat); }
+  .moneybar { display:flex; align-items:center; gap:16px; padding:14px 16px; border-radius:8px;
+    background:var(--paper); border:1px solid var(--heat); }
+  .moneybar.flat { border-style:dashed; border-color:var(--line); }
+  .mb-amt { font-family:var(--mono); font-size:30px; font-variant-numeric:tabular-nums;
+    color:var(--heat); line-height:1; }
+  .moneybar.flat .mb-amt { color:var(--muted); }
+  .mb-lab { font-size:13px; color:var(--ink-2); }
+  .mb-sub { font-size:12px; color:var(--muted); }
+  .badge.live { background:var(--heat); color:var(--card); }
+  .badge.paper { background:var(--paper); color:var(--muted); border:1px solid var(--line); }
   .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
   .tile { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:14px 16px 12px; }
   .tile .label { font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); margin-bottom:6px; }
@@ -769,12 +954,12 @@ page = """<!doctype html>
     <div class="headrow">
       <div>
         <div class="eyebrow">polyweather &middot; EC2 ap-southeast-5</div>
-        <h1>Paper trading monitor</h1>
+        <h1>Trading monitor</h1>
         <p class="sub">Polymarket temperature brackets &middot; @@STATIONCOUNT@@ stations across Asia &middot; generated @@SNAP@@</p>
       </div>
       <div class="pills">
         <span class="pill @@PILLCLS@@"><span class="dot"></span>@@PILLTXT@@</span>
-        <span class="pill paperm"><span class="dot"></span>paper mode &mdash; no live orders</span>
+        @@MODEPILL@@
         <a class="pill" href="backtest.html">backtest lab &rarr;</a>
       </div>
     </div>
@@ -791,6 +976,15 @@ page = """<!doctype html>
       <div class="note">what the report scores</div></div>
     <div class="tile"><div class="label">Paper P&amp;L</div><div class="value @@PNLDIM@@">@@PNL@@</div>
       <div class="note">@@PNLNOTE@@</div></div>
+    <div class="tile money"><div class="label">Real money at risk</div>
+      <div class="value @@LIVEDIM@@">@@LIVEATRISK@@</div>
+      <div class="note">@@LIVENOTE@@</div></div>
+  </div>
+
+  <div class="card money">
+    <h2>Real money</h2>
+    <p class="cap">@@REALMONEYCAP@@</p>
+    @@REALMONEY@@
   </div>
 
   <div class="card">
@@ -821,7 +1015,7 @@ page = """<!doctype html>
   </div>
 
   <div class="card">
-    <h2>Positions</h2>
+    <h2>Paper positions</h2>
     <p class="cap">@@POSCAP@@</p>
     @@POSTABLE@@
   </div>
@@ -895,6 +1089,12 @@ page = (
     .replace("@@EVCARD@@", ev_html)
     .replace("@@POSCAP@@", positions_cap)
     .replace("@@POSTABLE@@", positions_html)
+    .replace("@@MODEPILL@@", mode_pill)
+    .replace("@@LIVEATRISK@@", live_at_risk_display)
+    .replace("@@LIVEDIM@@", "" if live_open else "dim")
+    .replace("@@LIVENOTE@@", live_note)
+    .replace("@@REALMONEYCAP@@", realmoney_cap)
+    .replace("@@REALMONEY@@", realmoney_html)
     .replace("@@WARNINGS@@", warn_html)
     .replace("@@JOURNAL@@", html.escape(journal))
     .replace("@@DEPLOYMS@@", str(deploy_epoch_ms))
