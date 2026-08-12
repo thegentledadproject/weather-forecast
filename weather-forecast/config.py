@@ -656,9 +656,36 @@ SCHEDULE_WINDOWS = [
     # bar tightens first, interval widens second.
     (8, 0, 9, 0, 15, "secondary", 0.20, "Edge decaying (early) -- EV bar raised, scan interval only modestly wider"),
     (9, 0, 10, 0, 30, "secondary", 0.25, "Edge decaying (late) -- original wider interval, highest pre-close EV bar"),
-    (10, 0, 12, 0, 120, "monitor_only", None, "Decision-closed -- no new entries, watching existing positions"),
-    (12, 0, 16, 0, 60, "risk_only", None, "Afternoon peak-heat window -- nowcast-triggered risk checks only"),
-    (16, 0, 22, 45, 180, "monitor_only", None, "Evening -- sparse position monitoring"),
+    # POST-DECISION INTERVALS ARE EXIT-MONITORING INTERVALS, NOT ENTRY ONES.
+    # No new position is opened after 10:00, so the only thing these windows
+    # decide is how often a stop-loss, trailing stop or profit-take can fire
+    # at all -- a threshold is only ever evaluated on a scan tick, so the
+    # scan interval IS the resolution of every exit level in risk_manager.
+    #
+    # Widened to 120/60/180 they were far coarser than the thresholds they
+    # were meant to enforce, and the live record showed exactly that. Across
+    # the 12 stop-losses in the three days after 2026-08-09, the distance
+    # between the trigger price and the price actually filled tracked the
+    # window's interval almost linearly:
+    #
+    #     10-min window (05:00-08:00)   overshoot ~0.010
+    #     30-min window (09:00-10:00)   overshoot  0.018
+    #     60-min window (12:00-16:00)   overshoot  0.070   <- WSSS 32YES
+    #
+    # and three more stops fired at exactly 10:00 and one at exactly 12:00
+    # -- window boundaries, i.e. the first look after a long blind stretch,
+    # where the position had already been through the level unobserved.
+    # A 15% tightened stop cannot be honoured on a 3-hour sample; tightening
+    # the threshold further would only have widened the gap it is measured
+    # against. The binding constraint was the clock, so the clock moved.
+    #
+    # Entry windows (05:00-10:00) are deliberately UNCHANGED: their cadence
+    # encodes the edge-decay thesis rather than a monitoring requirement,
+    # and scanning for entries more often is a different decision from
+    # watching open risk more often.
+    (10, 0, 12, 0, 15, "monitor_only", None, "Decision-closed -- no new entries, watching existing positions"),
+    (12, 0, 16, 0, 15, "risk_only", None, "Afternoon peak-heat window -- nowcast-triggered risk checks only"),
+    (16, 0, 22, 45, 30, "monitor_only", None, "Evening -- position monitoring, wider as volatility falls off"),
     (22, 45, 24, 0, None, "closed", None, "Late night -- log closing state, then stop until 04:00"),
 ]
 
