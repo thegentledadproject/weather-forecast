@@ -1348,11 +1348,35 @@ MATURITY_MIN_SIMULATED_ORDERS = 3
 
 # Explicit operator overrides: {icao: (maturity, justification)}.
 #
-# Deliberately EMPTY. An override is a decision to trade on something other
-# than the evidence, so it should be visible in a diff, require a written
-# reason, and get logged loudly every time it is used -- never be the quiet
-# default it was when the whole thing was a literal.
-MATURITY_OVERRIDE: dict = {}
+# An override is a decision to trade on something other than the evidence,
+# so it is visible in a diff, carries a written reason, and is logged loudly
+# every time it is used -- never the quiet default it was when the whole
+# thing was a literal.
+#
+# WSSS, set 2026-08-11. The measured criteria say exploratory, and they are
+# right: the model LOSES to the market on every window scored, under both
+# code versions --
+#
+#     Jul 28 - Aug 9  (n=5, current code)   model 0.2046  market 0.1318
+#     Aug  6 - Aug 11 (n=7, current code)   model 0.1713  market 0.1444
+#     Jul 28 - Aug 2  (n=32, old code)      model 0.1671  market 0.1625
+#     Aug  3 - Aug  4 (n=9,  old code)      model 0.1653  market 0.1114
+#
+# Four windows, one direction. This override does not dispute that. It is
+# an explicit decision to spend a bounded amount finding out how the real
+# order path behaves -- fills, partial fills, redemption -- which no
+# backtest can tell us and which simulation can only half-answer.
+#
+# The blast radius is what makes it defensible: $1.55-$3.75 per order, 3
+# concurrent, $11.25 total exposure, 10 submissions a day. The expected
+# value of those trades is NEGATIVE by this system's own best estimate.
+#
+# REMOVE THIS once brier_model < brier_market on n >= MATURITY_MIN_BRIER_
+# ENTRIES under current code -- at which point the measured criteria will
+# carry WSSS on their own and this line becomes a lie that still works.
+MATURITY_OVERRIDE: dict = {
+    "WSSS": ("mature", "buying execution-path evidence, not edge"),
+}
 
 # Frozen snapshot for the BACKTEST replica only. backtest/entry_sim.py must
 # stay a pure function of its injected state -- it cannot read storage

@@ -67,16 +67,36 @@ def test_the_snapshot_covers_the_whole_registry():
     assert set(config.MATURITY_SNAPSHOT) == set(config.STATIONS)
 
 
-def test_maturity_overrides_are_empty_by_default():
+def test_every_maturity_override_is_well_formed_and_justified():
     """
-    An override trades on something other than the evidence. It should be
-    visible in a diff and require a written reason -- never be the quiet
+    An override trades on something other than the evidence, so the bar is
+    that it must be DELIBERATE and EXPLAINED -- not that there are none.
+    A bare string or an empty reason is how an override becomes the quiet
     default the whole thing used to be.
     """
-    assert config.MATURITY_OVERRIDE == {}, (
-        f"maturity overrides in effect: {config.MATURITY_OVERRIDE} -- each bypasses "
-        f"the measured criteria for the gate that authorises real money"
-    )
+    for icao, value in config.MATURITY_OVERRIDE.items():
+        assert icao in config.STATIONS, f"override for unregistered station {icao}"
+        assert isinstance(value, tuple) and len(value) == 2, (
+            f"{icao}: override must be (maturity, justification), got {value!r}"
+        )
+        maturity, reason = value
+        assert maturity in ("mature", "exploratory"), f"{icao}: bad maturity {maturity!r}"
+        assert isinstance(reason, str) and len(reason.strip()) >= 10, (
+            f"{icao}: override needs a real written reason, got {reason!r}"
+        )
+
+
+def test_an_override_only_matters_for_an_allowlisted_station():
+    """
+    Forcing maturity on a station outside LIVE_TRADING_STATIONS does nothing
+    -- the AND still holds. Worth failing on, because it reads like it works.
+    """
+    for icao in config.MATURITY_OVERRIDE:
+        if config.MATURITY_OVERRIDE[icao][0] == "mature":
+            assert icao in config.LIVE_TRADING_STATIONS, (
+                f"{icao} is forced mature but is not allowlisted, so the override "
+                f"has no effect -- misleading rather than dangerous, but fix it"
+            )
 
 
 def test_vhhh_settlement_invariants():
