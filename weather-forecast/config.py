@@ -1269,6 +1269,26 @@ LIVE_LIMIT_PAD_MAX_PCT = 0.03
 # ahead, resolves next day) plus slack for a daemon that was down.
 RECONCILE_TRADE_LOOKBACK_HOURS = 96
 
+# Hard floor on that scan: trades before this date are not this system's
+# business. ISO date, or None to scan the full lookback.
+#
+# Set 2026-08-11 on the operator's statement that the funding wallet has
+# been disconnected from the other bot (hermes) and carries no earlier
+# holdings this database should know about.
+#
+# WHAT THIS COSTS, stated plainly because it narrows a safety check: the
+# exchange_only direction of reconciliation works by listing traded tokens
+# and then asking what is still held. Anything bought BEFORE this date and
+# still held is therefore invisible to it -- and invisible exposure is
+# exactly what the LIVE_MAX_* caps cannot see, which is the failure the
+# check exists to prevent. The assumption doing the work here is the
+# operator's, not a measurement.
+#
+# The db_only direction is UNAFFECTED: it iterates recorded positions and
+# checks each balance directly, so a stored position is verified whatever
+# its age.
+RECONCILE_IGNORE_TRADES_BEFORE = "2026-08-11"
+
 # Share-count tolerance when comparing a stored position against the
 # exchange's balance. Share counts are rounded to 2 decimals by the order
 # builder, and a partial fill is a real divergence rather than noise, so this

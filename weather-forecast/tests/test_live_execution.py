@@ -1543,3 +1543,76 @@ def test_a_failed_audit_write_does_not_undo_the_order(live_db, monkeypatch, mode
     assert "could not record the live entry attempt" in out
     assert "under-counting" in out
     assert len(storage.load_open_positions()) == 1, "the fill must still be recorded"
+
+
+def test_reconciliation_scan_is_floored_at_the_configured_date(exchange, monkeypatch):
+    """
+    The operator's cutoff. It narrows ONLY the unrecorded-position search --
+    holdings bought before the floor become invisible to it, which is the
+    cost of the assumption and is why the floor is dated and commented.
+    """
+    seen = {}
+
+    class _Recording(_Exchange):
+        def get_trades(self, params=None, **kw):
+            seen["after"] = int(params.after)
+            return []
+
+    monkeypatch.setattr(config, "RECONCILE_IGNORE_TRADES_BEFORE", "2026-08-11")
+    exchange(_Recording(balances={"TOK": 5.0}))
+    wallet_client.reconcile_live_positions([_live_pos()])
+
+    import datetime as dt
+    floor = int(dt.datetime.fromisoformat("2026-08-11")
+                .replace(tzinfo=dt.timezone.utc).timestamp())
+    assert seen["after"] == floor
+
+
+def test_without_a_floor_the_full_lookback_is_scanned(exchange, monkeypatch):
+    seen = {}
+
+    class _Recording(_Exchange):
+        def get_trades(self, params=None, **kw):
+            seen["after"] = int(params.after)
+            return []
+
+    monkeypatch.setattr(config, "RECONCILE_IGNORE_TRADES_BEFORE", None)
+    exchange(_Recording(balances={"TOK": 5.0}))
+    wallet_client.reconcile_live_positions([_live_pos()])
+
+    import time as _t
+    expected = int(_t.time()) - config.RECONCILE_TRADE_LOOKBACK_HOURS * 3600
+    assert abs(seen["after"] - expected) < 60
+
+
+def test_the_floor_never_widens_the_scan(exchange, monkeypatch):
+    """A floor older than the lookback must not reach further back."""
+    seen = {}
+
+    class _Recording(_Exchange):
+        def get_trades(self, params=None, **kw):
+            seen["after"] = int(params.after)
+            return []
+
+    monkeypatch.setattr(config, "RECONCILE_IGNORE_TRADES_BEFORE", "2020-01-01")
+    exchange(_Recording(balances={"TOK": 5.0}))
+    wallet_client.reconcile_live_positions([_live_pos()])
+
+    import time as _t
+    lookback = int(_t.time()) - config.RECONCILE_TRADE_LOOKBACK_HOURS * 3600
+    assert abs(seen["after"] - lookback) < 60
+
+
+def test_recorded_positions_are_verified_regardless_of_the_floor(exchange, monkeypatch):
+    """
+    The db_only direction iterates STORED positions and checks each balance,
+    so a stored position is verified whatever its age -- the floor narrows
+    discovery, not verification.
+    """
+    monkeypatch.setattr(config, "RECONCILE_IGNORE_TRADES_BEFORE", "2026-08-11")
+    exchange(_Exchange(balances={"TOK": 0.0}, traded=[]))
+
+    r = wallet_client.reconcile_live_positions([_live_pos(shares=5.0)])
+
+    assert not r.ok
+    assert r.db_only == [("TOK", 5.0, 0.0)]

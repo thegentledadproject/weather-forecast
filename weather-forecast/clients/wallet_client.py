@@ -1147,6 +1147,20 @@ def reconcile_live_positions(open_live_positions) -> Reconciliation:
     exchange_only = []
     try:
         cutoff = int(time.time()) - config.RECONCILE_TRADE_LOOKBACK_HOURS * 3600
+        floor_iso = getattr(config, "RECONCILE_IGNORE_TRADES_BEFORE", None)
+        if floor_iso:
+            import datetime as _dt
+
+            floor_ts = int(_dt.datetime.fromisoformat(floor_iso)
+                           .replace(tzinfo=_dt.timezone.utc).timestamp())
+            if floor_ts > cutoff:
+                logger.info(
+                    f"[wallet_client] reconciliation scan floored at {floor_iso} "
+                    f"(RECONCILE_IGNORE_TRADES_BEFORE), narrowing the "
+                    f"{config.RECONCILE_TRADE_LOOKBACK_HOURS}h lookback. Holdings bought "
+                    f"before that date are NOT visible to the unrecorded-position check."
+                )
+                cutoff = floor_ts
         trades = client.get_trades(lib.TradeParams(after=str(cutoff)))
     except Exception as exc:  # noqa: BLE001
         return Reconciliation(
