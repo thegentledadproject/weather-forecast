@@ -1301,6 +1301,13 @@ RECONCILE_SHARE_TOLERANCE = 0.01
 # position opened by another process is seen within a cycle.
 RECONCILE_CACHE_TTL_S = 60
 
+# Collateral balance/allowance result cache, in seconds. preflight() runs on
+# EVERY simulation entry and the check is an authenticated round trip; without
+# this a cycle that screens several candidates would make one call per
+# candidate to re-read a number that changes only when the operator funds the
+# wallet or an order fills.
+COLLATERAL_STATUS_TTL_S = 60
+
 
 # --- Station maturity: MEASURED, not asserted -----------------------------
 # STATION_MATURITY used to be a hand-typed dict, and it was the master key:

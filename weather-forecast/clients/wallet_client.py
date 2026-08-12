@@ -946,12 +946,172 @@ def _interpret_fill(resp, spec: OrderSpec) -> tuple:
 # Preflight
 # --------------------------------------------------------------------------
 
+_collateral_cache = {"at": 0.0, "result": None}
+
+# Balance is reported in the collateral token's base units. The library
+# exposes COLLATERAL_TOKEN_DECIMALS = 6; hardcoding 1e6 here would silently
+# misreport by 10^n if that ever changed, so read it when we can.
+_COLLATERAL_UNITS_FALLBACK = 6
+
+
+def _collateral_decimals(lib) -> int:
+    try:
+        from py_clob_client_v2 import config as _libcfg  # noqa: PLC0415
+        return int(getattr(_libcfg, "COLLATERAL_TOKEN_DECIMALS",
+                           _COLLATERAL_UNITS_FALLBACK))
+    except Exception:  # noqa: BLE001
+        return _COLLATERAL_UNITS_FALLBACK
+
+
+def collateral_status(client=None, use_cache: bool = True) -> tuple:
+    """
+    (mark, detail) for "is this account funded and approved to trade?", where
+    mark is 'ok' / '--' / '!!' exactly as preflight() renders it.
+
+    THIS REPLACES A LINE THAT WAS WRONG. preflight() used to end with a
+    permanent "[--] allowances ... NOT detectable from the public book --
+    confirm manually", which was true of the public book and false of this
+    endpoint: get_balance_allowance() reports the funding address's collateral
+    balance AND its allowance per spender, and under the correct signature
+    type those come back real (see the signature-type evidence at the top of
+    this module). Because that line never changed state, it read as a
+    permanent blocker on every simulation run -- the operator learns to
+    ignore the one item that would matter if it were ever true, which is the
+    failure mode a checklist exists to prevent.
+
+    FAILS TOWARDS '--', NEVER TOWARDS 'ok'. Every kind of absence -- no
+    credentials, no library, an endpoint that errors, a response shaped
+    differently than expected -- reports "could not verify", because "I did
+    not look" and "I looked and it was fine" must never render the same.
+
+    Reads only. Setting an allowance is an on-chain transaction and belongs
+    to the operator, not to a trading loop.
+    """
+    import time as _time
+
+    import config
+
+    now = _time.time()
+    if use_cache and client is None:
+        cached = _collateral_cache["result"]
+        if cached is not None and now - _collateral_cache["at"] < config.COLLATERAL_STATUS_TTL_S:
+            return cached
+
+    def _finish(result):
+        if use_cache and client is None:
+            _collateral_cache.update({"at": now, "result": result})
+        return result
+
+    # _clob() RAISES on a missing library rather than returning None -- that is
+    # the right behaviour for the order path and the wrong one for a checklist
+    # line, so it is caught here.
+    try:
+        lib = _clob()
+    except RuntimeError as exc:
+        return _finish(("--", f"collateral/allowance unverified -- {str(exc)[:90]}"))
+
+    if client is None:
+        if not (os.environ.get("POLYMARKET_PRIVATE_KEY")
+                and os.environ.get("POLYMARKET_FUNDER")):
+            return _finish(("--", "collateral/allowance unverified -- no credentials "
+                                  "on this box (simulation does not need them; a live "
+                                  "order does)"))
+        try:
+            client = get_client()
+        except Exception as exc:  # noqa: BLE001
+            return _finish(("--", f"collateral/allowance unverified -- could not "
+                                  f"authenticate: {type(exc).__name__}"))
+
+    try:
+        from py_clob_client_v2 import clob_types  # noqa: PLC0415
+        params = clob_types.BalanceAllowanceParams(
+            asset_type=clob_types.AssetType.COLLATERAL
+        )
+        resp = client.get_balance_allowance(params=params)
+    except Exception as exc:  # noqa: BLE001
+        return _finish(("--", f"collateral/allowance unverified -- endpoint failed: "
+                              f"{type(exc).__name__}: {str(exc)[:120]}"))
+
+    return _finish(_interpret_collateral(resp, decimals=_collateral_decimals(lib)))
+
+
+def _interpret_collateral(resp, decimals: int) -> tuple:
+    """
+    Turn one get_balance_allowance() response into (mark, detail).
+
+    SEPARATE FROM THE FETCH so it can be tested without the library, a
+    private key, or a network -- the same reason _interpret_fill() is its own
+    function. Every branch that cannot establish approval returns '--' or
+    '!!'; none of them can return 'ok'.
+    """
+    import config
+
+    if not isinstance(resp, dict):
+        return ("--", f"collateral/allowance unverified -- unexpected response "
+                      f"type {type(resp).__name__}")
+
+    scale = 10 ** decimals
+    try:
+        balance = int(resp.get("balance"))  # base units, as a string
+    except (TypeError, ValueError):
+        return ("--", "collateral/allowance unverified -- response carried no "
+                      "readable balance")
+
+    # Two shapes in the wild: a per-spender dict, or a single scalar. Treat a
+    # scalar as one unnamed spender rather than guessing it means "all".
+    raw = resp.get("allowances", resp.get("allowance"))
+    if isinstance(raw, dict):
+        spenders = raw
+    elif raw is None:
+        spenders = {}
+    else:
+        spenders = {"(unnamed spender)": raw}
+
+    usd = balance / scale
+    if not spenders:
+        return ("--", f"balance ${usd:,.2f} but the response listed no spender "
+                      f"allowances -- cannot confirm approval")
+
+    unset = []
+    for spender, value in spenders.items():
+        try:
+            if int(value) <= 0:
+                unset.append(spender)
+        except (TypeError, ValueError):
+            # Unparseable is not approved. An allowance we cannot read is
+            # one we cannot vouch for.
+            unset.append(spender)
+
+    approved = len(spenders) - len(unset)
+    if unset:
+        return ("!!", f"{len(unset)} of {len(spenders)} spender allowance(s) NOT SET "
+                      f"({', '.join(str(s)[:10] + '...' for s in unset)}) -- a live "
+                      f"order will be rejected until they are approved on-chain; "
+                      f"balance ${usd:,.2f}")
+
+    # Approved, but the wallet still has to cover an order. The exchange
+    # minimum is 5 SHARES, so the cheapest possible order is 5 x the tick --
+    # tiny. What actually binds is the configured trade size.
+    want = getattr(config, "LIVE_TRADE_SIZE_USD", 0.0)
+    if usd < want:
+        return ("!!", f"allowances set on all {approved} spender(s), but balance "
+                      f"${usd:,.2f} is below LIVE_TRADE_SIZE_USD ${want:,.2f} -- the "
+                      f"wallet, not the risk cap, is the binding constraint")
+
+    return ("ok", f"collateral ${usd:,.2f}, allowances set on all {approved} "
+                  f"spender(s) the exchange named")
+
+
 def preflight(token_id: Optional[str] = None) -> list:
     """
     Checks to run BEFORE the first live order, returned as a list of
     human-readable "[ok]/[--]/[!!]" lines rather than raising. Called by
     executor on every simulation-mode entry so the report is produced
     continuously, not once at setup time and then assumed to still hold.
+
+    The collateral/allowance line is a real query now (collateral_status()),
+    not the permanent "[--] confirm manually" placeholder it used to be. A
+    checklist item that never changes state trains the reader to skip it.
 
     Deliberately does NOT attempt to set allowances: that is a real
     on-chain transaction and belongs to the operator, not to a trading
@@ -980,12 +1140,14 @@ def preflight(token_id: Optional[str] = None) -> list:
             f"min_order_size={min_size}"
         )
 
-    lines.append(
-        "[--] on-chain USDC + conditional-token allowances (spender: the CLOB "
-        "Exchange contract) must be set once per funding address. NOT automated "
-        "here and NOT detectable from the public book -- confirm manually before "
-        "the first live order."
-    )
+    mark, detail = collateral_status()
+    lines.append(f"[{mark}] {detail}")
+    if mark != "ok":
+        lines.append(
+            "[--] allowances are an on-chain transaction and are NOT set from "
+            "here -- approve the funding address once, via the Polymarket UI or "
+            "directly against the spender contracts."
+        )
     return lines
 
 
@@ -993,11 +1155,17 @@ def check_allowances_reminder() -> str:
     """
     Retained for callers of the previous API. preflight() is the fuller
     replacement.
+
+    This used to return a fixed string asserting allowances could not be
+    checked. It now reports what the exchange actually says, so a caller
+    holding the old API gets a real answer rather than a stale warning.
     """
+    mark, detail = collateral_status()
+    if mark == "ok":
+        return f"Allowances verified against the exchange: {detail}."
     return (
-        "Token allowances must be set on-chain before trading, once per "
-        "funding address. This is NOT automated by this module -- confirm "
-        "allowances are set before enabling live trading."
+        f"Allowance check did not pass: {detail}. Allowances must be set "
+        f"on-chain once per funding address; this module never sets them."
     )
 
 

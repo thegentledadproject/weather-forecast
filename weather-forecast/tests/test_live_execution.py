@@ -1616,3 +1616,109 @@ def test_recorded_positions_are_verified_regardless_of_the_floor(exchange, monke
 
     assert not r.ok
     assert r.db_only == [("TOK", 5.0, 0.0)]
+
+
+# --------------------------------------------------------------------------
+# Collateral / allowance preflight
+#
+# The line these replace was a hardcoded "[--] confirm manually" that never
+# changed state. The point of every assertion here is that the new one CAN
+# say ok, and does not say ok for any other reason.
+# --------------------------------------------------------------------------
+
+_REAL_RESPONSE = {
+    # Shape observed live 2026-08-12 under signature type 3.
+    "balance": "6415762",
+    "allowances": {
+        "0xE111180000d2663C0091e4f400237545B87B996B": str(2 ** 256 - 1),
+        "0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296": str(2 ** 256 - 1),
+        "0xe2222d279d744050d28e00520010520000310F59": str(2 ** 256 - 1),
+    },
+}
+
+
+def test_a_funded_approved_account_reads_ok():
+    mark, detail = wallet_client._interpret_collateral(_REAL_RESPONSE, decimals=6)
+    assert mark == "ok"
+    assert "6.42" in detail
+
+
+def test_balance_is_scaled_by_the_declared_decimals():
+    """A hardcoded 1e6 would misreport by 10^n if the token ever changed."""
+    _, detail = wallet_client._interpret_collateral(
+        {"balance": "6415762", "allowances": {"s": "1"}}, decimals=4
+    )
+    assert "641.58" in detail
+
+
+@pytest.mark.parametrize("resp", [
+    None,
+    "not a dict",
+    {},                                            # no balance
+    {"balance": "not a number", "allowances": {"s": "1"}},
+    {"balance": "6415762"},                        # no allowances at all
+    {"balance": "6415762", "allowances": {}},      # empty allowance map
+])
+def test_every_unreadable_response_refuses_to_say_ok(resp):
+    mark, _ = wallet_client._interpret_collateral(resp, decimals=6)
+    assert mark != "ok"
+
+
+def test_one_unset_spender_fails_the_whole_check():
+    resp = dict(_REAL_RESPONSE, allowances=dict(_REAL_RESPONSE["allowances"]))
+    resp["allowances"]["0xE111180000d2663C0091e4f400237545B87B996B"] = "0"
+
+    mark, detail = wallet_client._interpret_collateral(resp, decimals=6)
+
+    assert mark == "!!"
+    assert "1 of 3" in detail
+
+
+def test_an_unparseable_allowance_counts_as_not_set():
+    """An allowance we cannot read is one we cannot vouch for."""
+    mark, _ = wallet_client._interpret_collateral(
+        {"balance": "6415762", "allowances": {"s": None}}, decimals=6
+    )
+    assert mark == "!!"
+
+
+def test_a_scalar_allowance_is_one_spender_not_all(monkeypatch):
+    monkeypatch.setattr(config, "LIVE_TRADE_SIZE_USD", 1.0)
+    mark, detail = wallet_client._interpret_collateral(
+        {"balance": "6415762", "allowance": str(2 ** 256 - 1)}, decimals=6
+    )
+    assert mark == "ok"
+    assert "all 1 spender" in detail
+
+
+def test_approved_but_underfunded_is_flagged(monkeypatch):
+    monkeypatch.setattr(config, "LIVE_TRADE_SIZE_USD", 10.0)
+    mark, detail = wallet_client._interpret_collateral(_REAL_RESPONSE, decimals=6)
+    assert mark == "!!"
+    assert "binding constraint" in detail
+
+
+def test_missing_credentials_report_unverified_not_approved(monkeypatch):
+    monkeypatch.delenv("POLYMARKET_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("POLYMARKET_FUNDER", raising=False)
+    monkeypatch.setattr(wallet_client, "_collateral_cache", {"at": 0.0, "result": None})
+
+    mark, detail = wallet_client.collateral_status()
+
+    assert mark != "ok"
+    assert "unverified" in detail
+
+
+def test_preflight_no_longer_carries_the_permanent_placeholder(monkeypatch):
+    monkeypatch.setattr(wallet_client, "collateral_status",
+                        lambda *a, **k: ("ok", "collateral $6.42, allowances set"))
+    lines = wallet_client.preflight()
+    assert not any("confirm manually" in ln for ln in lines)
+    assert any(ln.startswith("[ok] collateral") for ln in lines)
+
+
+def test_preflight_adds_the_operator_instruction_only_when_not_ok(monkeypatch):
+    monkeypatch.setattr(wallet_client, "collateral_status",
+                        lambda *a, **k: ("!!", "1 of 3 spender allowance(s) NOT SET"))
+    lines = wallet_client.preflight()
+    assert any("approve the funding address" in ln for ln in lines)
