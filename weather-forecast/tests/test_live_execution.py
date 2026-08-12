@@ -11,6 +11,8 @@ missed trade, which is recoverable.
 
 from datetime import date
 
+import time
+
 import pytest
 
 import config
@@ -1722,3 +1724,50 @@ def test_preflight_adds_the_operator_instruction_only_when_not_ok(monkeypatch):
                         lambda *a, **k: ("!!", "1 of 3 spender allowance(s) NOT SET"))
     lines = wallet_client.preflight()
     assert any("approve the funding address" in ln for ln in lines)
+
+
+def test_the_result_is_actually_cached(monkeypatch):
+    """
+    Regression: _finish() used to test `client is None`, but `client` is
+    rebound to the constructed client above it, so the cache write was dead on
+    every path that did real work -- correct answers, zero caching, one
+    authenticated round trip per candidate entry.
+    """
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0x" + "1" * 64)
+    monkeypatch.setenv("POLYMARKET_FUNDER", "0x" + "2" * 40)
+    monkeypatch.setattr(wallet_client, "get_client", lambda: object())
+    monkeypatch.setattr(wallet_client, "_collateral_cache", {"at": 0.0, "result": None})
+
+    wallet_client.collateral_status()
+
+    assert wallet_client._collateral_cache["result"] is not None
+    assert wallet_client._collateral_cache["at"] > 0
+
+
+def test_a_warm_cache_is_returned_without_refetching(monkeypatch):
+    def _explode():
+        raise AssertionError("get_client() called despite a warm cache")
+
+    monkeypatch.setenv("POLYMARKET_PRIVATE_KEY", "0x" + "1" * 64)
+    monkeypatch.setenv("POLYMARKET_FUNDER", "0x" + "2" * 40)
+    monkeypatch.setattr(wallet_client, "get_client", _explode)
+    monkeypatch.setattr(wallet_client, "_collateral_cache",
+                        {"at": time.time(), "result": ("ok", "cached answer")})
+
+    assert wallet_client.collateral_status() == ("ok", "cached answer")
+
+
+def test_a_caller_supplied_client_neither_reads_nor_writes_the_cache(monkeypatch):
+    """An explicit client means "check this one now" -- a shared cache would
+    both answer with someone else's account and poison it with this one."""
+    monkeypatch.setattr(wallet_client, "_collateral_cache",
+                        {"at": time.time(), "result": ("ok", "cached answer")})
+
+    class _Fake:
+        def get_balance_allowance(self, params=None):
+            return {"balance": "0", "allowances": {"s": "0"}}
+
+    result = wallet_client.collateral_status(client=_Fake())
+
+    assert result != ("ok", "cached answer")
+    assert wallet_client._collateral_cache["result"] == ("ok", "cached answer")

@@ -991,14 +991,24 @@ def collateral_status(client=None, use_cache: bool = True) -> tuple:
 
     import config
 
+    # WHETHER THE CALLER SUPPLIED A CLIENT, captured BEFORE `client` is
+    # rebound below. _finish() closes over the local, so testing `client is
+    # None` inside it asked "did we end up with a client?" -- always true on
+    # the path that actually did the work -- rather than "was one passed in?".
+    # The cache write was therefore dead on every successful call: measured on
+    # the box, four consecutive calls each took ~180ms and the cache stayed
+    # empty. Correct results, no caching, and an authenticated round trip per
+    # candidate entry, which is exactly what the cache exists to prevent.
+    cacheable = use_cache and client is None
+
     now = _time.time()
-    if use_cache and client is None:
+    if cacheable:
         cached = _collateral_cache["result"]
         if cached is not None and now - _collateral_cache["at"] < config.COLLATERAL_STATUS_TTL_S:
             return cached
 
     def _finish(result):
-        if use_cache and client is None:
+        if cacheable:
             _collateral_cache.update({"at": now, "result": result})
         return result
 
