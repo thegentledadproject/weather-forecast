@@ -662,22 +662,47 @@ SCHEDULE_WINDOWS = [
     # at all -- a threshold is only ever evaluated on a scan tick, so the
     # scan interval IS the resolution of every exit level in risk_manager.
     #
-    # Widened to 120/60/180 they were far coarser than the thresholds they
-    # were meant to enforce, and the live record showed exactly that. Across
-    # the 12 stop-losses in the three days after 2026-08-09, the distance
-    # between the trigger price and the price actually filled tracked the
-    # window's interval almost linearly:
+    # These were widened to 120/60/180. They are now 15/15/30 -- but NOT
+    # for the reason originally given here, and the correction is worth
+    # keeping because the original reasoning is the tempting one.
     #
-    #     10-min window (05:00-08:00)   overshoot ~0.010
-    #     30-min window (09:00-10:00)   overshoot  0.018
-    #     60-min window (12:00-16:00)   overshoot  0.070   <- WSSS 32YES
+    # THE ORIGINAL ARGUMENT, WHICH DID NOT HOLD. Across the 12 stop-losses
+    # in the three days from 2026-08-09, the distance between the trigger
+    # price and the price actually filled looked linear in the window
+    # interval (~0.010 at 10 min, 0.018 at 30, 0.070 at 60), so the clock
+    # was moved to close the gap. Re-measured over the 16 stop-losses in
+    # the two days after, on the tighter cadence, it had not improved:
+    # genuine misses went 0.0177 -> 0.0322 mean, 0.070 -> 0.073 worst, and
+    # the 10-minute primary window itself produced misses of 0.073 and
+    # 0.032. The apparent linearity was small-sample coincidence across
+    # different stations, books and days.
     #
-    # and three more stops fired at exactly 10:00 and one at exactly 12:00
-    # -- window boundaries, i.e. the first look after a long blind stretch,
-    # where the position had already been through the level unobserved.
-    # A 15% tightened stop cannot be honoured on a 3-hour sample; tightening
-    # the threshold further would only have widened the gap it is measured
-    # against. The binding constraint was the clock, so the clock moved.
+    # WHAT THE FILLS ACTUALLY ARE. Reconstructed from price_snapshots,
+    # they are single jumps, not sampling misses. ZGGG 35C YES sat flat at
+    # 0.260 for seven consecutive reads and printed 0.110 on the eighth,
+    # straight through a 0.203 trigger; ZBAA 30C YES was 0.360 at one read
+    # (three-tenths of a cent above its stop) and 0.260 at the next. No
+    # scan interval catches a price that never trades in between. Stop
+    # slippage on a thin book is an EXECUTION problem -- resting orders,
+    # or sizing for the gap -- and cannot be bought with polling.
+    #
+    # WHY THE TIGHTER CADENCE STAYS ANYWAY. It pays for itself somewhere
+    # else entirely: take-profit went from 21% to 44% of all exits and
+    # resolution from 21% to 0%, i.e. positions that used to drift to
+    # settlement now get their level taken while it is there. Stop-loss
+    # share was flat (52% -> 50%), so tighter watching did not convert
+    # recovering dips into extra stop-outs, which was the live worry. Cost
+    # is 42 -> 72 ticks/day/station with fd count flat at 5 and RSS 72 MB
+    # after 1d19h, so there is nothing to buy back by reverting.
+    #
+    # ONE MEASUREMENT TRAP, since it will otherwise be rediscovered. At
+    # 10:00 the stop tightens from 30% to 15% of the risk unit, which
+    # RAISES the trigger price, so positions already sitting between the
+    # two levels are captured on the first tick after 10:00. That is the
+    # edge-decay policy firing as designed, not a missed fill, and it
+    # accounted for 5 of 12 and then 8 of 16 of what was first counted as
+    # overshoot. Measure the two separately or the cadence will look
+    # worse, and the stop tighter, than either really is.
     #
     # Entry windows (05:00-10:00) are deliberately UNCHANGED: their cadence
     # encodes the edge-decay thesis rather than a monitoring requirement,
