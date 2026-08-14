@@ -80,6 +80,8 @@ import calibration
 import config
 import storage
 import executor
+import risk_manager  # risk_unit() only -- the gap haircut must measure the stop
+                     # distance the exit path will actually use, not a copy of it
 from models import EVResult, EntryDecision
 from clients import market_client
 
@@ -138,6 +140,49 @@ def live_size_cap_usd(station_icao: str) -> Optional[float]:
     mode, so no caller has to remember to.
     """
     return config.live_size_cap_usd(station_icao, _execution_mode(station_icao))
+
+
+def gap_risk_haircut(entry_price: Optional[float], station_icao: Optional[str] = None) -> float:
+    """
+    Fraction to scale a position by so a stop-out costs what the Kelly size
+    was actually chosen against.
+
+    Kelly sizes against the loss you expect to take. The stop defines that
+    loss as STOP_LOSS_PCT x risk_unit -- but that is the loss you take only
+    if you get filled AT the trigger, and on these books you do not. The
+    real cost is the stop distance plus config.stop_gap_allowance(), so the
+    honest size is the nominal one scaled by the ratio between them:
+
+        nominal / (nominal + gap)
+
+    Worked, at the measured 0.04 gap and the normal-regime 30% stop:
+
+        entry 0.16 -> nominal 0.048 -> haircut 0.55   (gap is most of the risk)
+        entry 0.30 -> nominal 0.090 -> haircut 0.69
+        entry 0.42 -> nominal 0.126 -> haircut 0.76
+        entry 0.70 -> nominal 0.090 -> haircut 0.69   (risk unit is 1-price here)
+
+    The haircut bites hardest on cheap entries, which is correct: four cents
+    of slippage is a rounding error against a 0.70 stop distance and most of
+    the risk against a 0.16 one.
+
+    Returns 1.0 (no haircut) for LOTTERY-priced entries, which carry no stop
+    at all -- their maximum loss is the stake, already accepted at entry, and
+    no amount of gapping changes it. Also 1.0 for degenerate prices.
+
+    Uses the NORMAL-regime stop. Entries only happen before 10:00 local, so
+    that is the regime a position is opened under; after 10:00 the tightened
+    stop makes nominal smaller and the true haircut harsher still, so this is
+    the conservative-in-the-right-direction choice rather than an exact one.
+    """
+    if entry_price is None or entry_price <= 0:
+        return 1.0
+    if entry_price < config.LOTTERY_PRICE_THRESHOLD:
+        return 1.0
+    nominal = config.STOP_LOSS_PCT * risk_manager.risk_unit(entry_price)
+    if nominal <= 0:
+        return 1.0
+    return nominal / (nominal + config.stop_gap_allowance(station_icao))
 
 
 def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
@@ -554,6 +599,12 @@ def evaluate_entry(
     # Cap 2: station maturity -- exploratory stations sized down hard
     if maturity == "exploratory":
         size_usd *= config.EXPLORATORY_SIZE_MULTIPLIER
+
+    # Gap-risk haircut: the stop does not fill at the stop. Applied AFTER the
+    # hard ceiling and the maturity multiplier so it always reduces real risk
+    # rather than being swallowed by a cap above it, and BEFORE the live fixed
+    # size below, which is a deliberate override rather than a risk estimate.
+    size_usd *= gap_risk_haircut(ev_result.market_price, station_icao)
 
     # Cap 2b: fixed live/simulation trade size. REPLACES Kelly sizing rather
     # than capping it -- see config.LIVE_TRADE_SIZE_USD.

@@ -96,6 +96,7 @@ from models import EVResult, EntryDecision
 # reimplements -- and so a rename upstream breaks the import loudly.
 from entry_manager import (
     compute_kelly_fraction,
+    gap_risk_haircut,
     max_plausible_edge_for,
     veto_same_bucket_conflicts,
     apply_portfolio_budget,
@@ -260,6 +261,12 @@ def evaluate_entry_sim(
     # Cap 2: station maturity -- exploratory stations sized down hard
     if maturity == "exploratory":
         size_usd *= config.EXPLORATORY_SIZE_MULTIPLIER
+
+    # Gap-risk haircut, same position in the chain as live (after the hard
+    # ceiling and maturity, before the live fixed size). Imported from
+    # entry_manager, not restated: a replay that sized without the haircut
+    # would report a strategy nobody is running.
+    size_usd *= gap_risk_haircut(ev.market_price, station_icao)
 
     # --- Gate 8: depth unknown -------------------------------------------
     if depth_usd is None:

@@ -879,6 +879,58 @@ LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
 # and accepting the taker fee, which ev_engine already charges for anyway.
 LIVE_ENTRY_ORDER_TYPE = "FOK"
 
+# --- Stop-gap allowance (entry_manager sizing) ----------------------------
+# A stop-out does not cost you the stop distance. It costs the stop distance
+# PLUS however far the book gapped past the trigger before anything could
+# sell, and on these markets that second term is not small.
+#
+# It is also not fixable by watching more often, which is the whole reason
+# this constant exists rather than another schedule change. The 2026-08-12
+# cadence tightening (120/60/180 -> 15/15/30 min, commit 6ed099e) did not
+# reduce it at all: the fills are single jumps with no trades in between.
+# ZGGG 35C YES sat at 0.260 for seven consecutive reads and printed 0.110
+# on the eighth, straight through a 0.203 trigger. You cannot poll your way
+# into a price that never existed, and a resting sell limit at the stop is
+# worse than useless -- below the market it fills instantly, and in a
+# falling market nobody lifts it. So the gap is priced in at ENTRY instead,
+# by sizing for it.
+#
+# MEASURED, not guessed. Over all price_snapshots joined to market_tokens,
+# taking consecutive observations of the same token 10-20 minutes apart
+# (the horizon the 15-minute exit windows actually decide on) with a prior
+# price above MIN_EXIT_PRICE, the downward move distribution was:
+#
+#     median 0.010 (one tick) at every station
+#     p90    0.030-0.060, clustered on 0.040
+#     p99    0.060-0.330, noisy and unstable
+#
+# 0.04 is that p90: nine times in ten the gap beyond a stop is under four
+# cents. p99 was rejected as the basis -- it swings by 5x across stations
+# on ~300 samples each and would halve position sizes off what is often a
+# single resolution-adjacent print.
+#
+# DELIBERATELY ONE NUMBER, NOT THIRTEEN. The per-station spread above is
+# not supported at n~300 per station, and the raw per-station figures are
+# confounded anyway: WSSS and WMKK are sampled every ~5 minutes by the
+# depth collector while the other eleven are on ~13, so an unnormalised
+# comparison reads sampling cadence as market behaviour. Override a single
+# station below only with a station-specific measurement that survives that
+# normalisation.
+EXPECTED_STOP_GAP = 0.04
+STOP_GAP_BY_STATION: dict = {}
+
+
+def stop_gap_allowance(station_icao: Optional[str] = None) -> float:
+    """
+    Dollars per share a stop is expected to slip past its trigger at this
+    station. See EXPECTED_STOP_GAP for the measurement and for why this is
+    one shared number rather than a per-station table.
+    """
+    if station_icao and station_icao in STOP_GAP_BY_STATION:
+        return STOP_GAP_BY_STATION[station_icao]
+    return EXPECTED_STOP_GAP
+
+
 # Never size a position larger than this fraction of the visible order-book
 # depth (within a 10% price-impact band, per market_client.get_available_depth_usd).
 # Two reasons: (1) the slippage ESTIMATE itself becomes unreliable past this
