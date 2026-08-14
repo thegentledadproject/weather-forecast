@@ -548,6 +548,33 @@ def _settlement_grade_reading(position: Position):
     return None
 
 
+def _event_bounds(position: Position, station) -> Optional[tuple]:
+    """
+    The bucket bounds of the position's OWN event, from its token map, or
+    None if they can't be established.
+
+    config.STATIONS' bounds are passed only as parse_bucket_label's
+    edge-label hint -- the same way ev_engine calls this on the trading
+    path -- and derive_bucket_bounds() then rejects any map that isn't a
+    contiguous run of EXPECTED_BUCKET_COUNT buckets. A partial map cannot
+    quietly produce narrower bounds.
+    """
+    try:
+        token_map = market_discovery.discover_token_map(
+            station, position.target_date, station.bucket_min_c, station.bucket_max_c,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[position_manager] {position.position_id}: token map lookup failed "
+            f"({type(exc).__name__}) -- cannot establish this event's bucket bounds."
+        )
+        return None
+
+    if not token_map:
+        return None
+    return market_discovery.derive_bucket_bounds(token_map)
+
+
 def _close_from_settlement_source(position: Position, gamma_closed: Optional[bool]) -> Optional[ExitDecision]:
     """
     Close a resolved position using the station's own settlement-grade
@@ -577,10 +604,46 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
         return None
 
     station = _station_for(position)
+
+    # BOUNDS COME FROM THE EVENT, NEVER FROM config.STATIONS.
+    #
+    # bucket_for_temp() CLAMPS into the bounds it is given, so the bounds
+    # decide the answer for any reading at or past an edge -- and
+    # config.STATIONS' bounds are documented as a seasonal cross-check that
+    # drifts, not as truth. Measured 2026-08-14: 10 of 13 stations had
+    # drifted, RJTT by 4C and RKPK/ZBAA by 5C, and 15 settlement-grade
+    # readings from the previous fortnight land in a DIFFERENT bucket under
+    # config's bounds than under the live event's. ZBAA on 2026-08-12 read
+    # 27.0C: the live event settles that as bucket 27, config's stale 30-40
+    # clamps it to 30 -- so a winning 27C position would have been written
+    # off as a loser, by this function, silently.
+    #
+    # The token map survives settlement (only the ORDER BOOK is unseeded --
+    # discovery still returns all 11 buckets), so the authoritative bounds
+    # are available at exactly the moment this runs.
+    bounds = _event_bounds(position, station)
+    if bounds is None:
+        print(
+            f"[position_manager] WARNING: {position.position_id} has a settlement reading "
+            f"({obs.source} {obs.max_temp_c:.1f}C) but its event's bucket bounds could not be "
+            f"discovered, and config's bounds are a drifting cross-check rather than truth. "
+            f"Refusing to settle on bounds that may clamp the winner into the wrong bucket -- "
+            f"leaving the position OPEN (${position.size_usd:.2f} at stake)."
+        )
+        return None
+
+    bucket_min, bucket_max = bounds
+    if (bucket_min, bucket_max) != (station.bucket_min_c, station.bucket_max_c):
+        print(
+            f"[position_manager] {position.position_id}: settling on the LIVE event bounds "
+            f"{bucket_min}-{bucket_max}C, not config's {station.bucket_min_c}-"
+            f"{station.bucket_max_c}C (bounds drift)."
+        )
+
     winning_bucket = settlement.bucket_for_temp(
         obs.max_temp_c,
-        station.bucket_min_c,
-        station.bucket_max_c,
+        bucket_min,
+        bucket_max,
         station.bucket_edge_mode,
     )
     exit_price = settlement.resolution_exit_price(

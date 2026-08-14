@@ -62,6 +62,22 @@ def _dead_book(monkeypatch):
     monkeypatch.setattr(
         market_client, "get_current_price_for_side", lambda token_id, side: None,
     )
+    # Discovery SURVIVES settlement -- only the order book is unseeded --
+    # so by default these tests present an event whose bounds match config.
+    _event_bounds(monkeypatch, None)
+
+
+def _event_bounds(monkeypatch, bounds, station="RKSI"):
+    """
+    Present a live event with the given bucket bounds. None means "same as
+    config", the no-drift case.
+    """
+    if bounds is None:
+        st = config.get_station(station)
+        bounds = (st.bucket_min_c, st.bucket_max_c)
+    monkeypatch.setattr(
+        position_manager, "_event_bounds", lambda position, station: bounds,
+    )
 
 
 def _observations(monkeypatch, rows):
@@ -258,3 +274,99 @@ class TestBucketEdgeMode:
         position_manager._close_resolved_without_price(_pos(bucket_c=33), "tok")
 
         assert closed[0][1] == 1.0, "floor mode should put 33.9C in bucket 33"
+
+
+class TestBoundsDrift:
+    """
+    bucket_for_temp() CLAMPS into whatever bounds it is given, so the bounds
+    decide the answer for any reading at or past an edge. config.STATIONS'
+    bounds are a seasonal cross-check that drifts; the event's are truth.
+
+    Measured 2026-08-14: 10 of 13 stations had drifted (RJTT by 4C,
+    RKPK/ZBAA by 5C) and 15 readings from the previous fortnight settle into
+    a different bucket under config's bounds than under the live event's.
+    """
+
+    def test_a_winner_at_the_stale_lower_clamp_is_not_written_off(self, monkeypatch):
+        """
+        The real ZBAA case, 2026-08-12. Live event 25-35 settles 27.0C as
+        bucket 27. config's stale 30-40 clamps it to 30 -- so a WINNING 27C
+        position gets settled as a loser. Silently, by this function.
+        """
+        station = config.get_station("RKSI")
+        monkeypatch.setattr(station, "bucket_min_c", 30, raising=False)
+        monkeypatch.setattr(station, "bucket_max_c", 40, raising=False)
+
+        _dead_book(monkeypatch)
+        _event_bounds(monkeypatch, (25, 35))
+        _observations(monkeypatch, [_reading(27.0)])
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        position_manager._close_resolved_without_price(_pos(bucket_c=27), "tok")
+
+        assert closed[0][1] == 1.0, (
+            "settled on config's stale lower clamp -- a winning position paid 0.0"
+        )
+
+    def test_a_reading_past_the_stale_upper_clamp_settles_on_the_event(self, monkeypatch):
+        """Live 22-32 folds 34.0C into the 32 catch-all; config's 26-36 says 34."""
+        station = config.get_station("RKSI")
+        monkeypatch.setattr(station, "bucket_min_c", 26, raising=False)
+        monkeypatch.setattr(station, "bucket_max_c", 36, raising=False)
+
+        _dead_book(monkeypatch)
+        _event_bounds(monkeypatch, (22, 32))
+        _observations(monkeypatch, [_reading(34.0)])
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        position_manager._close_resolved_without_price(_pos(bucket_c=32), "tok")
+
+        assert closed[0][1] == 1.0, "32C is the live event's top catch-all and won"
+
+    def test_undiscoverable_bounds_refuse_rather_than_fall_back_to_config(self, monkeypatch):
+        """
+        Falling back to config here would be the whole bug: it looks like a
+        safe default and silently settles on numbers known to drift.
+        """
+        _dead_book(monkeypatch)
+        monkeypatch.setattr(position_manager, "_event_bounds", lambda position, station: None)
+        _observations(monkeypatch, [_reading(31.0)])
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        assert position_manager._close_resolved_without_price(_pos(), "tok") is None
+        assert closed == []
+
+    def test_a_malformed_token_map_yields_no_bounds(self, monkeypatch):
+        """
+        derive_bucket_bounds() rejects a non-contiguous or short map, so a
+        partial discovery cannot quietly narrow the bounds.
+        """
+        station = config.get_station("RKSI")
+        monkeypatch.setattr(
+            position_manager.market_discovery, "discover_token_map",
+            lambda st, d, lo=None, hi=None: {29: {}, 31: {}},  # gappy, 2 of 11
+        )
+        assert position_manager._event_bounds(_pos(), station) is None
+
+
+def test_the_mechanism_itself_the_clamp_decides_the_winner():
+    """
+    Independent of position_manager: the same reading settles into two
+    different buckets purely on which bounds bucket_for_temp() is handed.
+    This is why the bounds must come from the event and not from a
+    cross-check constant that drifts.
+
+    Both cases are real, measured 2026-08-14 against live events.
+    """
+    from backtest import resolution
+
+    # ZBAA 2026-08-12, 27.0C. Live event 25-35 vs config's stale 30-40.
+    assert resolution.bucket_for_temp(27.0, 25, 35, "half_up") == 27
+    assert resolution.bucket_for_temp(27.0, 30, 40, "half_up") == 30
+
+    # RJTT 2026-08-08, 34.0C. Live event 22-32 vs config's stale 26-36.
+    assert resolution.bucket_for_temp(34.0, 22, 32, "half_up") == 32
+    assert resolution.bucket_for_temp(34.0, 26, 36, "half_up") == 34
