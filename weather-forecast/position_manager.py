@@ -77,6 +77,16 @@ config.py, models.py, risk_manager.py, storage.py (local)
 clients/market_client.py (local)
 market_discovery.py (local)
 executor.py (local)
+backtest/resolution.py (local) -- for the settlement-source fallback
+    below. A LIVE module importing from backtest/ deserves the raised
+    eyebrow, so: bucket_for_temp() and resolution_exit_price() are pure
+    functions over (temperature, bucket bounds, edge mode) and import
+    nothing but math, datetime and config. Writing a second copy here
+    is the actually dangerous option -- bucket_for_temp() deliberately
+    avoids round() because banker's rounding disagrees with
+    probability.py on exactly the half-degree bucket edges, and a
+    reimplementation that forgot that would settle live positions into
+    different buckets than the backtest scores them in.
 """
 
 from datetime import date, datetime, timezone
@@ -89,6 +99,7 @@ import market_discovery
 from clients import market_client
 from models import Position, ExitDecision
 import executor
+from backtest import resolution as settlement
 
 # Consecutive failed price fetches, keyed by position_id. Deliberately
 # in-memory and unpersisted: what this measures is "how long have we been
@@ -190,8 +201,22 @@ def _check_one_position(position: Position) -> Optional[ExitDecision]:
         # A market can resolve while its price feed is down, and a
         # position we can't price is one we'd otherwise never see
         # resolve. Once blind for long enough, ask Gamma directly.
-        if failures >= UNMONITORABLE_CYCLES_WARN and _market_reported_closed(position) is True:
-            return _close_resolved_without_price(position, token_id)
+        if failures >= UNMONITORABLE_CYCLES_WARN:
+            reported_closed = _market_reported_closed(position)
+            if reported_closed is True:
+                return _close_resolved_without_price(position, token_id)
+            # Gamma can't say (lookup failed, or the bucket is no longer
+            # listed -- which is itself what a settled event looks like)
+            # AND the position's own market day is over. Two independent
+            # feeds are down; the observation record is not, and it is the
+            # authority both of them were only ever proxies for. Still
+            # returns None and stays loud if no settlement-grade reading
+            # exists. Gamma reporting OPEN is NOT overridden here: a live
+            # market with a broken price feed is a feed problem, and
+            # closing it on the weather would settle a position that can
+            # still trade.
+            if reported_closed is None and position.target_date < _local_today_for(position):
+                return _close_from_settlement_source(position, gamma_closed=None)
         return None
     _consecutive_price_failures.pop(position.position_id, None)
 
@@ -404,7 +429,12 @@ def _market_reported_closed(position: Position) -> Optional[bool]:
     return bool(state["closed"])
 
 
-def _close_as_resolved(position: Position, confirmed_price: float, market_closed: Optional[bool]) -> ExitDecision:
+def _close_as_resolved(
+    position: Position,
+    confirmed_price: float,
+    market_closed: Optional[bool],
+    basis: Optional[str] = None,
+) -> ExitDecision:
     """
     Close a position whose market has resolved. Deliberately its own code
     path with its own status/exit_reason: a resolution is NOT a stop-loss,
@@ -414,6 +444,11 @@ def _close_as_resolved(position: Position, confirmed_price: float, market_closed
     par or nothing, and recording the 0.98/0.02-ish quote that happened to
     be on the book at the moment of detection would bake feed noise into
     the permanent P&L record.
+
+    `basis` names where the number came from, for callers that did not get
+    it from the book. It is threaded into the log rather than assumed
+    because "the book said 0.99" and "the airport's own thermometer said
+    31C" are very different claims and the record should not blur them.
     """
     exit_price = 1.0 if confirmed_price >= 0.5 else 0.0
     pnl_pct = risk_manager.compute_pnl_pct(position.entry_price, exit_price)
@@ -426,9 +461,10 @@ def _close_as_resolved(position: Position, confirmed_price: float, market_closed
         pnl_pct=pnl_pct,
     )
 
+    where = basis or f"confirmed price {confirmed_price:.3f}"
     print(
         f"[position_manager] {position.position_id}: market RESOLVED "
-        f"(gamma_closed={market_closed}, confirmed price {confirmed_price:.3f}) -- closing at "
+        f"(gamma_closed={market_closed}, {where}) -- closing at "
         f"{exit_price:.1f} as market_resolved, pnl={pnl_pct:+.1%}. This is NOT a stop-loss."
     )
     executor.close_position(
@@ -459,14 +495,104 @@ def _close_resolved_without_price(position: Position, token_id: str) -> Optional
     final_price = market_client.get_current_price_for_side(token_id=token_id, side=position.side)
 
     if final_price is None:
+        # The book is gone, but the book was never the authority on WHO
+        # WON -- the weather is, and the market settles on the same
+        # airport record this station already stores.
+        from_source = _close_from_settlement_source(position, gamma_closed=True)
+        if from_source is not None:
+            return from_source
+
         print(
             f"[position_manager] WARNING: {position.position_id} sits on a RESOLVED market but no price can "
-            f"be read, so the winning side cannot be determined. Refusing to guess between 1.0 and 0.0 -- "
-            f"leaving the position OPEN for manual close/redemption (${position.size_usd:.2f} at stake)."
+            f"be read and no settlement-grade observation exists for {position.target_date}, so the winning "
+            f"side cannot be determined. Refusing to guess between 1.0 and 0.0 -- leaving the position OPEN "
+            f"for manual close/redemption (${position.size_usd:.2f} at stake)."
         )
         return None
 
     return _close_as_resolved(position, final_price, True)
+
+
+def _settlement_grade_reading(position: Position):
+    """
+    This station's own settlement-grade observation for the position's
+    target date, or None.
+
+    STRICTLY the station's `resolution_grade_source` -- not merely the
+    best reading available. The whole point is that this is the record
+    Polymarket settles on; a proxy-grade reading is a good forecast input
+    and a bad settlement authority, and silently accepting one here would
+    close positions on the wrong number.
+    """
+    station = _station_for(position)
+    if station is None:
+        return None
+
+    source = getattr(station, "resolution_grade_source", None)
+    if not source:
+        return None
+
+    try:
+        rows = storage.load_observations_since(position.station_icao, position.target_date)
+    except Exception as exc:  # noqa: BLE001
+        # Storage trouble must not close a position on a partial read.
+        print(
+            f"[position_manager] {position.position_id}: could not read observations "
+            f"({type(exc).__name__}) -- not settling from the observation record this cycle."
+        )
+        return None
+
+    for obs in rows:
+        if obs.target_date == position.target_date and obs.source == source:
+            return obs
+    return None
+
+
+def _close_from_settlement_source(position: Position, gamma_closed: Optional[bool]) -> Optional[ExitDecision]:
+    """
+    Close a resolved position using the station's own settlement-grade
+    reading, when the order book can no longer be read at all.
+
+    WHY THIS EXISTS. Once a market settles, Polymarket unseeds its book:
+    every bucket returns "no orderbook", so get_current_price_for_side()
+    returns None forever. The old code correctly refused to guess between
+    1.0 and 0.0 and left the position open -- but "open" then meant
+    permanently open, emitting an UNMONITORABLE warning every cycle until
+    someone cleared it by hand. Five positions were cleared that way
+    between 2026-08-09 and 2026-08-14; two more were queued behind them.
+
+    The refusal was right and the resignation was wrong. The winning side
+    was never unknowable -- it just wasn't on the book. It is the airport
+    record this station already ingests, the same one the backtest settles
+    on, and the same one Polymarket resolves against.
+
+    "NEVER GUESS" IS PRESERVED, and narrowed rather than weakened: this
+    returns None -- leaving the position open and loud -- whenever the
+    settlement-grade observation for that date is missing. A daily maximum
+    only exists once the day is over and the source published it, so the
+    observation's existence is itself the evidence that the day is done.
+    """
+    obs = _settlement_grade_reading(position)
+    if obs is None:
+        return None
+
+    station = _station_for(position)
+    winning_bucket = settlement.bucket_for_temp(
+        obs.max_temp_c,
+        station.bucket_min_c,
+        station.bucket_max_c,
+        station.bucket_edge_mode,
+    )
+    exit_price = settlement.resolution_exit_price(
+        position.side, position.bucket_c, winning_bucket,
+    )
+
+    basis = (
+        f"no book left to read; settled from {obs.source} {obs.max_temp_c:.1f}C "
+        f"-> winning bucket {winning_bucket}C, so {position.bucket_c}C "
+        f"{position.side} pays {exit_price:.1f}"
+    )
+    return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)
 
 
 def _note_unknown_resolution(position: Position, price: float) -> int:
