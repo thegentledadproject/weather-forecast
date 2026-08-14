@@ -734,9 +734,15 @@ def submit_order(spec: OrderSpec, live: bool) -> OrderResult:
     intermediate state to reconcile, and therefore no way to get the
     reconciliation wrong.
 
-    The price protection that GTC was chosen for is preserved: this is
-    still a LIMIT order at spec.limit_price, so it cannot fill worse than
-    the price entry_manager approved. FOK only removes the waiting.
+    The price protection that GTC was chosen for is preserved: the order
+    carries spec.limit_price, so it cannot fill worse than the price
+    entry_manager approved. FOK only removes the waiting.
+
+    It is BUILT with create_market_order(), not create_order(): an FOK
+    order is validated by the exchange as a market order, and the market
+    builder's amount precision is stricter than the limit builder's. See
+    the extended note at the build site -- getting this pairing wrong
+    rejected 5 of the first 8 real orders.
 
     live=False runs every step up to (not including) submission and
     returns simulated=True. Both gates must agree for live=True to
@@ -766,15 +772,53 @@ def submit_order(spec: OrderSpec, live: bool) -> OrderResult:
     lib = _clob()
     client = get_client()
     _wait_for_balance(client)
-    order_args = lib.OrderArgs(
+
+    # BUILT AS A MARKET ORDER BECAUSE IT IS POSTED AS ONE.
+    #
+    # This used to build with create_order() -- the LIMIT builder -- and
+    # then post it with OrderType.FOK. The two disagree about precision.
+    # get_order_amounts() (limit) allows the maker amount round_config
+    # .amount decimals, which is 4 at a 0.01 tick; get_market_order_amounts
+    # () (market) rounds the maker amount with round_config.SIZE, i.e. 2.
+    # The exchange validates an FOK order as a market order, so a limit
+    # -built BUY whose maker amount (price x shares) landed on 4 decimals
+    # was rejected outright:
+    #   "invalid amounts, the market buy orders maker amount supports a max
+    #    accuracy of 2 decimals, taker amount a max of 4 decimals"
+    # That killed 5 of the first 8 real orders on 2026-08-11..14 -- and
+    # intermittently, since whether price x shares lands on 2 decimals
+    # depends on the price, which is the worst way for it to fail.
+    #
+    # MarketOrderArgs.amount is side-dependent (builder.py
+    # get_market_order_amounts): USDC for a BUY, SHARES for a SELL. Both
+    # are round_down()'d onto 2 decimals by the builder, so both are
+    # rounded here first -- BUY UP to the cent so the submitted notional
+    # is never silently truncated below the size that cleared the gates,
+    # SELL down, matching build_exit_order's floor (never offer shares the
+    # position does not hold).
+    #
+    # The price protection is unchanged: MarketOrderArgs carries the same
+    # padded, tick-aligned spec.limit_price, and the builder round_down()s
+    # it onto the tick grid it is already on. For a BUY the exchange
+    # derives the minimum acceptable shares as amount/price, so the pad
+    # (a higher price) asks for fewer shares -- i.e. it widens the fill
+    # tolerance, which is the direction _pad_limit intends.
+    if spec.side == "BUY":
+        amount = _round_up_to_grid(spec.notional_usd, SHARE_DECIMALS)
+    else:
+        factor = 10 ** SHARE_DECIMALS
+        amount = math.floor(spec.size_shares * factor + 1e-9) / factor
+
+    order_args = lib.MarketOrderArgs(
         token_id=spec.token_id,
-        price=spec.limit_price,
-        size=spec.size_shares,
+        amount=amount,
         side=lib.Side.BUY if spec.side == "BUY" else lib.Side.SELL,
+        price=spec.limit_price,
+        order_type=lib.OrderType.FOK,
     )
 
     try:
-        signed = client.create_order(order_args)
+        signed = client.create_market_order(order_args)
         resp = client.post_order(signed, lib.OrderType.FOK)
     except Exception as exc:  # noqa: BLE001 -- any failure here means "no fill"
         logger.error(f"[wallet_client] order submission FAILED: {spec.describe()} -- {exc}")
