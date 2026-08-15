@@ -1,44 +1,52 @@
 """
-check_holdings.py -- read-only holdings audit, and the decisive test for
-whether balances come back in SHARES or in raw 6-decimal base units.
+check_holdings.py -- read-only holdings audit: what the funding wallet
+actually holds, which fills put it there, and whether balance readings are
+still being converted out of raw base units.
 
-WHY THIS EXISTS
----------------
-On 2026-08-14 reconciliation began blocking every live entry with:
+WHAT IT WAS WRITTEN FOR, AND WHAT IT FOUND (2026-08-14/15)
+----------------------------------------------------------
+Reconciliation began blocking every live entry with:
 
     1 held but NOT RECORDED: 3017647041... (8885.00 sh)
 
-8885 shares of a weather bucket would be a four-figure position on a book
-that trades in single-digit dollars, and the token appears nowhere in this
-daemon's journal. The suspicion is that it is not 8885 shares at all:
-wallet_client._held_shares() returns float(resp["balance"]) straight from
-get_balance_allowance(), and the CLOB wire format is raw base units --
-py_clob_client_v2's own to_token_decimals(x) is int(10**6 * x), and the
-client passes the REST response back unconverted. If that is right, 8885
-raw units is 0.008885 shares: dust, and a false alarm.
+8885 shares of a weather bucket would have been a four-figure position on
+a book trading in single-digit dollars, and the token appeared nowhere in
+the daemon's journal. It was not 8885 shares. wallet_client._held_shares()
+returned float(resp["balance"]) verbatim, and the CLOB wire format is raw
+6-decimal base units -- py_clob_client_v2's own to_token_decimals(x) is
+int(10**6 * x), and the REST response comes back unconverted. So the
+reading was 1e6 too large.
 
-That has a second and worse consequence than a blocked entry. The
-db_only direction of reconciliation compares:
+This script settled it and traced it in one run: USDC collateral returned
+6,669,795.00 against a wallet holding about six dollars, and section 2
+showed the token's only two fills -- BUY 5.138885 @ 0.72, SELL 5.13 @
+0.86. The residue is 5.138885 - 5.13 = 0.008885 shares, i.e. exactly 8885
+base units. Dust left by build_exit_order() flooring the sell size onto
+the share grid, which it does on purpose because selling more than is held
+fails outright.
 
-    held + RECONCILE_SHARE_TOLERANCE < expected
+FIXED in commit 6f2c8d9: _held_shares() now divides by
+wallet_client.BALANCE_BASE_UNITS. Note the bug broke reconciliation in
+BOTH directions -- exchange_only loudly (the block above), and db_only
+silently, because `held + RECONCILE_SHARE_TOLERANCE < expected` can never
+be true when held is 1e6 too large, so the check that catches "the
+database thinks we hold shares that are gone" had never fired.
 
-With `held` in raw units a 5.14-share position reads as ~5_140_000, so
-that condition can never be true and the check that catches "the database
-thinks we hold shares that are gone" -- the one protecting the exit path
-from selling a position that no longer exists -- has never been able to
-fire. exchange_only fails loudly; db_only fails silently.
+WHY IT IS STILL WORTH KEEPING
+-----------------------------
+Sections 2 and 3 are a general holdings audit and trace, independent of
+that incident: what is held, and which fills produced it.
 
-WHAT SETTLES IT
----------------
-The USDC collateral balance in section 1. You know roughly what is in the
-funding wallet. If a wallet holding about twenty dollars reports ~20000000,
-balances are raw units and _held_shares() needs a /1e6. If it reports ~20,
-they are already human units and the 8885 is a real position that needs
-explaining instead.
+Section 1 is now a REGRESSION CHECK. The API still returns base units --
+that is simply the wire format, and correct. What matters is that
+_held_shares() keeps converting. So the script reads the balance raw,
+deliberately bypassing the conversion, and compares it against what
+_held_shares() reports. If they ever agree, the /1e6 has been lost again
+and the 2026-08-14 outage is back.
 
-Section 2 then TRACES the holding: every fill on this wallet inside
-config.RECONCILE_TRADE_LOOKBACK_HOURS, printed raw, so the trade that
-created any unrecorded balance is visible rather than inferred.
+The USDC collateral line remains the human-checkable anchor: you know
+roughly what is in the wallet, so a reading of ~6,669,795 against about
+six dollars tells you the scale without trusting any code in this file.
 
 SAFETY
 ------
@@ -70,9 +78,10 @@ Usage:
     python check_holdings.py --json          # raw responses, for when the table is not the authority
 
 Exit codes:
-    0  balances look like human units (the 8885 would be a REAL position)
+    0  healthy -- the API returns base units and _held_shares() converts them
     1  could not check (no credentials, unreachable API)
-    2  balances look like raw base units (_held_shares needs /1e6)
+    2  REGRESSION -- _held_shares() is returning base units as if they were
+       shares, which is the 2026-08-14 outage returning
 """
 
 import argparse
@@ -189,22 +198,21 @@ def main() -> int:
         print(f"Cannot check: client unavailable -- {exc}")
         return 1
 
-    # --- 1. THE DECIDING NUMBER ------------------------------------------
-    print("\n=== 1. USDC collateral -- the units test ===")
+    # --- 1. SCALE CHECK ---------------------------------------------------
+    print("\n=== 1. USDC collateral -- the scale anchor ===")
     usdc, resp = _raw_balance(client, lib, None, "COLLATERAL")
     if usdc is None:
-        print("  collateral balance unreadable -- cannot run the units test")
+        print("  collateral balance unreadable -- cannot anchor the scale")
         print(f"  response: {resp}")
-        verdict_raw = None
     else:
         print(f"  balance as returned : {usdc:,.2f}")
-        print(f"  read as raw units   : ${usdc / SCALE:,.6f} USDC")
-        print(f"  read as human units : ${usdc:,.2f} USDC")
-        verdict_raw = usdc > 100_000  # nobody funds this bot with $100k
+        print(f"  read as base units  : ${usdc / SCALE:,.6f} USDC")
+        print(f"  read as whole USDC  : ${usdc:,.2f} USDC")
         print()
-        print("  ^ Compare against what you know is in the wallet. One of those two")
-        print("    lines is right; whichever matches your actual balance decides")
-        print("    whether _held_shares() is off by 1e6.")
+        print("  ^ The human-checkable anchor: you know roughly what is in the")
+        print("    wallet, so whichever line matches tells you the API's scale")
+        print("    without trusting any code in this file. It has been base units")
+        print("    every time it has been run.")
         if args.json:
             print(f"  raw response: {json.dumps(resp, default=str)}")
 
@@ -258,6 +266,11 @@ def main() -> int:
     if not tokens:
         print("  no tokens to inspect")
 
+    # Whether _held_shares() still converts. None = never established,
+    # because every token read failed or every balance was zero (zero is
+    # the one value that looks identical under both scales).
+    conversion_applied = None
+
     for token in tokens:
         held, resp = _raw_balance(client, lib, token, "CONDITIONAL")
         pos = recorded.get(token)
@@ -267,32 +280,40 @@ def main() -> int:
         if held is None:
             print(f"    balance unreadable -- {resp}")
             continue
-        print(f"    balance as returned : {held:,.2f}")
-        print(f"    read as raw units   : {held / SCALE:,.6f} shares")
-        if pos and getattr(pos, "size_shares", None):
-            ratio = held / pos.size_shares if pos.size_shares else 0
-            print(f"    db shares           : {pos.size_shares}   -> returned/db = {ratio:,.1f}")
-            print("     ^ a ratio near 1,000,000 is the 1e6 scale, proving raw units")
+        print(f"    balance as returned : {held:,.2f}   (raw, conversion bypassed)")
+        print(f"    as shares (raw/1e6) : {held / SCALE:,.6f}")
+
+        # The regression check. This script reads raw on purpose; production
+        # goes through _held_shares(). They must differ by exactly the scale.
+        via_production = wallet_client._held_shares(client, token)
+        if via_production is not None:
+            print(f"    _held_shares() says : {via_production:,.6f} shares")
+            if held == 0:
+                pass  # zero is scale-invariant and proves nothing either way
+            elif abs(via_production - held / SCALE) >= 1e-9:
+                conversion_applied = False          # one mismatch is decisive
+            elif conversion_applied is None:
+                conversion_applied = True           # ... and never un-decides it
         if args.json:
             print(f"    raw response: {json.dumps(resp, default=str)}")
 
     # --- verdict ----------------------------------------------------------
     print("\n=== Verdict ===")
-    if verdict_raw is None:
-        print("  INCONCLUSIVE -- the collateral read failed. Judge from section 3:")
-        print("  a returned/db ratio near 1e6 means raw units.")
+    if conversion_applied is None:
+        print("  INCONCLUSIVE -- no token had a readable, nonzero balance, and zero")
+        print("  reads the same under either scale. Judge from section 1: a collateral")
+        print("  figure ~1e6 times the wallet's real dollars means base units, which")
+        print("  is expected and correct. Re-run when a live position is open.")
         return 1
-    if verdict_raw:
-        print("  Balances look like RAW BASE UNITS (1e6 scale).")
-        print("  -> wallet_client._held_shares() must divide by 1e6.")
-        print("  -> the 8885 'shares' are 0.008885 shares of dust, and the live-entry")
-        print("     block is a false alarm.")
-        print("  -> reconciliation's db_only direction has never been able to fire.")
+    if not conversion_applied:
+        print("  REGRESSION: _held_shares() is returning the balance unconverted, so")
+        print("  reconciliation is seeing share counts 1e6 too large. This is the")
+        print("  2026-08-14 outage returning -- exchange_only will block every live")
+        print("  entry on exit dust, and db_only will silently never fire again.")
+        print("  -> restore the /BALANCE_BASE_UNITS in wallet_client._held_shares().")
         return 2
-    print("  Balances look like HUMAN UNITS -- _held_shares() is correct as written,")
-    print("  and the unrecorded holding is a REAL position that needs explaining")
-    print("  before live trading is unblocked. Do NOT raise RECONCILE_IGNORE_TRADES_BEFORE")
-    print("  to clear it; that hides exposure the live caps cannot see.")
+    print("  Healthy: the API returns base units and _held_shares() converts them to")
+    print("  shares, so reconciliation is comparing like with like in both directions.")
     return 0
 
 
