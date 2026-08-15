@@ -1397,6 +1397,19 @@ RECONCILE_IGNORE_TRADES_BEFORE = "2026-08-11"
 # exchange's balance. Share counts are rounded to 2 decimals by the order
 # builder, and a partial fill is a real divergence rather than noise, so this
 # only absorbs representation error.
+#
+# IT MUST COVER AN EXIT'S DUST, and it does so with zero margin. Because
+# build_exit_order() FLOORS the sell size onto the 2-decimal share grid
+# (selling more than is held fails outright), every exit can leave up to --
+# but strictly less than -- 10**-wallet_client.SHARE_DECIMALS = 0.01 shares
+# behind. This tolerance is exactly that bound, so dust never trips
+# reconciliation and a genuine partial fill still does.
+#
+# Raising SHARE_DECIMALS without raising this would silently start blocking
+# live entries on dust, which is precisely the 2026-08-15 failure mode --
+# a residue of 0.008885 shares reading as an unrecorded position. The
+# relationship is asserted in tests/test_reconciliation_units.py rather
+# than left as a coincidence between two constants in two modules.
 RECONCILE_SHARE_TOLERANCE = 0.01
 
 # Reconciliation result cache, in seconds. _live_budget_breach() runs per

@@ -128,7 +128,24 @@ KNOWN_SIGNATURE_TYPES = (0, 1, 3)
 # Share counts are rounded to 2 decimals by the order builder at EVERY
 # tick size (ROUNDING_CONFIG, order_builder/builder.py:36). Mirrored here
 # because build_entry_order() has to round UP onto the same grid.
+#
+# This also BOUNDS THE DUST an exit can leave behind. build_exit_order()
+# floors the sell size onto this grid -- selling more shares than are held
+# fails outright -- so the residue after any exit is strictly less than
+# 10**-SHARE_DECIMALS = 0.01 shares. That is why the residue is always
+# under config.RECONCILE_SHARE_TOLERANCE and never trips reconciliation.
+# The two constants live in different modules and must stay consistent;
+# tests/test_reconciliation_units.py asserts the relationship rather than
+# leaving it to coincidence, because it currently holds EXACTLY (0.01 vs
+# 0.01) with no margin at all.
 SHARE_DECIMALS = 2
+
+# Outcome-token and collateral balances come off the CLOB REST API as raw
+# on-chain base units, 6 decimals, unconverted by the client
+# (to_token_decimals(x) == int(10**6 * x)). Every balance read must divide
+# by this to get shares -- see _held_shares() for what happened when one
+# did not.
+BALANCE_BASE_UNITS = 10 ** 6
 
 # Fallback floor used only when the book does not report min_order_size.
 # Polymarket has historically enforced a $1 minimum; treating an absent
@@ -1273,8 +1290,36 @@ _reconcile_cache = {"at": 0.0, "result": None}
 
 def _held_shares(client, token_id: str) -> Optional[float]:
     """
-    Outcome-token balance for one token, or None if it could not be read.
-    None is NOT zero -- a failed read must never look like "holds nothing".
+    Outcome-token balance for one token IN SHARES, or None if it could not
+    be read. None is NOT zero -- a failed read must never look like "holds
+    nothing".
+
+    THE /1e6 IS LOAD-BEARING (fixed 2026-08-15)
+    -------------------------------------------
+    get_balance_allowance() returns the raw on-chain balance in BASE UNITS,
+    not shares -- py_clob_client_v2's own to_token_decimals(x) is
+    int(10**6 * x), and the REST response comes back unconverted. This
+    function used to return float(raw) directly, which broke reconciliation
+    in both directions, one loudly and one silently:
+
+      exchange_only (loud). 0.008885 shares of dust left by a rounded-down
+        exit read as "8885.00 sh held but NOT RECORDED" and blocked every
+        live entry from 2026-08-14 21:01 onward -- WSSS had a qualifying
+        candidate on every cycle of the next morning's window and took none
+        of them. Reconciliation fails closed, correctly; it was being fed a
+        number six orders of magnitude too large.
+
+      db_only (silent, and worse). The test is
+        `held + RECONCILE_SHARE_TOLERANCE < expected`. With held in base
+        units a real 5.14-share position reads as ~5_140_000, so that
+        comparison could never be true and the check that catches "the
+        database thinks we hold shares that are gone" -- the one keeping
+        the exit path from selling a position that no longer exists -- had
+        never been able to fire since it was written.
+
+    Settled by the collateral balance rather than by reading the library:
+    check_holdings.py showed USDC returning 6,669,795.00 against a wallet
+    holding about six dollars.
     """
     lib = _clob()
     try:
@@ -1287,7 +1332,7 @@ def _held_shares(client, token_id: str) -> Optional[float]:
 
     raw = resp.get("balance") if isinstance(resp, dict) else getattr(resp, "balance", None)
     try:
-        return float(raw)
+        return float(raw) / BALANCE_BASE_UNITS
     except (TypeError, ValueError):
         logger.warning(f"[wallet_client] unparseable balance {raw!r} for {token_id[:12]}...")
         return None

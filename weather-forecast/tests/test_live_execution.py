@@ -1077,7 +1077,19 @@ def test_the_upsize_recheck_runs_before_any_order_is_submitted(monkeypatch, mode
 # --------------------------------------------------------------------------
 
 class _Exchange:
-    """A fake CLOB: token -> shares held, plus a list of traded asset ids."""
+    """
+    A fake CLOB: token -> shares held, plus a list of traded asset ids.
+
+    `balances` is written in SHARES, because that is what each test is
+    actually about -- but get_balance_allowance() converts to BASE UNITS on
+    the way out, because that is what the real endpoint returns (6 decimals,
+    unconverted by the client). Until 2026-08-15 this fake handed back share
+    -scale numbers and _held_shares() passed them through unscaled, so the
+    two errors cancelled here and nowhere else: the suite went green while
+    reconciliation was 1e6 out in production, blocking every live entry on
+    dust and leaving the db_only direction permanently unable to fire.
+    A fake that lies about the wire format tests nothing.
+    """
 
     def __init__(self, balances=None, traded=(), fail_balance=(), fail_trades=False):
         self.balances = balances or {}
@@ -1089,7 +1101,8 @@ class _Exchange:
         token = params.token_id
         if token in self.fail_balance:
             raise RuntimeError("balance endpoint down")
-        return {"balance": str(self.balances.get(token, 0.0))}
+        shares = self.balances.get(token, 0.0)
+        return {"balance": str(int(round(shares * wallet_client.BALANCE_BASE_UNITS)))}
 
     def get_trades(self, params=None, **kw):
         if self.fail_trades:
@@ -1560,13 +1573,27 @@ def test_reconciliation_scan_is_floored_at_the_configured_date(exchange, monkeyp
             seen["after"] = int(params.after)
             return []
 
-    monkeypatch.setattr(config, "RECONCILE_IGNORE_TRADES_BEFORE", "2026-08-11")
+    # The floor only narrows anything while it sits INSIDE the lookback
+    # window -- the code takes max(now - lookback, floor). A hardcoded date
+    # therefore stops testing the floor the moment real time drifts past
+    # it, which is what happened to "2026-08-11" once the 96h lookback
+    # started later than 2026-08-11 00:00. Derived from now instead, so the
+    # premise holds whenever the suite is run.
+    import datetime as dt
+
+    floor_dt = dt.datetime.now(dt.timezone.utc) - dt.timedelta(
+        hours=config.RECONCILE_TRADE_LOOKBACK_HOURS / 2
+    )
+    monkeypatch.setattr(config, "RECONCILE_IGNORE_TRADES_BEFORE", floor_dt.date().isoformat())
     exchange(_Recording(balances={"TOK": 5.0}))
     wallet_client.reconcile_live_positions([_live_pos()])
 
-    import datetime as dt
-    floor = int(dt.datetime.fromisoformat("2026-08-11")
+    floor = int(dt.datetime.fromisoformat(floor_dt.date().isoformat())
                 .replace(tzinfo=dt.timezone.utc).timestamp())
+    lookback_start = int(dt.datetime.now(dt.timezone.utc).timestamp()) - (
+        config.RECONCILE_TRADE_LOOKBACK_HOURS * 3600
+    )
+    assert floor > lookback_start, "fixture must place the floor inside the lookback window"
     assert seen["after"] == floor
 
 
