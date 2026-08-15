@@ -163,8 +163,24 @@ def _positions_by_id(run) -> Dict[str, object]:
 
 def _brier_scores(run) -> Dict[str, Optional[float]]:
     """
-    (brier_model, brier_market) over every entry whose target date has an
-    observation available.
+    (brier_model, brier_market, brier_n) over every entry whose target date
+    has an observation available.
+
+    brier_n IS THE NUMBER THE MATURITY GATE MUST COUNT, NOT n_entries.
+    An entry is scorable only if its target date has a published
+    observation, so a run always has n_entries >= brier_n and the gap is
+    invisible in the summary unless it is written down. WMKK's 2026-08-15
+    run reported n_entries 16 while both Brier scores were means of 14 --
+    the two Aug-15 entries had no settlement-grade reading yet -- and
+    config.calibration_vs_market() was comparing that 16 against its
+    20-entry minimum. That is the last gate before real money clearing on
+    forecasts it never scored. It now reads brier_n from here.
+
+    THE TWO SCORES ARE PAIRED. A term is added to both lists or to
+    neither, so the means describe the SAME set of entries and brier_n
+    describes both. Scoring model over one subset and market over another
+    would make `brier_model < brier_market` a comparison between two
+    different questions -- and that inequality is the entire bar.
 
     outcome is 1.0 if the SIDE TAKEN won, 0.0 if it lost -- derived by
     handing the observed bucket to resolution.resolution_exit_price(), the
@@ -177,9 +193,9 @@ def _brier_scores(run) -> Dict[str, Optional[float]]:
     back off that row. So it is P(this side wins), directly comparable to a
     0/1 outcome for this side -- no flipping here.
 
-    Both are None when nothing is scorable. Returning None beats returning
-    0.0: a Brier of 0.0 is a perfect score, and an empty run must not be
-    able to print one.
+    Both scores are None when nothing is scorable, and brier_n is 0.
+    Returning None beats returning 0.0: a Brier of 0.0 is a perfect score,
+    and an empty run must not be able to print one.
     """
     # Station's own bucket bounds/edge mode, not the legacy config globals --
     # same reasoning as engine._resolution_sweep: scoring Hong Kong's 0.1C
@@ -212,16 +228,17 @@ def _brier_scores(run) -> Dict[str, Optional[float]]:
         )
 
         model_prob = record.get("model_prob")
-        if model_prob is not None:
-            model_terms.append((float(model_prob) - outcome) ** 2)
-
         market_price = record.get("market_price")
-        if market_price is not None:
-            market_terms.append((float(market_price) - outcome) ** 2)
+        if model_prob is None or market_price is None:
+            continue  # paired or not at all -- see the docstring
+
+        model_terms.append((float(model_prob) - outcome) ** 2)
+        market_terms.append((float(market_price) - outcome) ** 2)
 
     return {
         "brier_model": (sum(model_terms) / len(model_terms)) if model_terms else None,
         "brier_market": (sum(market_terms) / len(market_terms)) if market_terms else None,
+        "brier_n": len(model_terms),
     }
 
 
@@ -289,6 +306,7 @@ def summarize(run) -> dict:
         "starting_bankroll_usd": float(run.portfolio.initial_bankroll_usd),
         "brier_model": brier["brier_model"],
         "brier_market": brier["brier_market"],
+        "brier_n": brier["brier_n"],
         "n_unresolved": len(run.unresolved_positions),
     }
 
@@ -527,8 +545,19 @@ def print_report(summary: dict) -> None:
     print("\n-- Calibration (Brier, lower is better) --")
     brier_model = extras.get("brier_model")
     brier_market = extras.get("brier_market")
+    brier_n = extras.get("brier_n")
+    n_entries = counters.get("n_entries")
     print(f"  Model:                   {_fmt_float(brier_model)}")
     print(f"  Market baseline:         {_fmt_float(brier_market)}")
+    # Printed next to the scores, not with the counters: a reader comparing
+    # the two numbers above needs to know how many entries are behind them,
+    # and that it is NOT n_entries whenever a day has not been observed yet.
+    print(f"  Entries scored:          {brier_n if brier_n is not None else '(not recorded)'}")
+    if brier_n is not None and n_entries is not None and n_entries > brier_n:
+        print(
+            f"  {n_entries - brier_n} of {n_entries} entries are UNSCORED (no observation "
+            "for their target date yet) and are absent from both numbers above."
+        )
     if brier_model is None or brier_market is None:
         print("  No scorable entries yet -- no observation available for the entered days.")
     elif brier_model < brier_market:

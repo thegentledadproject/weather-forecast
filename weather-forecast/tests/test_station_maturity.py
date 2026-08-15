@@ -238,22 +238,38 @@ def test_the_allowlist_is_still_required_as_well():
 # Does the model beat the MARKET?
 # --------------------------------------------------------------------------
 
+_UNSET = object()
+
+
 def _write_run(tmp_path, monkeypatch, station="WSSS", model=0.10, market=0.20,
-               n_entries=30, end="2026-08-09", sha=None, generated="2026-08-11T00:00:00+00:00"):
-    """A persisted backtest artifact set, the way report.write_artifacts lays it out."""
+               n_entries=30, end="2026-08-09", sha=None, generated="2026-08-11T00:00:00+00:00",
+               brier_n=_UNSET, omit_brier_n=False):
+    """
+    A persisted backtest artifact set, the way report.write_artifacts lays it out.
+
+    brier_n defaults to n_entries -- the every-entry-was-scored case. Pass it
+    explicitly to model a run whose last day has not been observed yet, or
+    omit_brier_n=True to model a summary written before brier_n existed.
+    """
     import json
 
     from backtest import settings as bt_settings
 
+    if brier_n is _UNSET:
+        brier_n = n_entries
+
     base = tmp_path / "backtests"
     run_dir = base / f"bt_{station}_{n_entries}_{model}"
     run_dir.mkdir(parents=True, exist_ok=True)
+    extras = {"brier_model": model, "brier_market": market}
+    if not omit_brier_n:
+        extras["brier_n"] = brier_n
     (run_dir / "summary.json").write_text(json.dumps({
         "run_id": run_dir.name, "station_icao": station,
         "start_date": "2026-07-28", "end_date": end,
         "generated_at": generated,
         "counters": {"n_entries": n_entries},
-        "extras": {"brier_model": model, "brier_market": market},
+        "extras": extras,
     }), encoding="utf-8")
     (run_dir / "manifest.json").write_text(json.dumps({
         "git_sha": sha if sha is not None else (config._current_git_sha() or "deadbeef"),
@@ -306,6 +322,59 @@ def test_too_few_scored_entries_fails(tmp_path, monkeypatch, real_market_criteri
 
     assert not passed
     assert "need" in detail
+
+
+def test_unscored_entries_do_not_count_toward_the_minimum(
+    tmp_path, monkeypatch, real_market_criterion
+):
+    """
+    THE GATE COUNTS SCORED FORECASTS, NOT TRADES.
+
+    An entry is scorable only once its target date has a published
+    observation, so a run that traded today's market carries entries no
+    Brier term exists for. WMKK's 2026-08-15 run reported n_entries 16
+    while both Brier scores were means of 14, and the gate compared 16
+    against its 20-entry minimum -- crediting the last criterion before
+    real money with two forecasts it never scored.
+
+    Enough trades, one short on scored forecasts: must still fail.
+    """
+    _write_run(tmp_path, monkeypatch, model=0.10, market=0.20,
+               n_entries=config.MATURITY_MIN_BRIER_ENTRIES + 5,
+               brier_n=config.MATURITY_MIN_BRIER_ENTRIES - 1)
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert not passed
+    assert f"only {config.MATURITY_MIN_BRIER_ENTRIES - 1} entry(s) scored" in detail
+    assert "6 entered but unscored" in detail
+
+
+def test_the_passing_verdict_reports_the_scored_count(
+    tmp_path, monkeypatch, real_market_criterion
+):
+    """A pass must not quote the trade count as if it were the sample."""
+    _write_run(tmp_path, monkeypatch, model=0.10, market=0.20,
+               n_entries=40, brier_n=config.MATURITY_MIN_BRIER_ENTRIES)
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert passed
+    assert f"{config.MATURITY_MIN_BRIER_ENTRIES} scored entries" in detail
+    assert "40" not in detail
+
+
+def test_a_run_predating_brier_n_fails(tmp_path, monkeypatch, real_market_criterion):
+    """
+    No fallback to n_entries. A summary without brier_n cannot say how many
+    forecasts it scored, and falling back would silently reinstate the
+    overcount this replaced -- on the one criterion that authorises real
+    money, where an unmeasured criterion must never read as a satisfied one.
+    """
+    _write_run(tmp_path, monkeypatch, model=0.10, market=0.20,
+               n_entries=30, omit_brier_n=True)
+    passed, detail = config.calibration_vs_market("WSSS")
+
+    assert not passed
+    assert "predates brier_n" in detail
 
 
 def test_a_run_from_superseded_code_fails(tmp_path, monkeypatch, real_market_criterion):

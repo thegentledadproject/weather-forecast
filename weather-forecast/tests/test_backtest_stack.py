@@ -15,6 +15,7 @@ Two jobs:
 """
 
 import json
+from datetime import date
 
 import pytest
 
@@ -99,6 +100,7 @@ def test_summary_json_parses_and_carries_every_pinned_key(round_trip):
         "starting_bankroll_usd",
         "brier_model",
         "brier_market",
+        "brier_n",
         "n_unresolved",
     }
     assert set(parsed["counters"]) >= {
@@ -165,6 +167,59 @@ def test_brier_scores_are_present_and_side_adjusted(round_trip):
 
     assert brier_model is not None and 0.0 <= brier_model <= 1.0
     assert brier_market is not None and 0.0 <= brier_market <= 1.0
+
+
+def test_brier_n_counts_scored_entries_and_never_exceeds_them(round_trip):
+    """
+    brier_n is what the maturity gate counts, so it must describe the means
+    beside it: > 0 whenever a score exists, and never more than the entries
+    the run actually made. In this scenario every entry is observed, so the
+    two coincide -- the inequality is what generalises.
+    """
+    _run, summary, _out_dir = round_trip
+
+    brier_n = summary["extras"]["brier_n"]
+    n_entries = summary["counters"]["n_entries"]
+
+    assert brier_n > 0
+    assert brier_n <= n_entries
+    assert summary["extras"]["brier_model"] is not None
+
+
+def test_brier_terms_are_paired(monkeypatch):
+    """
+    An entry missing either probability is scored into NEITHER mean. Scoring
+    model over one subset and market over another would make
+    `brier_model < brier_market` -- the entire maturity bar -- a comparison
+    between two different sets of days.
+    """
+    from backtest import report
+
+    class _Pos:
+        def __init__(self, pid, side, bucket, target_date):
+            self.position_id, self.side = pid, side
+            self.bucket_c, self.target_date = bucket, target_date
+
+    day = date(2026, 8, 10)
+    positions = [_Pos("a", "YES", 31, day), _Pos("b", "YES", 31, day)]
+
+    class _Run:
+        station_icao = "WSSS"
+        closed_positions = positions
+        unresolved_positions = []
+        entry_records = {
+            "a": {"model_prob": 0.6, "market_price": 0.5},
+            "b": {"model_prob": 0.9},  # no market price -- unscorable, both sides
+        }
+
+    monkeypatch.setattr(report, "_observations_by_date", lambda run: {day: 31.0})
+
+    scores = report._brier_scores(_Run())
+
+    assert scores["brier_n"] == 1
+    # Entry "b" contributed to neither mean: 0.6 -> (0.6-1)^2 = 0.16 alone.
+    assert scores["brier_model"] == pytest.approx(0.16)
+    assert scores["brier_market"] == pytest.approx(0.25)
 
 
 def test_equity_csv_row_count(round_trip):

@@ -1701,14 +1701,34 @@ def calibration_vs_market(station_icao: str) -> tuple:
     extras = summary.get("extras") or {}
     model = extras.get("brier_model")
     market = extras.get("brier_market")
-    n_entries = (summary.get("counters") or {}).get("n_entries") or 0
     window = f"{summary.get('start_date')}..{summary.get('end_date')}"
 
     if model is None or market is None:
         return False, f"run {summary.get('run_id')} ({window}) scored nothing"
 
-    if n_entries < MATURITY_MIN_BRIER_ENTRIES:
-        return False, (f"only {n_entries} entry(s) scored in {window}, "
+    # COUNT WHAT WAS SCORED, NOT WHAT WAS TRADED. These differ: an entry is
+    # only scorable once its target date has a published observation, so a
+    # run that traded today's market carries entries no Brier term exists
+    # for. This used to read counters.n_entries, and WMKK's 2026-08-15 run
+    # reported n_entries 16 against Brier means of 14. Counting 16 toward a
+    # 20-entry minimum inflates the evidence behind the ONE criterion that
+    # authorises real money, in the direction of passing it early.
+    #
+    # A run predating brier_n fails rather than falling back to n_entries:
+    # an unmeasured criterion is not a satisfied one, and the fallback would
+    # silently reinstate the exact overcount this replaced. Re-run the
+    # backtest -- the same requirement MATURITY_BRIER_REQUIRE_CURRENT_CODE
+    # already imposes on every summary written by superseded code.
+    brier_n = extras.get("brier_n")
+    if brier_n is None:
+        return False, (f"run {summary.get('run_id')} ({window}) predates brier_n and "
+                       f"cannot say how many entries it scored -- re-run the backtest")
+
+    if brier_n < MATURITY_MIN_BRIER_ENTRIES:
+        n_entries = (summary.get("counters") or {}).get("n_entries") or 0
+        unscored = (f", {n_entries - brier_n} entered but unscored"
+                    if n_entries > brier_n else "")
+        return False, (f"only {brier_n} entry(s) scored in {window}{unscored}, "
                        f"need {MATURITY_MIN_BRIER_ENTRIES}")
 
     if MATURITY_BRIER_REQUIRE_CURRENT_CODE:
@@ -1731,9 +1751,9 @@ def calibration_vs_market(station_icao: str) -> tuple:
 
     if model < market:
         return True, (f"model {model:.4f} beats market {market:.4f} "
-                      f"by {market - model:.4f} over {n_entries} entries in {window}")
+                      f"by {market - model:.4f} over {brier_n} scored entries in {window}")
     return False, (f"model {model:.4f} LOSES to market {market:.4f} "
-                   f"by {model - market:.4f} over {n_entries} entries in {window}")
+                   f"by {model - market:.4f} over {brier_n} scored entries in {window}")
 
 
 def maturity_report(station_icao: str) -> dict:
