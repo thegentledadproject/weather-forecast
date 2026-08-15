@@ -285,7 +285,25 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
 
     The per-date forecast mean mirrors blend_central_estimate's own
     forecast term, so the number measured is the number corrected.
+
+    That mirror is why this excludes config.FORECAST_SOURCES_EXCLUDED_BY_STATION
+    too. A source kept out of the blend but left in this average would have the
+    bias correction chasing an error the estimate no longer contains -- and for
+    the case that motivated the exclusion list (RKSI/GFS, 3-7C cold) it would
+    push the corrected estimate the wrong way by roughly half that gap.
+
+    A date whose ONLY forecast came from an excluded source drops out of the
+    sample entirely, which is the same thing config.blendable_forecasts() does
+    on the live path: no blended forecast that day, so no error to measure.
+    The pair stays consistent in both directions.
     """
+    excluded = tuple(config.FORECAST_SOURCES_EXCLUDED_BY_STATION.get(station_icao, ()))
+    exclusion_sql = ""
+    params = [station_icao, source]
+    if excluded:
+        exclusion_sql = f"  AND f.source NOT IN ({','.join('?' * len(excluded))}) "
+        params.extend(excluded)
+
     with _db() as conn:
         rows = conn.execute(
             "SELECT o.max_temp_c, AVG(f.max_temp_c) "
@@ -294,8 +312,9 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
             "WHERE o.station_icao = ? AND o.source = ? "
             "  AND f.max_temp_c IS NOT NULL AND o.max_temp_c IS NOT NULL "
             "  AND date(f.fetched_at) <= o.target_date "
+            + exclusion_sql +
             "GROUP BY o.target_date",
-            (station_icao, source),
+            params,
         ).fetchall()
     return [float(forecast_mean) - float(observed) for observed, forecast_mean in rows]
 

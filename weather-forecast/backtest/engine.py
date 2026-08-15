@@ -911,8 +911,15 @@ def _entry_pass(
     sim_utc = clock.utc_datetime()
 
     # --- forecasts: latest per source, fetched at or before now ----------
+    # Excluded sources are skipped HERE rather than filtered out of
+    # forecast_history at load time, so the replay's source set matches what
+    # pipeline.gather_forecasts() hands the live blend: stored either way,
+    # blended only where config says this station blends it. Dropping them at
+    # load would also hide them from anything else reading that history.
     forecasts = []
     for source in sorted(forecast_history):
+        if not config.forecast_source_is_blended(station.icao, source):
+            continue
         latest = None
         for fetched_ts, forecast in forecast_history[source]:
             if fetched_ts > sim_utc:

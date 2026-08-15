@@ -38,7 +38,16 @@ import storage
 
 
 def gather_forecasts(station) -> list:
-    """Step A: pull every available forecast source for this station, skipping failures silently."""
+    """
+    Step A: pull every available forecast source for this station, skipping
+    failures silently.
+
+    STORES everything fetched, RETURNS only what this station blends. The two
+    differ where config.FORECAST_SOURCES_EXCLUDED_BY_STATION names a source
+    that is wrong at this station (RKSI/GFS runs 3-7C cold) -- collection
+    continues so the exclusion stays re-checkable against accruing data, while
+    the caller's central estimate stops reading it.
+    """
     forecasts = []
 
     ecmwf = openmeteo_client.get_ecmwf_forecast(station)
@@ -57,7 +66,7 @@ def gather_forecasts(station) -> list:
     for f in forecasts:
         storage.save_forecast(f)
 
-    return forecasts
+    return config.blendable_forecasts(station.icao, forecasts)
 
 
 def gather_same_day_signal(station) -> str:

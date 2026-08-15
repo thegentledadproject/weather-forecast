@@ -1144,6 +1144,91 @@ def forecast_blend_weight(station_icao: str) -> float:
     """Weight on the forecast term of the central estimate, for one station."""
     return FORECAST_BLEND_WEIGHT_BY_STATION.get(station_icao, FORECAST_BLEND_WEIGHT_DEFAULT)
 
+
+# --- Per-station forecast source exclusions --------------------------------
+# Sources that are still COLLECTED and stored for this station but kept OUT
+# of the forecast mean (calibration.blend_central_estimate averages whatever
+# it is handed) and out of the bias estimate fitted on that mean.
+#
+# Excluded, never "not fetched": the row keeps landing in `forecasts` so this
+# decision stays re-checkable against accruing data, and so re-including a
+# source later needs no backfill. Only the blend stops reading it.
+#
+# The bar for an entry here is a source that is WRONG at a station, not one
+# that merely scored worse over a short window. Measured 2026-08-16 over the
+# EC2 database (Aug 1-15, truth = each station's resolution_grade_source,
+# forecasts fetched on or before the target date, per-station leave-one-out
+# bias correction so nothing is scored against a bias fitted on it):
+#
+#   pooled, 87 station-days, RMSE after bias correction
+#     ecmwf only 1.299 | gfs only 1.310 | official only 1.209
+#     ecmwf+gfs  1.136 | ALL SOURCES 1.022   <- the flat mean already wins
+#
+# So the source POOL is not the lever and is deliberately left alone. The one
+# station-level defect the same sweep found is RKSI, where the three sources
+# behave completely differently (n=9, error = forecast - settled truth):
+#
+#   ecmwf  mean +0.08  sd 0.78  signs ---+-+-++
+#   gfs    mean -4.84  sd 1.24  signs ---------   (-6.6 -5.7 -6.1 ... -3.3 -2.9)
+#   wwis   mean +1.67  sd 1.80  signs ++-+-+-++   (whole degrees; +4.0 twice)
+#
+# GFS is broken here, not merely worse: nine days, every error negative, 3-7C
+# cold, against an essentially unbiased ECMWF over the same days. Open-Meteo
+# returns the same 5m elevation for both grid points, so it is not a land/sea
+# snap. And a CONSTANT bias correction cannot absorb it -- the series DRIFTS
+# (-6.6 -> -2.9 across the window), so the single scalar
+# entry_manager.forecast_bias_stats fits chases a moving offset.
+#
+# WWIS IS EXCLUDED TOO, AND THE REASON IS THE WHOLE POINT OF THIS ENTRY.
+# Dropping GFS alone makes RKSI WORSE, not better:
+#
+#   RMSE after per-station bias correction / whole-degree bucket hit rate
+#     ecmwf+gfs+wwis (was)   0.85   44%
+#     ecmwf+wwis             0.93   22%   <- dropping only the broken source
+#     ecmwf alone            0.82   56%
+#
+# GFS's -4.84 and WWIS's +1.67 were partly CANCELLING in the three-way mean.
+# Remove one and the survivor's error is exposed: WWIS is a city-level, whole-
+# degree WMO forecast (Seoul) scored against Incheon airport truth, and its sd
+# of 1.80 is more than twice ECMWF's. Its only contribution at RKSI was
+# offsetting a bug. That is not a reason to keep either.
+#
+# n=9, so treat the RANKING as thin and the GFS defect as solid: the sign is
+# unanimous and the magnitude is 4x ECMWF's worst day, which is the standard
+# FORECAST_BLEND_WEIGHT_BY_STATION demands ("a PHYSICAL reason and enough
+# samples to distinguish it from its neighbours"). WWIS is bad AT RKSI only --
+# at RJTT the official source is the single best variant (1.50) -- so this
+# stays per-station and must not become a policy about either source.
+# Re-check as the window grows; if GFS at RKSI returns to the ~1C band the
+# other stations sit in, delete the entry.
+FORECAST_SOURCES_EXCLUDED_BY_STATION = {
+    "RKSI": ("open_meteo_gfs", "wwis"),
+}
+
+
+def forecast_source_is_blended(station_icao: str, source: str) -> bool:
+    """Whether `source` may enter the forecast mean for this station."""
+    return source not in FORECAST_SOURCES_EXCLUDED_BY_STATION.get(station_icao, ())
+
+
+def blendable_forecasts(station_icao: str, forecasts: list) -> list:
+    """
+    `forecasts` minus this station's excluded sources.
+
+    NO FALLBACK when that leaves nothing. RKSI blends ECMWF alone, so a cycle
+    where only the excluded sources returned would fall back to precisely the
+    GFS+WWIS pair measured as the worst combination available there (RMSE 0.93
+    against 0.82, bucket hit 22% against 56%). Worse, the bias correction is
+    fitted on the BLENDED source set: applying it to a set it was never
+    measured on adds an error of about the size it is meant to remove.
+
+    An empty forecast term is the honest outcome -- blend_central_estimate
+    falls to the observed term, which is a worse predictor but a KNOWN one,
+    and entry_manager's bias-quality gate keeps the station collection-only
+    while the correction cannot be trusted.
+    """
+    return [f for f in forecasts if forecast_source_is_blended(station_icao, f.source)]
+
 # Forecast/observation pairs required before the bias estimate may be
 # trusted enough to trade on. Distinct from (and stricter in practice
 # than) MIN_RESOLUTION_OBS_BEFORE_ENTRY: an observation with no matching

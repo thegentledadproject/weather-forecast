@@ -261,6 +261,153 @@ def test_forecast_error_samples_query(tmp_path, monkeypatch):
     assert sorted(storage.forecast_error_samples("X", "metar_daily_max")) == [-1.5, 0.0]
 
 
+def test_forecast_error_samples_skips_excluded_sources(tmp_path, monkeypatch):
+    """
+    THE BIAS MUST BE FITTED ON THE MEAN THAT IS ACTUALLY BLENDED.
+
+    A source kept out of the forecast term but left in this average has the
+    correction chasing an error the estimate no longer contains. For RKSI/GFS
+    (3-7C cold, the case the exclusion list was added for) that would drag the
+    corrected estimate the wrong way by roughly half the gap.
+    """
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(config, "DB_PATH", str(db))
+    monkeypatch.setattr(
+        config, "FORECAST_SOURCES_EXCLUDED_BY_STATION", {"X": ("cold_model",)}
+    )
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE observations (station_icao TEXT, target_date TEXT, max_temp_c REAL, source TEXT)")
+    conn.execute("CREATE TABLE forecasts (station_icao TEXT, source TEXT, target_date TEXT, "
+                 "max_temp_c REAL, fetched_at TEXT, raw_note TEXT)")
+    # Settled 32.0. Good source says 31.0 (error -1.0); the excluded one says
+    # 26.0, which would drag the pair's mean to 28.5 and the error to -3.5.
+    conn.execute("INSERT INTO observations VALUES ('X','2026-08-01',32.0,'metar_daily_max')")
+    conn.execute("INSERT INTO forecasts VALUES ('X','good','2026-08-01',31.0,'2026-07-31T00:00:00+00:00','')")
+    conn.execute("INSERT INTO forecasts VALUES ('X','cold_model','2026-08-01',26.0,'2026-07-31T00:00:00+00:00','')")
+    # A date whose ONLY forecast is the excluded source drops out entirely --
+    # it does not fall back the way config.blendable_forecasts() does.
+    conn.execute("INSERT INTO observations VALUES ('X','2026-08-02',30.0,'metar_daily_max')")
+    conn.execute("INSERT INTO forecasts VALUES ('X','cold_model','2026-08-02',24.0,'2026-08-01T00:00:00+00:00','')")
+    conn.commit()
+    conn.close()
+
+    assert storage.forecast_error_samples("X", "metar_daily_max") == [-1.0]
+
+
+def test_stations_without_an_exclusion_are_untouched(tmp_path, monkeypatch):
+    """The SQL gains a clause only where a station has an exclusion."""
+    db = tmp_path / "t.db"
+    monkeypatch.setattr(config, "DB_PATH", str(db))
+    monkeypatch.setattr(
+        config, "FORECAST_SOURCES_EXCLUDED_BY_STATION", {"OTHER": ("a",)}
+    )
+    import sqlite3
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE observations (station_icao TEXT, target_date TEXT, max_temp_c REAL, source TEXT)")
+    conn.execute("CREATE TABLE forecasts (station_icao TEXT, source TEXT, target_date TEXT, "
+                 "max_temp_c REAL, fetched_at TEXT, raw_note TEXT)")
+    conn.execute("INSERT INTO observations VALUES ('X','2026-08-01',32.0,'metar_daily_max')")
+    conn.execute("INSERT INTO forecasts VALUES ('X','a','2026-08-01',30.0,'2026-07-31T00:00:00+00:00','')")
+    conn.commit()
+    conn.close()
+
+    assert storage.forecast_error_samples("X", "metar_daily_max") == [-2.0]
+
+
+# --- which sources reach the blend ----------------------------------------
+
+def test_rksi_blends_ecmwf_alone():
+    """
+    Measured over Aug 6-14: ecmwf mean +0.08C sd 0.78, gfs -4.84 sd 1.24
+    (all nine errors negative), wwis +1.67 sd 1.80. Pinned by station name
+    because this is a claim about RKSI, not about a mechanism.
+    """
+    assert config.forecast_source_is_blended("RKSI", "open_meteo_ecmwf")
+    assert not config.forecast_source_is_blended("RKSI", "open_meteo_gfs")
+    assert not config.forecast_source_is_blended("RKSI", "wwis")
+
+
+def test_the_exclusion_is_one_station_not_a_policy():
+    """
+    The sweep found the full source pool is already the best POOLED variant
+    (RMSE 1.022 against 1.136 for ecmwf+gfs), and WWIS is the single best
+    source at RJTT (1.50) while being the noisiest at RKSI. Neither source is
+    bad in general, so neither may be excluded in general.
+    """
+    for icao in ("WSSS", "WMKK", "RJTT", "ZGGG", "ZSPD", "RKPK", "ZBAA", "ZGSZ"):
+        assert config.forecast_source_is_blended(icao, "open_meteo_gfs")
+        assert config.forecast_source_is_blended(icao, "wwis")
+
+
+def test_dropping_only_the_broken_source_is_not_what_this_does():
+    """
+    THE TRAP THIS ENTRY EXISTS TO AVOID.
+
+    GFS ran 4.84C cold at RKSI and WWIS 1.67C warm, so they partly cancelled
+    in the three-way mean. Excluding GFS alone exposes WWIS and makes the
+    station worse (RMSE 0.85 -> 0.93, bucket hit 44% -> 22%). The blend must
+    come out as ECMWF alone, not as the pair.
+    """
+    forecasts = [
+        _fc(33.8, source="open_meteo_ecmwf"),
+        _fc(28.4, source="open_meteo_gfs"),
+        _fc(39.0, source="wwis"),
+    ]
+    kept = config.blendable_forecasts("RKSI", forecasts)
+
+    assert [f.source for f in kept] == ["open_meteo_ecmwf"]
+    # Truth that day was 35.0. The three-way mean lands at 33.7 by luck;
+    # ecmwf+wwis at 36.4; ECMWF alone at 33.8, which is what it forecast.
+    assert calibration.blend_central_estimate(kept, [], 30.0) == pytest.approx(33.8)
+
+
+def test_an_empty_blendable_set_does_not_fall_back_to_excluded_sources():
+    """
+    On a cycle where only excluded sources returned, RKSI gets NO forecast
+    term. Falling back would blend exactly the GFS+WWIS pair measured as the
+    worst combination there, and would apply a bias correction fitted on
+    ECMWF-only means to a set it was never measured on.
+    """
+    only_excluded = [_fc(28.4, source="open_meteo_gfs"), _fc(39.0, source="wwis")]
+    assert config.blendable_forecasts("RKSI", only_excluded) == []
+    # The estimate falls to the observed term rather than to a bad forecast.
+    assert calibration.blend_central_estimate(
+        [], [_obs(31.0)], 30.0
+    ) == pytest.approx(31.0)
+
+
+def test_both_paths_that_build_a_forecast_term_consult_the_exclusion():
+    """
+    WIRING GUARD, not a behavioural test of the replay.
+
+    Three places assemble or measure the forecast mean -- pipeline.gather_forecasts
+    (live), backtest.engine._entry_pass (replay), storage.forecast_error_samples
+    (the bias fitted on it). An exclusion applied in some but not all of them is
+    a silent live/replay divergence, and the replay is what the maturity gate
+    reads. The behaviour is pinned above for the live and bias paths; the replay
+    is only reachable through a full run, so this asserts the call is still there.
+    """
+    import ast
+    from pathlib import Path
+
+    pkg = Path(__file__).resolve().parent.parent
+    wanted = {
+        "pipeline.py": "blendable_forecasts",
+        "backtest/engine.py": "forecast_source_is_blended",
+        "storage.py": "FORECAST_SOURCES_EXCLUDED_BY_STATION",
+    }
+    missing = []
+    for rel, name in wanted.items():
+        src = (pkg / rel).read_text(encoding="utf-8")
+        names = {
+            node.attr for node in ast.walk(ast.parse(src)) if isinstance(node, ast.Attribute)
+        }
+        if name not in names:
+            missing.append(f"{rel} no longer references config.{name}")
+    assert not missing, missing
+
+
 def test_forecast_bias_stats_fails_closed(monkeypatch):
     def _boom(icao, source):
         raise RuntimeError("db down")
