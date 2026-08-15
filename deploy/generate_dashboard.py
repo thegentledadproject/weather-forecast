@@ -215,6 +215,14 @@ def _run_probes():
 
         probes = [
             _probe("Open-Meteo ECMWF", config.OPEN_METEO_ECMWF_URL + om),
+            # GFS is probed for the same reason as ECMWF, and its absence here
+            # was a real hole until 2026-08-16: calibration.blend_central_estimate
+            # takes a flat mean of whatever forecasts the cycle collected, so a
+            # GFS outage does not fail anything -- it silently reweights the
+            # central estimate onto the surviving sources and keeps trading.
+            # Both halves of that mean need a probe, or the panel can read
+            # "all upstream feeds reachable" while half the forecast term is gone.
+            _probe("Open-Meteo GFS", config.OPEN_METEO_GFS_URL + om),
             _probe("Open-Meteo ensemble", config.OPEN_METEO_ENSEMBLE_URL + om + "&models=ecmwf_ifs025"),
             _probe("Wunderground", primary.wunderground_history_url, timeout=8),
             # CLOB: reachability only -- a garbage token id SHOULD 404/400; any
