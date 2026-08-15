@@ -49,14 +49,23 @@ material is printed; the funder address is masked.
 
 CREDENTIALS
 -----------
-Needs POLYMARKET_PRIVATE_KEY and POLYMARKET_FUNDER in the environment, the
-same two get_client() always requires. It does NOT need
-POLYMARKET_LIVE_TRADING -- that gate guards submission, and nothing here
-submits. This codebase reads env vars straight from the environment, so
-run it under the same systemd environment the daemon uses.
+Needs POLYMARKET_PRIVATE_KEY and POLYMARKET_FUNDER, the same two
+get_client() always requires. It does NOT need POLYMARKET_LIVE_TRADING --
+that gate guards submission, and nothing here submits.
+
+On the deployment box those live in a ROOT-ONLY systemd unit drop-in, in
+systemd's config format rather than an env file, so `systemd-run
+--property=EnvironmentFile=` cannot read them and neither can an
+unprivileged shell. --from-unit asks systemd for the unit's already-
+resolved environment and injects only the POLYMARKET_* names into this
+process -- no private key on a command line where ps can see it, no
+copying secrets to a temp file, and systemd's own quoting rules instead
+of a regex guessing at them. It needs root, because reading the drop-in
+needs root.
 
 Usage:
-    python check_holdings.py                 # collateral + traded tokens + recorded positions
+    sudo .venv/bin/python check_holdings.py --from-unit    # on the box
+    python check_holdings.py                 # if the vars are already exported
     python check_holdings.py --token <id>    # also inspect one specific token
     python check_holdings.py --json          # raw responses, for when the table is not the authority
 
@@ -69,6 +78,8 @@ Exit codes:
 import argparse
 import json
 import os
+import shlex
+import subprocess
 import sys
 import time
 
@@ -81,6 +92,44 @@ SCALE = 10 ** 6  # py_clob_client_v2.order_builder.helpers.to_token_decimals
 
 def _mask(addr: str) -> str:
     return f"{addr[:6]}...{addr[-4:]}" if addr and len(addr) > 12 else "(unset)"
+
+
+def _load_env_from_unit(unit: str) -> int:
+    """
+    Populate os.environ with the POLYMARKET_* variables systemd already
+    hands the daemon. Returns how many were loaded.
+
+    WHY NOT A SHELL ONE-LINER. The credentials live in a root-only unit
+    drop-in in systemd's own config format, which is NOT an env file --
+    systemd-run's EnvironmentFile cannot read it. Every shell workaround
+    either puts the private key on a command line (visible in ps) or
+    copies it to a temp file. Asking systemd for the resolved environment
+    and injecting it in-process avoids both, and lets systemd apply its
+    own quoting rules instead of a regex guessing at them.
+
+    Needs root, because that is what reading the drop-in needs. Values are
+    never printed -- only the count and the variable NAMES.
+    """
+    try:
+        out = subprocess.run(
+            ["systemctl", "show", unit, "-p", "Environment", "--value"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout.strip()
+    except Exception as exc:  # noqa: BLE001
+        print(f"  could not query systemd for {unit}'s environment: {exc}")
+        return 0
+
+    loaded = []
+    for token in shlex.split(out):
+        key, sep, value = token.partition("=")
+        # Only what the client needs. Anything else in that unit is none of
+        # this script's business and stays out of the process.
+        if sep and key.startswith("POLYMARKET_"):
+            os.environ[key] = value
+            loaded.append(key)
+    if loaded:
+        print(f"  loaded {len(loaded)} variable(s) from {unit}: {', '.join(sorted(loaded))}")
+    return len(loaded)
 
 
 def _raw_balance(client, lib, token_id: str, asset_type: str):
@@ -108,12 +157,27 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--token", help="also inspect this specific token id")
     ap.add_argument("--json", action="store_true", help="print raw API responses")
+    ap.add_argument(
+        "--from-unit", nargs="?", const="polyweather", metavar="UNIT",
+        help="read the POLYMARKET_* credentials from a systemd unit's resolved "
+             "environment (default: polyweather). Needs root. Values are never printed.",
+    )
     args = ap.parse_args()
+
+    if args.from_unit and not os.environ.get("POLYMARKET_PRIVATE_KEY"):
+        print(f"Loading credentials from systemd unit '{args.from_unit}':")
+        # geteuid() is POSIX-only; this script is developed on Windows and run
+        # on the Linux box, so absence of the call is not "running as root".
+        is_root = getattr(os, "geteuid", lambda: -1)() == 0
+        if not _load_env_from_unit(args.from_unit) and not is_root:
+            print("  nothing loaded, and this is not running as root -- systemd will not "
+                  "reveal a unit's Environment to an unprivileged caller. Re-run with sudo.")
 
     funder = os.environ.get("POLYMARKET_FUNDER")
     if not (os.environ.get("POLYMARKET_PRIVATE_KEY") and funder):
         print("Cannot check: POLYMARKET_PRIVATE_KEY / POLYMARKET_FUNDER are not in the "
-              "environment. Run under the same systemd environment as the daemon.")
+              "environment. Either export them, or re-run as root with --from-unit to "
+              "read them from the daemon's own systemd unit.")
         return 1
 
     print(f"funder: {_mask(funder)}   (read-only audit -- nothing here signs or posts)")
