@@ -409,6 +409,8 @@ def collection_only_decision(ev_result: EVResult, token_id: Optional[str], reaso
         station_maturity=config.STATION_MATURITY.get(ev_result.station_icao, "exploratory"),
         entry_price=ev_result.market_price,
         token_id=token_id,
+        model_prob=ev_result.model_prob,
+        raw_edge=ev_result.raw_edge,
     )
 
 
@@ -440,6 +442,8 @@ def evaluate_entry(
             station_maturity=maturity,
             entry_price=ev_result.market_price,
             token_id=token_id,
+            model_prob=ev_result.model_prob,
+            raw_edge=ev_result.raw_edge,
         )
 
     # Veto 00: entry price ceiling. Above MAX_ENTRY_PRICE the instrument
@@ -588,6 +592,8 @@ def evaluate_entry(
             station_maturity=maturity,
             entry_price=ev_result.market_price,
             token_id=token_id,
+            model_prob=ev_result.model_prob,
+            raw_edge=ev_result.raw_edge,
         )
 
     kelly_applied = kelly_raw * config.KELLY_FRACTION
@@ -634,6 +640,8 @@ def evaluate_entry(
             station_maturity=maturity,
             entry_price=ev_result.market_price,
             token_id=token_id,
+            model_prob=ev_result.model_prob,
+            raw_edge=ev_result.raw_edge,
         )
 
     depth_capped_usd = min(size_usd, depth_usd * config.MAX_DEPTH_UTILIZATION_PCT)
@@ -649,6 +657,8 @@ def evaluate_entry(
             station_maturity=maturity,
             entry_price=ev_result.market_price,
             token_id=token_id,
+            model_prob=ev_result.model_prob,
+            raw_edge=ev_result.raw_edge,
         )
 
     # Re-check slippage and net EV at the ACTUAL recommended size, not the
@@ -668,6 +678,8 @@ def evaluate_entry(
             station_maturity=maturity,
             entry_price=ev_result.market_price,
             token_id=token_id,
+            model_prob=ev_result.model_prob,
+            raw_edge=ev_result.raw_edge,
         )
 
     if net_ev_at_size < min_net_ev:
@@ -682,6 +694,8 @@ def evaluate_entry(
             station_maturity=maturity,
             entry_price=ev_result.market_price,
             token_id=token_id,
+            model_prob=ev_result.model_prob,
+            raw_edge=ev_result.raw_edge,
         )
 
     return EntryDecision(
@@ -695,6 +709,8 @@ def evaluate_entry(
         station_maturity=maturity,
         entry_price=ev_result.market_price,
         token_id=token_id,
+        model_prob=ev_result.model_prob,
+        raw_edge=ev_result.raw_edge,
     )
 
 

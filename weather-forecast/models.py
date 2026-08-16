@@ -199,6 +199,32 @@ class Position:
                                        # reconciled against the exchange by hand. None in every non-live
                                        # mode.
 
+    # WHAT THE MODEL BELIEVED WHEN IT ENTERED. Recorded so a closed trade can
+    # be scored against its own prediction rather than only against P&L.
+    #
+    # Without these the EV engine was unfalsifiable on live data: every entry
+    # asserted an edge and a positive net EV, but nothing persisted the
+    # assertion, so "was the edge real?" could only be asked of backtest
+    # replays -- the track that disagreed with the live paper book by 40
+    # percentage points at WMKK (2026-08-16: backtest +30.3% vs paper -10.6%
+    # dollar-weighted over 30 trades).
+    #
+    # READ THEM AGAINST RESOLUTION, NOT AGAINST EXIT P&L. model_prob is
+    # P(this side wins AT SETTLEMENT); a position closed by a stop or a
+    # take-profit never tested that claim. At WMKK 29 of 30 closed paper
+    # trades exited before resolution, so exit P&L scores the exit rules and
+    # these fields score the forecast -- different questions.
+    #
+    # None means NO MODEL RAN (manual_trigger asserts a trade with the model
+    # gates bypassed), which is a different claim from 0.0. Rows written
+    # before this field existed also read None, and unknown must not be
+    # mistaken for measured.
+    model_prob: Optional[float] = None      # EVResult.model_prob -- already side-adjusted,
+                                              # i.e. P(the side actually taken wins)
+    raw_edge: Optional[float] = None        # EVResult.raw_edge -- model_prob - market_price
+    net_ev_at_size: Optional[float] = None  # EntryDecision.net_ev_at_size -- net EV per dollar
+                                              # re-checked at the size actually ordered
+
     def __post_init__(self):
         if self.high_water_mark is None:
             self.high_water_mark = self.entry_price
@@ -293,6 +319,11 @@ class EntryDecision:
                                              # it later without needing to rediscover it (closes a real gap:
                                              # previously nothing stored this, so exit-side price checks
                                              # couldn't run at all)
+    # Carried from the EVResult this decision was sized from, purely so
+    # executor can persist them on the Position -- see Position.model_prob for
+    # why. None on any decision built without a model behind it.
+    model_prob: Optional[float] = None
+    raw_edge: Optional[float] = None
 
 
 @dataclass

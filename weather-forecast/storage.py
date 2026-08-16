@@ -107,12 +107,15 @@ def _connect() -> sqlite3.Connection:
             is_paper INTEGER NOT NULL DEFAULT 0,
             size_shares REAL,
             execution_mode TEXT NOT NULL DEFAULT 'paper',
-            order_id TEXT
+            order_id TEXT,
+            model_prob REAL,
+            raw_edge REAL,
+            net_ev_at_size REAL
         )
         """
     )
     # CREATE TABLE IF NOT EXISTS is a no-op against a database that already has
-    # a `positions` table from before these three columns existed -- it does
+    # a `positions` table from before these columns existed -- it does
     # NOT add columns to an existing table. Without this migration, an
     # existing deployed database silently keeps the old schema and every read
     # of the new fields (size_shares, execution_mode, order_id) fails or, for
@@ -120,11 +123,19 @@ def _connect() -> sqlite3.Connection:
     # code path (backtest scripts, tests, the live executor) gets migrated,
     # and check PRAGMA table_info first so this stays idempotent -- ALTER
     # TABLE ADD COLUMN errors if the column is already there.
+    #
+    # model_prob/raw_edge/net_ev_at_size are NULL on every row written before
+    # them, and that is the honest value: those trades really do have no
+    # stored prediction. Do NOT backfill them by recomputing -- today's
+    # calibration has seen the outcomes those rows were entered before.
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(positions)").fetchall()}
     for column_name, column_ddl in (
         ("size_shares", "size_shares REAL"),
         ("execution_mode", "execution_mode TEXT NOT NULL DEFAULT 'paper'"),
         ("order_id", "order_id TEXT"),
+        ("model_prob", "model_prob REAL"),
+        ("raw_edge", "raw_edge REAL"),
+        ("net_ev_at_size", "net_ev_at_size REAL"),
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
@@ -349,6 +360,9 @@ def _row_to_position(r) -> Position:
     size_shares = r[15] if len(r) > 15 else None
     execution_mode = r[16] if len(r) > 16 else "paper"
     order_id = r[17] if len(r) > 17 else None
+    model_prob = r[18] if len(r) > 18 else None
+    raw_edge = r[19] if len(r) > 19 else None
+    net_ev_at_size = r[20] if len(r) > 20 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -368,14 +382,30 @@ def _row_to_position(r) -> Position:
         size_shares=size_shares,
         execution_mode=execution_mode,
         order_id=order_id,
+        model_prob=model_prob,
+        raw_edge=raw_edge,
+        net_ev_at_size=net_ev_at_size,
     )
 
 
 def open_position(position: Position) -> None:
     """Persist a newly-entered position. position.status should be 'open'."""
     with _db() as conn:
+        # Columns NAMED, not positional. A bare VALUES(...) list binds by
+        # ordinal, so it depends on the CREATE TABLE order matching the tuple
+        # below -- and the migration above appends columns over time, which is
+        # exactly how that pairing drifts. Naming them makes a mismatch a
+        # loud error instead of a silent column swap.
         conn.execute(
-            "INSERT OR REPLACE INTO positions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            """
+            INSERT OR REPLACE INTO positions (
+                position_id, station_icao, target_date, bucket_c, side,
+                entry_price, size_usd, entry_time, status, high_water_mark,
+                exit_price, exit_time, exit_reason, token_id, is_paper,
+                size_shares, execution_mode, order_id,
+                model_prob, raw_edge, net_ev_at_size
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 position.position_id,
                 position.station_icao,
@@ -395,6 +425,9 @@ def open_position(position: Position) -> None:
                 position.size_shares,
                 position.execution_mode,
                 position.order_id,
+                position.model_prob,
+                position.raw_edge,
+                position.net_ev_at_size,
             ),
         )
 

@@ -526,6 +526,16 @@ def open_position(decision: EntryDecision) -> None:
             size_shares=size_shares,
             execution_mode=mode,
             order_id=order_id,
+            # What the model believed, persisted alongside the trade so a
+            # closed position can be scored against its own prediction and
+            # not only against P&L. Copied, never recomputed: re-deriving
+            # model_prob at any later point would read a calibration that
+            # has since seen the outcome. None flows through untouched --
+            # manual_trigger bypasses the model, and "no model ran" must
+            # stay distinguishable from "the model said 0".
+            model_prob=decision.model_prob,
+            raw_edge=decision.raw_edge,
+            net_ev_at_size=decision.net_ev_at_size,
         )
 
     if mode == "manual_review":

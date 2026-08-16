@@ -1150,6 +1150,15 @@ def _entry_pass(
             high_water_mark=decision.entry_price,
             token_id=decision.token_id,
             is_paper=True,
+            # LIVE PARITY, same as entry_price above: executor.open_position
+            # copies these three straight off the decision, so the replay
+            # must too rather than re-deriving them from `rows`. The
+            # entry_records entry below stays the authoritative copy for
+            # scoring -- this one exists so a replayed Position carries the
+            # same fields a live one now does.
+            model_prob=decision.model_prob,
+            raw_edge=decision.raw_edge,
+            net_ev_at_size=decision.net_ev_at_size,
         )
         portfolio.open_position(position)
         last_observed[position_id] = decision.entry_price
