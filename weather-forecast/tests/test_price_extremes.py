@@ -84,9 +84,6 @@ def test_reformulation_is_a_no_op_at_or_below_0_50(entry_price):
     new_take_price = entry_price + config.PROFIT_TAKE_PCT * unit
     assert new_take_price == pytest.approx(old_take_price)
 
-    old_activation_price = entry_price * (1 + config.TRAILING_STOP_ACTIVATION_PCT)
-    new_activation_price = entry_price + config.TRAILING_STOP_ACTIVATION_PCT * unit
-    assert new_activation_price == pytest.approx(old_activation_price)
 
 
 def test_stop_loss_still_fires_at_the_same_place_below_0_50():
@@ -155,72 +152,32 @@ def test_stop_never_risks_more_than_the_remaining_upside(entry_price):
 # Trailing stop: must bank an actual profit
 # --------------------------------------------------------------------------
 
-def test_trailing_stop_does_not_fire_when_it_would_not_cover_its_own_fees():
+def test_no_exit_path_produces_a_trailing_stop():
     """
-    A give-back breach whose gross gain is under round-trip taker fees
-    must HOLD, not exit. This is the mechanism that was closing winners
-    into net losses and recording them as wins.
+    The trailing stop was REMOVED on 2026-08-17: it produced zero exits
+    across the cohort window in four profit-take configurations, and the
+    instrumented replay showed why -- it armed on 7 of 580 eligible ticks
+    and never once saw a give-back, because acting requires two
+    evaluations and a run-up crosses the whole band inside one.
+
+    Swept across the price range and the peak/current grid that used to
+    drive it, because the failure this guards against is a reintroduction
+    that only fires in a corner.
     """
-    entry_price = 0.30
-    unit = risk_manager.risk_unit(entry_price)
-
-    # A peak just past activation, then a give-back just past the band --
-    # a textbook breach whose gross gain is a rounding error.
-    peak = entry_price + config.TRAILING_STOP_ACTIVATION_PCT * unit
-    price_at_breach = peak - config.TRAILING_STOP_PCT * unit - 0.001
-    position = _position(entry_price=entry_price, high_water_mark=peak)
-
-    gross_gain = price_at_breach - entry_price
-    fees = risk_manager.round_trip_fee_per_share(entry_price, price_at_breach)
-    assert gross_gain < config.TRAILING_EXIT_COST_MARGIN * fees, (
-        "fixture no longer sets up a below-cost breach; the test needs rebuilding"
-    )
-
-    decision = risk_manager.evaluate_exit(position, price_at_breach, local_hour=MORNING)
-    assert decision.should_exit is False
-    assert decision.reason == "trailing_active"
+    for entry_price in (0.04, 0.10, 0.20, 0.30, 0.50, 0.70):
+        unit = risk_manager.risk_unit(entry_price)
+        for peak_mult in (0.1, 0.25, 0.4, 0.6, 1.0, 2.0):
+            peak = entry_price + peak_mult * unit
+            for give_back_mult in (0.0, 0.08, 0.15, 0.3, 0.6):
+                price = max(peak - give_back_mult * unit, 0.01)
+                position = _position(entry_price=entry_price, high_water_mark=peak)
+                for hour in (MORNING, 14):
+                    decision = risk_manager.evaluate_exit(position, price, local_hour=hour)
+                    assert decision.reason != "trailing_stop"
+                    assert decision.reason != "trailing_active"
 
 
-def test_trailing_stop_does_fire_once_the_gain_clears_its_fees():
-    """The other side of the gate -- this is still a working mechanism."""
-    entry_price = 0.30
-    unit = risk_manager.risk_unit(entry_price)
-
-    # A much higher peak, so the same give-back band leaves real profit.
-    peak = 0.60
-    price_at_breach = peak - config.TRAILING_STOP_PCT * unit
-    position = _position(entry_price=entry_price, high_water_mark=peak)
-
-    gross_gain = price_at_breach - entry_price
-    fees = risk_manager.round_trip_fee_per_share(entry_price, price_at_breach)
-    assert gross_gain > config.TRAILING_EXIT_COST_MARGIN * fees
-
-    decision = risk_manager.evaluate_exit(position, price_at_breach, local_hour=MORNING)
-    assert decision.should_exit is True
-    assert decision.reason == "trailing_stop"
-
-
-def test_hard_stop_still_fires_underneath_the_cost_gate():
-    """
-    The cost gate may only ever delay an UPSIDE exit. A position that
-    armed trailing and then collapsed must still be stopped out.
-    """
-    entry_price = 0.30
-    unit = risk_manager.risk_unit(entry_price)
-    peak = entry_price + config.TRAILING_STOP_ACTIVATION_PCT * unit
-    position = _position(entry_price=entry_price, high_water_mark=peak)
-
-    collapsed = entry_price - config.STOP_LOSS_PCT * unit - 0.001
-    decision = risk_manager.evaluate_exit(position, collapsed, local_hour=MORNING)
-    assert decision.should_exit is True
-    assert decision.reason == "stop_loss"
-
-
-# --------------------------------------------------------------------------
-# Lottery tickets: exempt from BOTH price-noise exits
-# --------------------------------------------------------------------------
-
-def test_lottery_ticket_is_exempt_from_the_trailing_stop():
+def test_lottery_ticket_holds_through_a_peak_and_pullback():
     """
     The 1-cent-tick churn case: a $0.05 ticket ticks to $0.07 and back.
     On the old rules that armed trailing and stopped it out flat, which

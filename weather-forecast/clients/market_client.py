@@ -228,7 +228,7 @@ def get_current_price_for_side(token_id: str, side: str) -> Optional[float]:
     DELIBERATELY THE BID, AND ALREADY CORRECT. An open position is marked
     at what it could be sold for, which is the bid; using the ask here
     would inflate every unrealized P&L by the spread and would make the
-    trailing stop and take-profit fire off a price the position cannot
+    stop-loss and take-profit fire off a price the position cannot
     actually realize. Entries use get_entry_price_for_side() instead --
     the two sides of the book are not interchangeable, which is the whole
     reason they are now two separate functions.

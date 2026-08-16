@@ -516,7 +516,6 @@ def run(
         "n_entries_missing_token": 0,
         "n_exits_take_profit": 0,
         "n_exits_stop_loss": 0,
-        "n_exits_trailing_stop": 0,
         "n_exits_resolution": 0,
         "n_resolution_pending": 0,
         "n_skipped_no_price": 0,
@@ -724,13 +723,9 @@ def run(
             "EXPLORATORY_SIZE_MULTIPLIER": config.EXPLORATORY_SIZE_MULTIPLIER,
             "PROFIT_TAKE_PCT": config.PROFIT_TAKE_PCT,
             "STOP_LOSS_PCT": config.STOP_LOSS_PCT,
-            "TRAILING_STOP_ACTIVATION_PCT": config.TRAILING_STOP_ACTIVATION_PCT,
-            "TRAILING_STOP_PCT": config.TRAILING_STOP_PCT,
             "EDGE_DECAY_TIGHTEN_HOUR_LOCAL": config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL,
             "TIGHTENED_PROFIT_TAKE_PCT": config.TIGHTENED_PROFIT_TAKE_PCT,
             "TIGHTENED_STOP_LOSS_PCT": config.TIGHTENED_STOP_LOSS_PCT,
-            "TIGHTENED_TRAILING_STOP_ACTIVATION_PCT": config.TIGHTENED_TRAILING_STOP_ACTIVATION_PCT,
-            "TIGHTENED_TRAILING_STOP_PCT": config.TIGHTENED_TRAILING_STOP_PCT,
             "MAX_SINGLE_CYCLE_MOVE": config.MAX_SINGLE_CYCLE_MOVE,
             "MIN_EXIT_PRICE": config.MIN_EXIT_PRICE,
             "BUCKET_MIN_C": config.BUCKET_MIN_C,
@@ -836,8 +831,9 @@ def _exit_pass(clock, tick, portfolio, prices, last_observed, counters) -> None:
         last_observed[position_id] = price
 
         # High-water mark refreshed BEFORE evaluating, exactly as
-        # position_manager does -- the trailing stop must see this
-        # cycle's peak, not last cycle's.
+        # position_manager does. No exit reads it since the trailing stop
+        # was removed (2026-08-17); it is kept in step so the recorded
+        # peak stays truthful and so live and replay do not diverge.
         new_hwm = risk_manager.update_high_water_mark(position, price)
         position.high_water_mark = new_hwm
 
@@ -850,8 +846,8 @@ def _exit_pass(clock, tick, portfolio, prices, last_observed, counters) -> None:
         # definition) -- INCLUDING the exit-side taker fee, which live
         # deducts from the recorded price. A replay that booked exits
         # gross while live booked them net would overstate every
-        # simulated exit by the fee, which is several times a typical
-        # trailing-stop gain.
+        # simulated exit by the fee, which is a large fraction of a
+        # typical exit's gain.
         gross_exit_price = decision.current_price
         exit_fee_per_share = risk_manager.taker_fee_per_share(gross_exit_price)
         net_exit_price = max(gross_exit_price - exit_fee_per_share, 0.0)

@@ -697,7 +697,7 @@ def build_exit_order(token_id: str, price: float, size_shares: float) -> OrderSp
     #
     # This is the check that makes small sizing dangerous rather than merely
     # conservative: a position too small to sell cannot be exited AT ALL --
-    # every stop-loss, trailing stop and profit-take is dead for its whole
+    # every stop-loss and profit-take is dead for its whole
     # life, and it can only come off the book by resolving. build_entry_order()
     # is what actually prevents this, by refusing to open a position whose
     # share count is under the market minimum in the first place. This check

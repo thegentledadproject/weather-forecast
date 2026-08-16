@@ -117,8 +117,9 @@ _consecutive_unknown_resolution: Dict[str, int] = {}
 # baseline for "how far did this move since we last looked."
 #
 # Deliberately NOT position.high_water_mark: the high-water mark is a
-# monotone non-decreasing peak that exists to drive the trailing stop, so
-# using it here measured drawdown-from-peak instead of per-cycle movement.
+# monotone non-decreasing peak (kept as a record since the trailing stop
+# was removed 2026-08-17), so using it here measured drawdown-from-peak
+# instead of per-cycle movement.
 # A position that had drifted down from its peak over many cycles would
 # then get flagged as a huge single-cycle jump and sent for confirmation
 # on every single scan, which is both noise and, combined with the
@@ -305,8 +306,9 @@ def _check_one_position(position: Position) -> Optional[ExitDecision]:
 
     _last_observed_price[position.position_id] = current_price
 
-    # Refresh high-water-mark BEFORE evaluating -- the trailing stop
-    # needs to see this cycle's peak, not last cycle's.
+    # Refresh high-water-mark BEFORE evaluating. No exit reads it since
+    # the trailing stop was removed (2026-08-17); it is kept current so
+    # the persisted peak stays truthful and replay matches live.
     new_hwm = risk_manager.update_high_water_mark(position, current_price)
     if new_hwm != position.high_water_mark:
         storage.update_high_water_mark(position.position_id, new_hwm)
@@ -377,7 +379,7 @@ def _last_known_price(position: Position) -> float:
 
     Falls back to entry_price the first time a position is seen in this
     process. Explicitly NOT position.high_water_mark: that is a monotone
-    peak for the trailing stop, so measuring against it would report
+    peak, not a per-cycle price, so measuring against it would report
     drawdown-from-peak as if it were one cycle's movement, and flag every
     position that has ever drifted down as a suspicious jump forever.
     """

@@ -24,7 +24,7 @@ files, shared by every backtest test in this directory.
 Adapted from scratchpad/smoke_engine_e2e.py's builder. The scenario is
 tuned so a single run exercises all four interesting paths:
 
-  D1  entry, then an intraday trailing-stop exit on a price spike/fall
+  D1  entry, then an intraday upside exit on a price spike
   D2  two entries held overnight
   D3  NO token map at all -- yet D2's positions must still resolve
 
@@ -107,9 +107,11 @@ def _token_id(day: date, bucket: int, side: str) -> str:
 def _yes_price(day: date, bucket: int, minute: int) -> float:
     """
     D1's bucket-32 YES is the only mover: 0.35 at entry, spiking to 0.70 at
-    06:00 (arming the trailing stop) and falling to 0.58 at 06:10 (breaching
-    it), then flat -- flat AND below the model's own probability, so nothing
-    re-enters after the exit.
+    06:00 -- past the fixed take at 0.525 -- then falling to 0.58 at 06:10
+    and flat. The spike/fall shape dates from when this exercised the
+    trailing stop (removed 2026-08-17); it now exits take_profit at the
+    spike, and the tail is kept because it is flat AND below the model's
+    own probability, so nothing re-enters after the exit.
     """
     if day == D1 and bucket == 32:
         if minute < 6 * 60:

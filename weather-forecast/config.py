@@ -430,7 +430,7 @@ DB_PATH = DATA_DIR / "polyweather.sqlite3"
 #
 #   PROFIT_TAKE_PCT 0.50 needed price >= 1.50 x entry, i.e. UNREACHABLE
 #   for any entry above 0.667. Same arithmetic killed the tightened take
-#   above 0.80 and both trailing activations above 0.80 / 0.87. An entry
+#   above 0.80 (and, while it existed, both trailing activations). An entry
 #   at 0.85 therefore had NO upside exit of any kind -- only the stop-loss
 #   and resolution could ever fire -- while carrying a 30% stop against a
 #   maximum possible gain of +17.6%. The stop exceeded the entire
@@ -445,36 +445,6 @@ DB_PATH = DATA_DIR / "polyweather.sqlite3"
 PROFIT_TAKE_PCT = 0.50      # take profit once gain reaches +50% of the risk unit
 STOP_LOSS_PCT = 0.30        # cut once loss reaches -30% of the risk unit
 
-# Trailing stop: once a position's gain (measured from its high-water mark,
-# not just current price) crosses TRAILING_STOP_ACTIVATION_PCT, the fixed
-# PROFIT_TAKE_PCT target above is superseded -- the position is allowed to
-# keep running, but protected by a stop that trails the peak price down by
-# TRAILING_STOP_PCT. This lets a strong move keep paying out past the fixed
-# target while still locking in most of the gain if it reverses, rather
-# than capping every winner at the same fixed percentage.
-# Deliberately set the activation threshold BELOW the fixed profit-take so
-# trailing takes over before the hard cap would otherwise fire.
-#
-# TRAILING_STOP_PCT is a fraction of the RISK UNIT, like everything else
-# here. It used to be a fraction of the high-water mark, which made the
-# give-back a moving target that widened with the peak and -- worse --
-# floored the exit at a fixed +6.25% gross gain (0.85 x 1.25 - 1) no
-# matter the entry price. That is below round-trip taker fees, so a
-# trailing exit at the activation point booked a NET LOSS while being
-# recorded as a winner. See TRAILING_EXIT_COST_MARGIN.
-TRAILING_STOP_ACTIVATION_PCT = 0.25   # start trailing once peak gain reaches +25% of the risk unit
-TRAILING_STOP_PCT = 0.15              # exit if price falls 15% of the risk unit off its peak
-
-# A trailing-stop exit must clear its own round-trip taker fees by this
-# multiple before it is allowed to fire. The trailing stop exists to bank
-# a profit; an exit that nets negative after the fees on both legs is not
-# banking anything, it is paying the exchange to flatten a winner. When
-# the breach fails this test the position is HELD -- the hard stop-loss
-# below still protects it, so this can only delay an upside exit, never a
-# downside one. Set to 1.0 to require bare fee-neutrality; 1.5 leaves a
-# margin for the spread, which is not modelled on the exit side.
-TRAILING_EXIT_COST_MARGIN = 1.5
-
 # After this local hour, tighten both thresholds (see risk_manager.py) --
 # reflects the edge-decay curve: once the primary trading window closes,
 # be quicker to lock in gains and quicker to cut losses, since there's no
@@ -482,8 +452,6 @@ TRAILING_EXIT_COST_MARGIN = 1.5
 EDGE_DECAY_TIGHTEN_HOUR_LOCAL = 10  # 10:00 local, per the scanning-schedule analysis
 TIGHTENED_PROFIT_TAKE_PCT = 0.25
 TIGHTENED_STOP_LOSS_PCT = 0.15
-TIGHTENED_TRAILING_STOP_ACTIVATION_PCT = 0.15  # trail sooner once edge is decaying
-TIGHTENED_TRAILING_STOP_PCT = 0.08             # and trail tighter -- lock in gains faster
 
 # --- Lottery-priced positions (risk_manager.py, entry_manager.py) ----------
 # Below this entry price, a percentage stop-loss is structurally meaningless:
@@ -498,14 +466,9 @@ TIGHTENED_TRAILING_STOP_PCT = 0.08             # and trail tighter -- lock in ga
 # below this threshold therefore skip the percentage stop-loss entirely;
 # the fixed profit-take and resolution detection still apply.
 #
-# The TRAILING STOP is exempted too (changed 2026-08-09). It was not, and
-# that left the original failure mode fully intact one mechanism over: on
-# a 1-cent tick, a $0.05 ticket that ticks to $0.07 arms trailing (+40%
-# peak) and a tick back to $0.05 is a 2-cent give-back that blows through
-# any give-back band worth having. The ticket got churned out flat -- a
-# loss after two legs of fees -- for exactly the price noise the stop-loss
-# exemption exists to ignore. A lottery ticket's upside exit is the fixed
-# take or resolution; it is not a peak-give-back trade.
+# (The trailing stop was exempted for the same reason from 2026-08-09;
+# it was removed outright on 2026-08-17 -- see risk_manager.py's module
+# docstring for the measurement.)
 LOTTERY_PRICE_THRESHOLD = 0.15
 
 # Hard ceiling on entry price. Above this, a bought bucket stops behaving
@@ -554,6 +517,12 @@ MAX_STOP_OUTS_PER_BUCKET_PER_DAY = 1
 # a bucket is as good a reason to leave it alone for the day as one
 # stop-out is. Kept as a tuple rather than hardcoded so the trade-off
 # stays visible and reversible.
+#
+# "closed_trailing_stop" is RETAINED after the trailing stop itself was
+# removed (2026-08-17). Nothing writes that status any more, but stored
+# positions carry it, and this tuple is matched against position HISTORY --
+# dropping it would silently stop those rows tripping the cooldown they
+# tripped yesterday.
 COOLDOWN_COUNTED_EXIT_STATUSES = ("closed_stop_loss", "closed_trailing_stop")
 
 # Minimum ABSOLUTE edge (model_prob - market_price, in dollars/share) for
@@ -608,7 +577,7 @@ MIN_EXIT_PRICE = 0.03
 # the check almost never fired: a 0.49c jump sailed through unconfirmed
 # straight into the high-water mark, and the HWM is a monotone ratchet
 # that persists to SQLite and never comes back down. One bad-but-plausible
-# high print therefore armed the trailing stop permanently and set a floor
+# high print therefore set a permanent floor
 # the position had to keep beating -- entry 0.30, a spurious 0.42, and the
 # next honest 0.31 quote is a give-back that closes the position. 0.15 is
 # roughly the largest intraday move a weather bucket makes between two
