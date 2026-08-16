@@ -181,7 +181,7 @@ def _fetch_clmmaxt_rows(year: int, month: Optional[int], timeout: int = 15) -> D
         return {}
 
 
-def ingest_missing_recent(station_icaos: List[str], days_back: int = 3) -> int:
+def ingest_missing_recent(station_icaos: List[str], days_back: int = None) -> int:
     """
     Save "hko_daily_max" observations for any COMPLETED local day in
     the last `days_back` days that doesn't have one yet, for stations
@@ -201,7 +201,18 @@ def ingest_missing_recent(station_icaos: List[str], days_back: int = 3) -> int:
     docstring). A day whose month isn't published yet is therefore an
     honest gap: this fails soft, logs clearly, and saves nothing for
     that day rather than guessing or raising.
+
+    THE LOOKBACK MUST BE LONGER THAN THAT LAG, which is why days_back
+    defaults to config.HKO_INGEST_LOOKBACK_DAYS (75) and not to
+    metar_client's 3. METAR is minutes old; CLMMAXT publishes a whole
+    month at a time, weeks in arrears. A 3-day window and a 46-day lag
+    never overlap, so the sweep saved nothing for as long as it ran --
+    see the constant's note. Most of the span is normally already
+    ingested, so the extra reach costs one pass over cached month rows,
+    not one request per day.
     """
+    if days_back is None:
+        days_back = config.HKO_INGEST_LOOKBACK_DAYS
     saved = 0
     for icao in station_icaos:
         try:
@@ -242,14 +253,18 @@ def ingest_missing_recent(station_icaos: List[str], days_back: int = 3) -> int:
                 rows_cache[key] = rows
                 return rows
 
+            # Unpublished days are summarised PER MONTH, not per day. At a
+            # 3-day lookback one line per gap was fine; at 75 it would print
+            # ~46 identical "not published yet" lines every sweep and bury
+            # the saves -- and the whole reason this window is long is that
+            # most of it is expected to be unpublished or already stored.
+            unpublished_by_month: Dict[Tuple[int, int], int] = {}
             for d in missing:
                 day_rows = rows_for(d.year, d.month)
                 max_c = day_rows.get((d.year, d.month, d.day))
                 if max_c is None:
-                    print(
-                        f"[HKOClient] {icao} {d}: CLMMAXT has no published daily max yet for this "
-                        f"month (HKO's climate dataset lags the current date) -- not saving."
-                    )
+                    key = (d.year, d.month)
+                    unpublished_by_month[key] = unpublished_by_month.get(key, 0) + 1
                     continue
                 storage.save_observation(ObservedReading(
                     station_icao=icao,
@@ -259,6 +274,12 @@ def ingest_missing_recent(station_icaos: List[str], days_back: int = 3) -> int:
                 ))
                 print(f"[HKOClient] {icao} {d}: daily max {max_c:.1f}°C saved (source=hko_daily_max).")
                 saved += 1
+
+            for (year, month), n in sorted(unpublished_by_month.items()):
+                print(
+                    f"[HKOClient] {icao}: {n} day(s) in {year}-{month:02d} have no published "
+                    f"CLMMAXT daily max yet (HKO's climate dataset lags) -- not saving."
+                )
         except Exception as exc:  # noqa: BLE001 - must never break a trading cycle
             print(f"[HKOClient] ingest failed for {icao} (continuing): {exc}")
     return saved

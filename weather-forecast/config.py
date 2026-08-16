@@ -1054,6 +1054,39 @@ EXPLORATORY_SIZE_MULTIPLIER = 0.20  # exploratory stations get 20% of what matur
 # changes nothing today -- it is a guard for the next station added.
 MIN_RESOLUTION_OBS_BEFORE_ENTRY = 10
 
+# --- HKO ingest lookback: match the window to the source's LAG -----------
+# How far back clients/official/hko.ingest_missing_recent() looks for days
+# it has no "hko_daily_max" observation for.
+#
+# This is not a tuning knob, it is the fix for a window that could never
+# overlap its source. The ingest ran with metar_client's 3-day default,
+# while HKO's CLMMAXT climate dataset publishes a COMPLETE MONTH AT A TIME,
+# weeks in arrears:
+#
+#   2026-08-05 probe: published through 2026-06-30 (July absent)
+#   2026-08-16 probe: published through 2026-07-31 (August absent, 0 rows)
+#
+# So July 1st became readable roughly 46 days after the fact. A sweep that
+# only ever asks about the last three days is therefore GUARANTEED to save
+# nothing, forever -- and it did: VHHH accumulated hko_fnd forecasts from
+# 2026-08-06 onward against zero settlement-grade observations, so its
+# resolution_grade_source had no rows at all and the station could never
+# have matured or been scored. The data was sitting in the API the whole
+# time; nothing ever asked for it.
+#
+# 75 days covers the observed worst case (~46) with room for a month that
+# publishes slower, and costs little: rows are cached per (year, month), so
+# a 75-day span is at most ~4 month-queries, once per station per local day.
+#
+# NOTE this backfills real history, which lifts VHHH over the raw
+# MIN_RESOLUTION_OBS_BEFORE_ENTRY count without it having been watched
+# forward. That is safe on its own: bias pairs need a FORECAST for the same
+# date (storage.forecast_error_samples joins on target_date) and VHHH has no
+# stored forecast before 2026-08-06, so the adaptive bias gate -- the real
+# check per MIN_RESOLUTION_OBS_BEFORE_ENTRY's own note above -- still has to
+# be earned forward, one day at a time.
+HKO_INGEST_LOOKBACK_DAYS = 75
+
 # --- Forecast bias: measure it, correct it, and refuse to trade blind ----
 # Counting observations was never the point -- MEASURING THE BIAS was, and
 # until 2026-08-09 nothing did. Measured that day across the registry:
