@@ -63,7 +63,7 @@ config.py, models.py, ev_engine.py (local -- fee formula only)
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 import config
 import ev_engine
@@ -181,6 +181,81 @@ def update_high_water_mark(position: Position, current_price: float) -> float:
     return max(position.high_water_mark, current_price)
 
 
+# --- Trailing-stop diagnostics (OBSERVABILITY ONLY) ------------------------
+# Nothing here can change a decision. Every counter is incremented after the
+# branch it describes has already been taken.
+#
+# Why it exists: a profit-take sweep over the cohort (2026-08-16, Aug 6-16,
+# 91 positions) recorded ZERO trailing_stop exits in every variant tested,
+# INCLUDING one with the fixed profit-take disabled entirely -- which rules
+# out "the fixed take fires first" as the explanation.
+#
+# WHAT THESE COUNTERS THEN MEASURED (Aug 6-16, 10 stations, 907 evaluations):
+#
+#   evaluations              907
+#   lottery-exempt           327   (36%: trailing never applies at all)
+#   armed                      7   (of 580 eligible ticks -- 1.2%)
+#   breached                   0
+#   blocked on cost            0
+#   fired                      0
+#
+# So the fee bar is NOT the constraint -- it is never reached. Trailing needs
+# TWO evaluations to do anything: one with the position up past activation
+# but short of the fixed take, and a LATER one showing the give-back. At ~10
+# ticks per position and hourly cycles on a 1-cent book, a run-up crosses the
+# whole activation-to-target band inside a single step, so that intermediate
+# state is essentially never observed. It is a sampling-frequency problem,
+# not a threshold or fee problem, and no amount of retuning
+# TRAILING_STOP_PCT / TRAILING_EXIT_COST_MARGIN addresses it.
+#
+# Keep the counters: they separate "never armed" from "armed but never
+# breached" from "breached and refused on cost", which the exit_reason
+# strings cannot -- a blocked breach leaves no trace at all, falling through
+# to be recorded later as a take_profit, a stop_loss or a resolution.
+#
+# Do not read these as a rate without also reading `evaluations`: one
+# position is evaluated once per tick, so these count TICKS, not positions.
+TRAILING_DIAGNOSTICS = {
+    "evaluations": 0,          # evaluate_exit() calls
+    "lottery_skipped": 0,      # entry < LOTTERY_PRICE_THRESHOLD: trailing never applies
+    "armed": 0,                # peak gain cleared the activation threshold
+    "breached": 0,             # armed AND gave back the trailing distance
+    "blocked_by_cost_margin": 0,  # breached, then refused for not clearing fees
+    "fired": 0,                # actually exited as trailing_stop
+}
+
+# Bounded so a long-lived daemon cannot grow this without limit; the tail is
+# kept rather than the head because the useful sample is the recent regime.
+_TRAILING_SAMPLE_LIMIT = 200
+TRAILING_BLOCK_SAMPLE: List[dict] = []
+
+
+def reset_trailing_diagnostics() -> None:
+    """Zero the counters. For replays and tests -- the live daemon never calls it."""
+    for key in TRAILING_DIAGNOSTICS:
+        TRAILING_DIAGNOSTICS[key] = 0
+    TRAILING_BLOCK_SAMPLE.clear()
+
+
+def _record_blocked_breach(position, current_price, gross_gain, cost_bar, unit) -> None:
+    TRAILING_BLOCK_SAMPLE.append({
+        "position_id": position.position_id,
+        "entry_price": position.entry_price,
+        "current_price": current_price,
+        "high_water_mark": position.high_water_mark,
+        "gross_gain": round(gross_gain, 6),
+        "cost_bar": round(cost_bar, 6),
+        "shortfall": round(cost_bar - gross_gain, 6),
+        # How far the gain would have had to reach, in risk units -- the
+        # number to compare against TRAILING_STOP_ACTIVATION_PCT minus
+        # TRAILING_STOP_PCT (0.10 today) to see whether the three constants
+        # can be satisfied together at this entry price at all.
+        "cost_bar_in_units": round(cost_bar / unit, 4) if unit else None,
+    })
+    if len(TRAILING_BLOCK_SAMPLE) > _TRAILING_SAMPLE_LIMIT:
+        del TRAILING_BLOCK_SAMPLE[0]
+
+
 def evaluate_exit(
     position: Position,
     current_price: float,
@@ -219,6 +294,10 @@ def evaluate_exit(
     # peak that may itself be one tick of noise.
     is_lottery = position.entry_price < config.LOTTERY_PRICE_THRESHOLD
 
+    TRAILING_DIAGNOSTICS["evaluations"] += 1
+    if is_lottery:
+        TRAILING_DIAGNOSTICS["lottery_skipped"] += 1
+
     # 1. Hard stop-loss -- always checked first, overrides everything else.
     if not is_lottery and (position.entry_price - current_price) >= thresholds["stop_loss_pct"] * unit:
         return ExitDecision(
@@ -235,8 +314,10 @@ def evaluate_exit(
     peak_gain = position.high_water_mark - position.entry_price
     trailing_active = (not is_lottery) and peak_gain >= thresholds["trailing_activation_pct"] * unit
     if trailing_active:
+        TRAILING_DIAGNOSTICS["armed"] += 1
         give_back = position.high_water_mark - current_price
         if give_back >= thresholds["trailing_stop_pct"] * unit:
+            TRAILING_DIAGNOSTICS["breached"] += 1
             # The trailing stop exists to BANK a profit. A breach whose
             # gross gain doesn't cover both legs of taker fees banks
             # nothing -- it pays the exchange to flatten a winner, then
@@ -249,6 +330,7 @@ def evaluate_exit(
                 position.entry_price, current_price,
             )
             if gross_gain >= cost_bar:
+                TRAILING_DIAGNOSTICS["fired"] += 1
                 return ExitDecision(
                     position_id=position.position_id,
                     should_exit=True,
@@ -256,6 +338,11 @@ def evaluate_exit(
                     current_price=current_price,
                     pnl_pct=pnl_pct,
                 )
+            # Refused on cost. This is the branch that leaves no trace in any
+            # exit_reason -- the position falls through and is recorded later
+            # as whatever finally closes it.
+            TRAILING_DIAGNOSTICS["blocked_by_cost_margin"] += 1
+            _record_blocked_breach(position, current_price, gross_gain, cost_bar, unit)
 
     # 3. Fixed profit-take -- the hard cap on greed. Checked BEFORE the
     #    trailing-active hold: this system's edge is a morning-only
