@@ -282,3 +282,89 @@ class TestCaptureIsNeverAGate:
             "a failing snapshot capture stopped the position from being "
             "evaluated -- capture must never be a gate"
         )
+
+
+class TestExitRowsCountAsLiveCoverage:
+    """
+    Adding EXIT_SNAPSHOT_SOURCE created a second live source while
+    coverage_stats() still counted only the first, so genuinely live rows
+    landed in pct_live_snapshot's denominator and never its numerator.
+
+    That number is printed as "From live order books" directly above the
+    P&L, under a docstring telling the reader to check it before believing
+    the result -- and it would have drifted further wrong every day, since
+    entry windows cover 3 local hours against ~14.75 of monitor/risk ones.
+    """
+
+    def _store(self, tmp_path):
+        import backtest.price_store as price_store
+        return price_store, str(tmp_path / "market_test.sqlite3")
+
+    def test_both_live_sources_count_toward_pct_live(self, tmp_path):
+        price_store, db = self._store(tmp_path)
+
+        # One entry-path row (ask + depth) and three exit-path rows, which
+        # is the shape a real day now produces: monitor windows outnumber
+        # entry windows, so exit rows dominate.
+        price_store.save_snapshot(
+            token_id="tok", ts=1000, price=0.40, ask_price=0.42, depth_usd=100.0,
+            source=price_store.LIVE_SNAPSHOT_SOURCE, fidelity_min=5, db_path=db,
+        )
+        for i, ts in enumerate((2000, 3000, 4000)):
+            price_store.save_snapshot(
+                token_id="tok", ts=ts, price=0.41, ask_price=None, depth_usd=None,
+                source=price_store.EXIT_SNAPSHOT_SOURCE, fidelity_min=15, db_path=db,
+            )
+
+        stats = price_store.coverage_stats(["tok"], 0, 9999, db_path=db)
+
+        assert stats["n_ticks"] == 4
+        assert stats["pct_live_snapshot"] == 1.0, (
+            f"every row is a real order-book read but coverage reported "
+            f"{stats['pct_live_snapshot']:.0%} live -- exit-path rows are "
+            f"being dropped from the numerator again"
+        )
+
+    def test_depth_still_separates_the_two_paths(self, tmp_path):
+        """
+        Merging the live count must not hide the entry/exit split. It stays
+        legible in pct_with_depth, because exit rows carry depth NULL by
+        design -- high "live" plus low "with depth" is what a
+        monitor-dominated window should look like.
+        """
+        price_store, db = self._store(tmp_path)
+
+        price_store.save_snapshot(
+            token_id="tok", ts=1000, price=0.40, ask_price=0.42, depth_usd=100.0,
+            source=price_store.LIVE_SNAPSHOT_SOURCE, fidelity_min=5, db_path=db,
+        )
+        price_store.save_snapshot(
+            token_id="tok", ts=2000, price=0.41, ask_price=None, depth_usd=None,
+            source=price_store.EXIT_SNAPSHOT_SOURCE, fidelity_min=15, db_path=db,
+        )
+
+        stats = price_store.coverage_stats(["tok"], 0, 9999, db_path=db)
+
+        assert stats["pct_live_snapshot"] == 1.0
+        assert stats["pct_with_depth"] == 0.5
+
+    def test_reconstructed_sources_are_still_excluded(self, tmp_path):
+        """
+        The fix widens "live" to every real book read -- not to everything.
+        A reconstructed series must still be excluded, or the field stops
+        meaning anything at all.
+        """
+        price_store, db = self._store(tmp_path)
+
+        price_store.save_snapshot(
+            token_id="tok", ts=1000, price=0.40, ask_price=None, depth_usd=None,
+            source=price_store.EXIT_SNAPSHOT_SOURCE, fidelity_min=15, db_path=db,
+        )
+        price_store.save_snapshot(
+            token_id="tok", ts=2000, price=0.41, ask_price=None, depth_usd=None,
+            source="clob_prices_history", fidelity_min=60, db_path=db,
+        )
+
+        stats = price_store.coverage_stats(["tok"], 0, 9999, db_path=db)
+
+        assert stats["pct_live_snapshot"] == 0.5

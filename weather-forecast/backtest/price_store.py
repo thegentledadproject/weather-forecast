@@ -77,6 +77,18 @@ LIVE_SNAPSHOT_SOURCE = "live_snapshot"
 # instead of averaging a dense morning together with a sparse afternoon.
 EXIT_SNAPSHOT_SOURCE = "live_exit_check"
 
+# Every source that is a read off a REAL order book, as opposed to a
+# reconstructed or interpolated series. coverage_stats() measures "live"
+# against this set rather than against one constant, because the failure it
+# replaced was exactly that: EXIT_SNAPSHOT_SOURCE was added as a second live
+# source while pct_live_snapshot still counted only the first, so genuinely
+# live rows landed in the denominator and never the numerator.
+#
+# ADD ANY FUTURE LIVE SOURCE HERE. A new constant that is not in this set
+# does not report as slightly wrong, it silently deflates the one number the
+# report tells readers to check before believing a P&L figure.
+_LIVE_BOOK_SOURCES = frozenset({LIVE_SNAPSHOT_SOURCE, EXIT_SNAPSHOT_SOURCE})
+
 
 def _add_missing_columns(conn, table: str, columns: dict) -> None:
     """
@@ -453,6 +465,22 @@ def coverage_stats(token_ids: List[str], start_ts: int, end_ts: int, db_path=Non
     Read this BEFORE reading a backtest's P&L. A result built on 12%
     coverage is not a weaker version of the same finding, it is a
     different and much smaller claim.
+
+    "LIVE" MEANS EVERY LIVE SOURCE, NOT JUST THE ENTRY PATH. Both
+    LIVE_SNAPSHOT_SOURCE and EXIT_SNAPSHOT_SOURCE are reads off a real
+    order book; they differ in which cycle captured them and how much
+    each row carries, not in whether the quote was real. Counting only
+    the first understated pct_live_snapshot the moment exit-path capture
+    landed (2026-08-17), and would have gone on understating it further
+    every day: entry windows cover 3 local hours against ~14.75 of
+    monitor/risk windows, so a run where every single row is a genuine
+    book read would have trended toward reporting a small percentage.
+    That is the precise failure this field exists to prevent, inverted.
+
+    The entry/exit split is still legible, and belongs to pct_with_depth
+    rather than here: exit-path rows carry depth_usd NULL by design, so a
+    window dominated by them reads high on "live" and low on "with
+    depth". The two numbers print next to each other for that reason.
     """
     empty = {
         "n_ticks": 0,
@@ -475,7 +503,7 @@ def coverage_stats(token_ids: List[str], start_ts: int, end_ts: int, db_path=Non
         return empty
 
     n = len(rows)
-    n_live = sum(1 for r in rows if r[0] == LIVE_SNAPSHOT_SOURCE)
+    n_live = sum(1 for r in rows if r[0] in _LIVE_BOOK_SOURCES)
     n_depth = sum(1 for r in rows if r[1] is not None)
     fidelities = [r[2] for r in rows if r[2] is not None]
 

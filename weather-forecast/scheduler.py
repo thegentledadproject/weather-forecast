@@ -331,7 +331,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
 
     # DELIBERATELY None: no exit-path capture inside an entry window.
     #
-    # ev_engine.run_for_station() above already captured both sides of every
+    # ev_engine.run_for_station_with_map() above already captured both sides of every
     # bucket this cycle, WITH ask and periodic depth, so an exit-path row
     # here would be strictly poorer duplicate data. Worse than useless: the
     # exit check runs seconds AFTER the EV leg, so its ask-less row is the
