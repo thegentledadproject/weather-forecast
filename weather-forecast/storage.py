@@ -61,6 +61,67 @@ def _db():
         conn.close()
 
 
+# Derived economics over `positions`, for ad-hoc SQL and reporting.
+#
+# WHY THIS EXISTS. size_shares is NULL on every paper/manual_review row, and
+# that is correct rather than missing: it means SHARES ACTUALLY HELD ON THE
+# EXCHANGE, and a paper fill holds none (see models.Position.size_shares).
+# But every P&L query then has to hand-roll
+# `coalesce(size_shares, size_usd/entry_price)`, and writing that by hand is
+# how a query eventually gets it wrong -- or, worse, how someone "fixes" the
+# NULL by storing a fabricated share count into the field that
+# executor.close_position() reads to tell an operator what to sell.
+#
+# So the derived quantity gets its own name and lives here. `notional_shares`
+# is "what size_usd bought at entry_price" -- a unit of account, true for
+# every mode. `size_shares` is passed through UNCHANGED and stays NULL for
+# paper, so the distinction the ledger is careful about survives the view.
+# Never join or reconcile against notional_shares; it is not a holding.
+#
+# realized_pnl_usd is GROSS OF THE ENTRY-SIDE FEE. exit_price is already net
+# of the exit taker fee (position_manager/engine subtract it before writing),
+# but the entry leg is recorded gross, so this slightly overstates every
+# closed trade by the entry fee. That asymmetry is a property of the stored
+# data, not of this view -- it is named here so a reader does not rediscover
+# it as a discrepancy.
+_POSITION_ECONOMICS_VIEW_SQL = """CREATE VIEW position_economics AS
+SELECT
+    p.*,
+    CASE WHEN p.entry_price > 0
+         THEN p.size_usd / p.entry_price END AS notional_shares,
+    CASE WHEN p.exit_price IS NOT NULL AND p.entry_price > 0
+         THEN (p.exit_price - p.entry_price) * (p.size_usd / p.entry_price)
+         END AS realized_pnl_usd,
+    CASE WHEN p.exit_price IS NOT NULL AND p.entry_price > 0
+         THEN (p.exit_price - p.entry_price) / p.entry_price
+         END AS realized_pnl_pct
+FROM positions p"""
+
+
+def _ensure_position_economics_view(conn: sqlite3.Connection) -> None:
+    """
+    Create the view, and recreate it only when its definition has drifted.
+
+    NOT `CREATE VIEW IF NOT EXISTS`: that silently keeps an old definition
+    forever once the view exists, so editing the SQL above would change
+    nothing on any database that already ran an earlier version -- the same
+    trap the `positions` column migration below exists to avoid.
+
+    NOT an unconditional DROP + CREATE either. This runs on EVERY connection
+    (storage opens one per call site), and a schema write on each would take
+    a write lock and bump the schema cookie, invalidating prepared statements
+    across the daemon for a view that holds no data. Comparing the stored SQL
+    first makes the common case a single read.
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'position_economics'"
+    ).fetchone()
+    if row is not None and (row[0] or "").strip() == _POSITION_ECONOMICS_VIEW_SQL.strip():
+        return
+    conn.execute("DROP VIEW IF EXISTS position_economics")
+    conn.execute(_POSITION_ECONOMICS_VIEW_SQL)
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DB_PATH)
     conn.execute(
@@ -162,6 +223,10 @@ def _connect() -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_loa_ts ON live_order_attempts(kind, ts)")
+
+    # After the ALTER TABLE migration above, so the view is defined against
+    # the migrated `positions` shape rather than a short one.
+    _ensure_position_economics_view(conn)
     return conn
 
 
