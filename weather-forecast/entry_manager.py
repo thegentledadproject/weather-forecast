@@ -170,8 +170,10 @@ def gap_risk_haircut(entry_price: Optional[float], station_icao: Optional[str] =
     at all -- their maximum loss is the stake, already accepted at entry, and
     no amount of gapping changes it. Also 1.0 for degenerate prices.
 
-    Uses the NORMAL-regime stop. Entries only happen before 10:00 local, so
-    that is the regime a position is opened under; after 10:00 the tightened
+    Uses the NORMAL-regime stop. Entries only happen before 08:00 local (the
+    entry window closed two hours earlier on 2026-08-17, which only widens
+    the margin this argument already had), so that is the regime a position
+    is opened under; after 10:00 the tightened
     stop makes nominal smaller and the true haircut harsher still, so this is
     the conservative-in-the-right-direction choice rather than an exact one.
     """

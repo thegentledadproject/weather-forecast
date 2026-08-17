@@ -444,7 +444,7 @@ try:
                   f"above the {EV_ENTRY_SCREEN:.0%} net-EV entry screen shown")
     else:
         ev_html = ("<div class='empty'>No EV snapshot yet &mdash; the engine computes during the morning "
-                   "entry windows (05:00&ndash;10:00 local) and saves its table here from then on.</div>")
+                   "entry window (05:00&ndash;08:00 local) and saves its table here from then on.</div>")
         ev_cap = "model edge vs. market, per bucket and side, grouped by station"
 except Exception as exc:  # noqa: BLE001
     warnings.append(f"EV card failed: {exc}")
@@ -1008,16 +1008,16 @@ for _idx, _offset in enumerate(sorted(_offset_groups)):
         <div class="seg closed" style="flex:4"></div>
         <div class="seg closed" style="flex:1;opacity:.55"></div>
         <div class="seg primary" style="flex:3"></div>
-        <div class="seg decay" style="flex:2"></div>
+        <div class="seg monitor" style="flex:2"></div>
         <div class="seg monitor" style="flex:14"></div>
       </div>
       <div class="nowmark" id="{_mark_id}"></div>
       <div class="seglabels">
         <div class="seglabel" style="flex:4"><b>00&ndash;04</b>closed &mdash; hard floor</div>
         <div class="seglabel" style="flex:1"><b>04</b>warm-up</div>
-        <div class="seglabel" style="flex:3"><b>05&ndash;08</b>primary entries</div>
-        <div class="seglabel" style="flex:2"><b>08&ndash;10</b>edge decay</div>
-        <div class="seglabel" style="flex:14"><b>10&ndash;24</b>position monitoring only</div>
+        <div class="seglabel" style="flex:3"><b>05&ndash;08</b>entries &mdash; the only ones</div>
+        <div class="seglabel" style="flex:2"><b>08&ndash;10</b>monitoring, loose stop</div>
+        <div class="seglabel" style="flex:14"><b>10&ndash;24</b>monitoring, tightened stop</div>
       </div>
       <div class="hours"><span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span></div>
     </div>""")
@@ -1254,7 +1254,8 @@ page = """<!doctype html>
     <h2>Trading day &mdash; by timezone group</h2>
     <p class="cap">Simplified view of the scheduler&rsquo;s windows, one strip per distinct
       utc_offset_hours in the registry (currently spans UTC+5 through UTC+9). Same local
-      pattern in every group: entries 05:00&ndash;08:00, decaying to nothing by 10:00.</p>
+      pattern in every group: entries open 05:00&ndash;08:00 and nothing new is taken after
+      that; the stop-loss tightens at 10:00 for whatever is still open.</p>
     @@TIMESTRIPS@@
     <p class="countdown">Next entry window opens in <b id="countdown">&mdash;</b> (soonest 05:00 across all groups).</p>
   </div>

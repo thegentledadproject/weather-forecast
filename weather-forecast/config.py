@@ -615,18 +615,49 @@ SCHEDULE_WINDOWS = [
     (4, 0, 4, 45, 15, "pre_poll", None, "Early watch -- checking if forecast posted ahead of schedule"),
     (4, 45, 5, 0, 2, "pre_poll", None, "Tight pre-poll -- waiting for the 05:00 forecast publish event"),
     (5, 0, 8, 0, 10, "primary", 0.15, "Primary edge window -- confirmed bias-correction edge, tightest scan interval"),
-    # 08:00-10:00 used to tighten both the EV bar (0.15->0.25) AND the scan
-    # interval (10min->30min) in one step at 08:00 -- two independent
-    # "be more conservative" levers moving together meant real
-    # opportunities in the 08:00-09:00 hour could be missed to sparse
-    # polling on top of a stricter EV bar, which is a different failure
-    # mode than "rejected for insufficient EV." Split into two steps so
-    # the interval widens gradually instead of tripling in one jump:
-    # bar tightens first, interval widens second.
-    (8, 0, 9, 0, 15, "secondary", 0.20, "Edge decaying (early) -- EV bar raised, scan interval only modestly wider"),
-    (9, 0, 10, 0, 30, "secondary", 0.25, "Edge decaying (late) -- original wider interval, highest pre-close EV bar"),
+    # ENTRIES CLOSE AT 08:00 (changed 2026-08-17). This was two "secondary"
+    # entry windows, 08:00-09:00 at an EV bar of 0.20 and 09:00-10:00 at
+    # 0.25 -- a decaying-edge ramp that raised the bar rather than closing
+    # the door. Measured over 176 closed paper trades, the ramp does not
+    # earn its place: realized P&L per dollar staked, by the LOCAL HOUR THE
+    # POSITION WAS OPENED, is
+    #
+    #     05:00-07:59   +3.9%   (n=143)
+    #     08:00-08:59   -8.9%   (n=19)
+    #     09:00+        -7.8%   (n=14)
+    #
+    # A higher EV bar did not rescue the late hours; it selected a smaller
+    # number of equally bad trades. n is small on both late buckets and the
+    # magnitudes should not be trusted to a percentage point, but the sign
+    # is the one the edge-decay thesis in this very file predicts, and the
+    # cost of being wrong is asymmetric: closing early forgoes trades whose
+    # measured expectancy is negative.
+    #
+    # The clearest single case is WMKK 2026-08-11. The bucket-33 bid fell
+    # 0.49 -> 0.36 -> 0.20 across the morning; the 09:00 window bought the
+    # ask at 0.24 at 09:35, and the 10:00 stop tightening liquidated it 25
+    # minutes later. An entry taken in the 09:00 hour has under an hour
+    # before EDGE_DECAY_TIGHTEN_HOUR_LOCAL halves its stop distance -- the
+    # entry window used to stay open until the exact instant the exit rule
+    # got stricter.
+    #
+    # 08:00-10:00 is now monitor_only at the same 15-minute cadence as the
+    # 10:00-12:00 window that follows it. Interval is a MONITORING decision
+    # once no entry can be surfaced (see the note below on post-decision
+    # intervals), so the old 30-minute late-entry cadence would have halved
+    # the resolution of every exit level for two hours for no remaining
+    # reason.
+    #
+    # NOT changed here, deliberately: EDGE_DECAY_TIGHTEN_HOUR_LOCAL stays at
+    # 10:00, so there is now a two-hour gap where a position holds under the
+    # loose stop with no new entries being taken. Whether the tightening
+    # should follow the entry close down to 08:00 is a SEPARATE question
+    # about exits, and the measurement that would answer it has to model the
+    # capital a stop frees (stop_loss_audit.py's held column explicitly
+    # cannot).
+    (8, 0, 10, 0, 15, "monitor_only", None, "Decision-closed early -- entries shut at 08:00, watching existing positions"),
     # POST-DECISION INTERVALS ARE EXIT-MONITORING INTERVALS, NOT ENTRY ONES.
-    # No new position is opened after 10:00, so the only thing these windows
+    # No new position is opened after 08:00, so the only thing these windows
     # decide is how often a stop-loss, trailing stop or profit-take can fire
     # at all -- a threshold is only ever evaluated on a scan tick, so the
     # scan interval IS the resolution of every exit level in risk_manager.
@@ -673,10 +704,11 @@ SCHEDULE_WINDOWS = [
     # overshoot. Measure the two separately or the cadence will look
     # worse, and the stop tighter, than either really is.
     #
-    # Entry windows (05:00-10:00) are deliberately UNCHANGED: their cadence
-    # encodes the edge-decay thesis rather than a monitoring requirement,
-    # and scanning for entries more often is a different decision from
-    # watching open risk more often.
+    # The entry window (05:00-08:00 since 2026-08-17, 05:00-10:00 when this
+    # was written) is deliberately UNCHANGED by that cadence work: its
+    # interval encodes the edge-decay thesis rather than a monitoring
+    # requirement, and scanning for entries more often is a different
+    # decision from watching open risk more often.
     (10, 0, 12, 0, 15, "monitor_only", None, "Decision-closed -- no new entries, watching existing positions"),
     (12, 0, 16, 0, 15, "risk_only", None, "Afternoon peak-heat window -- nowcast-triggered risk checks only"),
     (16, 0, 22, 45, 30, "monitor_only", None, "Evening -- position monitoring, wider as volatility falls off"),

@@ -54,7 +54,8 @@ LIVE_SNAPSHOT_SOURCE = "live_snapshot"
 # kept as separate sources for two reasons.
 #
 # WHY THIS SOURCE EXISTS AT ALL. Snapshot capture used to piggyback ONLY on
-# entry cycles, which run in the 05:00-10:00 local windows. The daemon goes
+# entry cycles, which ran in the 05:00-10:00 local windows (05:00-08:00 since
+# 2026-08-17, which makes this gap wider still). The daemon goes
 # on watching open positions until 22:45 in monitor_only/risk_only windows,
 # and exits fire there -- but nothing recorded a price, so a replay could not
 # see them. Measured 2026-08-17 across all 13 stations: exactly 5 of 24 UTC
