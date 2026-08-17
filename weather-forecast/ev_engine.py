@@ -569,6 +569,87 @@ def _capture_snapshots(
         print(f"[ev_engine] snapshot capture failed this cycle (non-fatal, trading unaffected): {exc}")
 
 
+def capture_exit_snapshot(
+    station_icao: str,
+    target_date,
+    bucket_c: int,
+    side: str,
+    token_id: str,
+    bid_price: float,
+    fidelity_min: int,
+) -> None:
+    """
+    Capture ONE already-fetched bid from the exit path (position_manager).
+
+    Same best-effort contract as _capture_snapshots() above -- lazy imports,
+    blanket except, honours ENABLE_SNAPSHOT_CAPTURE -- because this runs
+    inside the loop that carries every open position's stop-loss. Capture
+    must never be able to interrupt that.
+
+    WHY A SECOND, NARROWER CAPTURE FUNCTION. _capture_snapshots() takes a
+    whole token_map plus MarketQuotes and writes both sides of every bucket.
+    The exit path has none of that: it fetches one bid, for one token, for
+    the one bucket it holds. Reconstructing a token_map here would mean
+    re-discovering markets and re-quoting both sides on every monitor cycle
+    -- entry-window work, done all day, to record prices for buckets nobody
+    holds. So this writes exactly what the exit check already paid for.
+
+    The consequence is deliberate and must not be papered over: these rows
+    cover only HELD buckets, and carry ask_price=None and depth_usd=None.
+    That is the honest shape of "one bid, nothing else" -- see
+    price_store.save_snapshot() on why NULL means "not captured" rather than
+    zero, and price_store.EXIT_SNAPSHOT_SOURCE for the coverage gap this
+    closes.
+
+    `bid_price` MUST be the bid (market_client.get_current_price_for_side),
+    never an entry ask: price_store's `price` column has held the bid since
+    before 2026-08-10 and mixing the two would make the series incomparable
+    to itself with nothing in the data to say which row is which.
+
+    `fidelity_min` is the ACTIVE WINDOW's scan interval, threaded down from
+    scheduler.run_cycle(), not DEFAULT_SNAPSHOT_FIDELITY_MIN. It is what
+    get_price_at() derives its staleness limit from, so writing 5 here for a
+    row that will not be followed by another for 30 minutes would tell every
+    future replay that a normal monitor cadence is a data gap.
+    """
+    if not ENABLE_SNAPSHOT_CAPTURE:
+        return
+
+    try:
+        import backtest.price_store as price_store
+
+        target_date_iso = (
+            target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+        )
+        # price_store stores sides lowercase ("yes"/"no"); Position.side is
+        # upper. load_token_map() keys off this column, so a stray "YES"
+        # here would write a token the replay cannot find.
+        side_key = str(side).lower()
+
+        price_store.upsert_token(
+            token_id=token_id,
+            station_icao=station_icao,
+            target_date=target_date_iso,
+            bucket_c=bucket_c,
+            side=side_key,
+            discovered_at=_now_iso(),
+        )
+        price_store.save_snapshot(
+            token_id=token_id,
+            ts=int(time.time()),
+            price=bid_price,
+            ask_price=None,
+            depth_usd=None,
+            source=price_store.EXIT_SNAPSHOT_SOURCE,
+            fidelity_min=int(fidelity_min),
+        )
+    except Exception as exc:  # noqa: BLE001 - capture must never break an exit cycle
+        print(
+            f"[ev_engine] exit-path snapshot capture failed for {station_icao} "
+            f"{bucket_c}°{side} (non-fatal, exit checking unaffected): {exc}"
+        )
+
+
 def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
     """
     Persist the latest EV table for one station to

@@ -140,13 +140,29 @@ UNMONITORABLE_CYCLES_WARN = 3
 CONFIRMATION_TOLERANCE = 0.05
 
 
-def check_and_exit_positions(station_icao: Optional[str] = None) -> List[ExitDecision]:
+def check_and_exit_positions(
+    station_icao: Optional[str] = None,
+    capture_fidelity_min: Optional[int] = None,
+) -> List[ExitDecision]:
     """
     Run one full exit-check cycle. Returns the list of ExitDecisions
     made this cycle (including "hold" decisions), for logging/summary.
     Positions skipped entirely this cycle (price unavailable, or a price
     that failed confirmation) produce no decision -- they are left open
     and logged, never exited on an unverified number.
+
+    capture_fidelity_min is the ACTIVE SCHEDULE WINDOW's scan interval in
+    minutes, supplied by scheduler.run_cycle(). Each confirmed price is
+    written to the backtest price store tagged with it, which is how a
+    replay learns what this cycle saw -- see ev_engine.capture_exit_snapshot()
+    and price_store.EXIT_SNAPSHOT_SOURCE.
+
+    None means "cadence unknown" and DISABLES capture for the cycle rather
+    than guessing a fidelity. Staleness in get_price_at() is derived from
+    this number, so an invented one does not merely mislabel a row, it
+    changes which future replays can read it. Callers outside the scheduler
+    (operator scripts, tests) fire at no fixed cadence and so have no honest
+    value to pass -- for them, recording nothing is correct.
     """
     open_positions = storage.load_open_positions(station_icao=station_icao)
     decisions = []
@@ -164,7 +180,7 @@ def check_and_exit_positions(station_icao: Optional[str] = None) -> List[ExitDec
         # reasoned this way about orphaned stations; the rest of the loop
         # did not.
         try:
-            decision = _check_one_position(position)
+            decision = _check_one_position(position, capture_fidelity_min)
         except Exception as exc:  # noqa: BLE001 - one row must never strand the others
             print(
                 f"[position_manager] ERROR checking {position.position_id} ({position.station_icao} "
@@ -179,7 +195,47 @@ def check_and_exit_positions(station_icao: Optional[str] = None) -> List[ExitDec
     return decisions
 
 
-def _check_one_position(position: Position) -> Optional[ExitDecision]:
+def _capture_exit_price(
+    position: Position,
+    token_id: str,
+    bid_price: float,
+    fidelity_min: Optional[int],
+) -> None:
+    """
+    Hand one confirmed bid to the backtest price store, or do nothing.
+
+    Imported lazily and swallowed whole. ev_engine reaches market_discovery
+    and the CLOB client at import time, and this module is the one that
+    carries every open position's stop-loss -- so nothing about recording
+    history is allowed to fail, slow, or import its way into that path.
+    ev_engine.capture_exit_snapshot() is itself fail-soft; this is the
+    second belt, covering the import.
+    """
+    if fidelity_min is None:
+        return
+    try:
+        import ev_engine
+
+        ev_engine.capture_exit_snapshot(
+            station_icao=position.station_icao,
+            target_date=position.target_date,
+            bucket_c=position.bucket_c,
+            side=position.side,
+            token_id=token_id,
+            bid_price=bid_price,
+            fidelity_min=fidelity_min,
+        )
+    except Exception as exc:  # noqa: BLE001 - history capture is never a gate
+        print(
+            f"[position_manager] snapshot capture unavailable this cycle "
+            f"(non-fatal, exit checking unaffected): {exc}"
+        )
+
+
+def _check_one_position(
+    position: Position,
+    capture_fidelity_min: Optional[int] = None,
+) -> Optional[ExitDecision]:
     """
     The full exit check for ONE position: price fetch, sanity screening,
     resolution check, high-water-mark refresh, exit evaluation, and the
@@ -305,6 +361,21 @@ def _check_one_position(position: Position) -> Optional[ExitDecision]:
             )
 
     _last_observed_price[position.position_id] = current_price
+
+    # Record the price this cycle is about to ACT on, so a replay can see
+    # the part of the day the entry path never covered. See
+    # price_store.EXIT_SNAPSHOT_SOURCE for the measured gap this closes.
+    #
+    # PLACED HERE, AFTER CONFIRMATION, ON PURPOSE. Everything above this
+    # line exists to decide whether the quote is believable; a price that
+    # failed its confirming re-fetch is one this module explicitly refused
+    # to act on, and writing it would seed the historical series with the
+    # exact phantom quotes the confirmation logic exists to reject. The
+    # cost is that prices from the early-return resolution paths go
+    # uncaptured -- acceptable, since a replay settles past-dated
+    # positions from the observation record (engine._resolution_sweep),
+    # not from a price.
+    _capture_exit_price(position, token_id, current_price, capture_fidelity_min)
 
     # Refresh high-water-mark BEFORE evaluating. No exit reads it since
     # the trailing stop was removed (2026-08-17); it is kept current so

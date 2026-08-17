@@ -49,6 +49,33 @@ from backtest import settings
 # observed books, and the two must stay distinguishable.
 LIVE_SNAPSHOT_SOURCE = "live_snapshot"
 
+# Quotes captured by the EXIT path (position_manager) rather than the entry
+# path (ev_engine.run_for_station). Both are live order-book reads; they are
+# kept as separate sources for two reasons.
+#
+# WHY THIS SOURCE EXISTS AT ALL. Snapshot capture used to piggyback ONLY on
+# entry cycles, which run in the 05:00-10:00 local windows. The daemon goes
+# on watching open positions until 22:45 in monitor_only/risk_only windows,
+# and exits fire there -- but nothing recorded a price, so a replay could not
+# see them. Measured 2026-08-17 across all 13 stations: exactly 5 of 24 UTC
+# hours had any coverage, ~20 snapshots per token per day against 288 for a
+# real 5-minute series. The distortion is not symmetric. At RCSS every one of
+# 6 stop-losses fell inside the recorded window while 7 of 11 take-profits
+# fell outside it, because EDGE_DECAY_TIGHTEN_HOUR_LOCAL halves the
+# profit-take threshold at 10:00 -- the exact hour recording stopped. The
+# replay therefore saw nearly every loss and few of the gains, and reported
+# -6.08% where the live ledger showed +10.6%.
+#
+# WHY IT IS A DISTINCT STRING. These rows carry no ask_price and no depth
+# (the exit path fetches a bid and nothing else, and must not grow /book
+# calls), and they arrive on the monitor windows' 15-30 min cadence rather
+# than the entry windows' 5. On an exact ts tie get_price_at() prefers
+# LIVE_SNAPSHOT_SOURCE, so where both paths captured the same instant the
+# richer entry-path row still wins. Keeping them separable is also what lets
+# coverage reporting say which part of the day a run's prices came from,
+# instead of averaging a dense morning together with a sparse afternoon.
+EXIT_SNAPSHOT_SOURCE = "live_exit_check"
+
 
 def _add_missing_columns(conn, table: str, columns: dict) -> None:
     """

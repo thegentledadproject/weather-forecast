@@ -209,7 +209,11 @@ def run_cycle(window: dict, station_icaos: Optional[list] = None) -> None:
 
     if mode in ("monitor_only", "risk_only"):
         for icao in station_icaos:
-            _run_exit_check(icao)
+            # The window's own interval is what makes these cycles worth
+            # recording: monitor_only/risk_only scan at 15-30 min, and
+            # until 2026-08-17 they wrote no price history at all, which
+            # is why replays could not see any exit after 10:00 local.
+            _run_exit_check(icao, interval_min=window["interval_min"])
             if mode == "risk_only":
                 _check_same_day_signal(icao)
         return
@@ -325,12 +329,31 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
     except Exception as exc:
         print(f"[scheduler] {station_icao}: EV computation failed this cycle: {exc}")
 
-    _run_exit_check(station_icao)
+    # DELIBERATELY None: no exit-path capture inside an entry window.
+    #
+    # ev_engine.run_for_station() above already captured both sides of every
+    # bucket this cycle, WITH ask and periodic depth, so an exit-path row
+    # here would be strictly poorer duplicate data. Worse than useless: the
+    # exit check runs seconds AFTER the EV leg, so its ask-less row is the
+    # NEWER one, and get_price_at() returns the newest row before an
+    # instant. A replay pricing an entry on any later tick would then find
+    # ask_price NULL and fall back to the bid -- overstating raw edge by the
+    # spread, which is precisely what the 2026-08-10 entry-pricing fix
+    # removed (see engine._entry_price and its n_entry_priced_bid_fallback
+    # counter). The exact-ts tie-break in get_price_at() does NOT save us;
+    # these two rows land a few seconds apart, not on the same second.
+    #
+    # The gap this whole change exists to close is in monitor_only/risk_only,
+    # where nothing captures at all. That is the only place it should write.
+    _run_exit_check(station_icao, interval_min=None)
 
 
-def _run_exit_check(station_icao: str) -> None:
+def _run_exit_check(station_icao: str, interval_min: Optional[int] = None) -> None:
     try:
-        decisions = position_manager.check_and_exit_positions(station_icao=station_icao)
+        decisions = position_manager.check_and_exit_positions(
+            station_icao=station_icao,
+            capture_fidelity_min=interval_min,
+        )
         position_manager.print_summary(decisions)
     except Exception as exc:
         print(f"[scheduler] {station_icao}: position exit check failed this cycle: {exc}")

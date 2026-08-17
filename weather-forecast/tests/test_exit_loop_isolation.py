@@ -85,9 +85,14 @@ class TestOneBadPositionDoesNotStrandTheRest:
         current_id = ["stops-out"]
         original = position_manager._check_one_position
 
-        def _tracking(position):
+        # Forwards whatever it is handed: this is a pass-through spy, so
+        # pinning it to _check_one_position's exact arity makes it fail on
+        # every future signature change for reasons unrelated to what it
+        # guards (it did, when capture_fidelity_min was threaded through
+        # for the 2026-08-17 exit-path snapshot capture).
+        def _tracking(position, *args, **kwargs):
             current_id[0] = position.position_id
-            return original(position)
+            return original(position, *args, **kwargs)
 
         monkeypatch.setattr(position_manager, "_check_one_position", _tracking)
         monkeypatch.setattr(
