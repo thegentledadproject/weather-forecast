@@ -56,7 +56,7 @@ journal = sh("journalctl -u polyweather -n 14 --no-pager --output=cat") or "(jou
 # --- positions + P&L via the package's own storage layer ---------------------
 open_n = closed_n = None
 pnl_display = "&mdash;"
-pnl_note = "dollar-weighted, closed trades only"
+pnl_note = "closed trades only"
 try:
     import config  # noqa: E402
     import storage  # noqa: E402
@@ -110,11 +110,14 @@ if closed_n:
                 station_summaries[icao] = summary
                 pnl_usd += float(summary.get("total_pnl_usd") or 0.0)
                 staked_usd += float(summary.get("total_staked_usd") or 0.0)
-        # Dollar-weighted: what the bankroll actually experienced, not the
-        # per-trade percent sum that overweights $1 lottery tickets.
+        # Still dollar-weighted -- what the bankroll actually experienced, not
+        # the per-trade percent sum that overweights $1 lottery tickets. The
+        # WORD is gone from the page, not the arithmetic: "+2.1% on $2,224
+        # staked" already says a big trade counted for more than a small one,
+        # and says it to a reader who doesn't know the term.
         pnl_display = f"{'-' if pnl_usd < 0 else '+'}${abs(pnl_usd):,.2f}"
         if staked_usd:
-            pnl_note = f"{pnl_usd / staked_usd:+.1%} dollar-weighted on ${staked_usd:,.0f} staked"
+            pnl_note = f"{pnl_usd / staked_usd:+.1%} on ${staked_usd:,.0f} staked"
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"P&L summary failed: {exc}")
 
@@ -942,7 +945,7 @@ def _station_table():
         "<thead><tr><th>Station</th><th>Name</th><th>Track</th><th>Maturity</th>"
         "<th class='num'>Trades</th><th class='num'>Win rate</th>"
         "<th class='num'>Open</th><th class='num'>At risk</th>"
-        "<th class='num'>Realized P&amp;L</th><th class='num'>Return</th></tr></thead>"
+        "<th class='num'>Realized P&amp;L</th><th class='num'>Per $1 staked</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
 
@@ -950,8 +953,9 @@ def _station_table():
 try:
     stations_table_html = _station_table()
     stations_cap = ("PAPER track only &mdash; real-money trades are in the card at the top, never "
-                    "mixed in here &middot; Return is dollar-weighted realized P&amp;L per dollar "
-                    "staked &middot; At risk sums open paper stakes")
+                    "mixed in here &middot; &ldquo;Per $1 staked&rdquo; is realized P&amp;L divided by "
+                    "everything staked, so a big trade counts for more than a small one &middot; "
+                    "At risk sums open paper stakes")
 except Exception as exc:  # noqa: BLE001
     warnings.append(f"station table failed: {exc}")
     stations_table_html = "<div class='empty'>station table unavailable</div>"
