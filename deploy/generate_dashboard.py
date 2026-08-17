@@ -6,6 +6,7 @@ systemd unit state, the journal tail, and the package's own storage layer.
 Every data read is fail-soft: a failure shows up ON the page rather than
 killing the render.
 """
+import calendar as calmod
 import html
 import json
 import os
@@ -60,10 +61,16 @@ try:
     import config  # noqa: E402
     import storage  # noqa: E402
 
+    # limit=1000 matches paper_trading_report.load_paper_history(), which is what
+    # the headline P&L tile and the station table are computed from. Left at the
+    # storage default of 100/station these lists would start silently dropping
+    # the oldest closed trades before those aggregates did -- invisible in the
+    # "15 most recent" table, but the daily P&L calendar below would lose whole
+    # early days off the front of the grid while the tile still counted them.
     open_positions = storage.load_open_positions(is_paper=True)
     closed_positions = []
     for icao in config.STATIONS:
-        closed_positions.extend(storage.load_position_history(icao, is_paper=True))
+        closed_positions.extend(storage.load_position_history(icao, limit=1000, is_paper=True))
     closed_positions.sort(key=lambda p: p.exit_time or "", reverse=True)
     open_n, closed_n = len(open_positions), len(closed_positions)
 
@@ -77,7 +84,7 @@ try:
     live_open = storage.load_open_positions(is_paper=False)
     live_closed = []
     for icao in config.STATIONS:
-        live_closed.extend(storage.load_position_history(icao, is_paper=False))
+        live_closed.extend(storage.load_position_history(icao, limit=1000, is_paper=False))
     live_closed.sort(key=lambda p: p.exit_time or "", reverse=True)
 except Exception as exc:  # noqa: BLE001
     open_positions, closed_positions = [], []
@@ -564,6 +571,202 @@ except Exception as exc:  # noqa: BLE001
     positions_html = "<div class='empty'>positions table unavailable</div>"
     positions_cap = ""
 
+# --- daily P&L calendar ------------------------------------------------------
+# One cell per calendar day, coloured by that day's REALIZED P&L. The rest of
+# the page reports the book as a single running total, which answers "are we up"
+# but not "when did that happen" -- a run that is +$40 because of one huge day
+# and eleven flat ones is a different system from one that grinds +$3.50 a day,
+# and those two are indistinguishable in every other number on this page.
+#
+# THREE THINGS THIS GRID DELIBERATELY DOES NOT DO:
+#
+# 1. It never mixes tracks. Paper and real-money each get their own grid, built
+#    by the same function and rendered in their own card -- same rule as every
+#    other number here.
+# 2. It counts REALIZED P&L only: a day's cell moves when a position CLOSES, and
+#    an open position contributes nothing to any cell until it does. That is the
+#    overhang trap the 2026-08-15 cohort review ran into -- a book that looks
+#    green because its losers are still open and only its winners have settled.
+#    The caption carries the open-position count for exactly that reason.
+# 3. It does not re-derive P&L. Every cell is summed by the same
+#    paper_trading_report.summarize_positions() the headline tile and the station
+#    table use, so a cell and the total above it cannot drift apart.
+CAL_DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _exit_local_date(p):
+    """The calendar date this trade's P&L landed on, in the position's OWN
+    station-local time -- not UTC, and not a blanket SGT.
+
+    A Tokyo (UTC+9) position that closes at 22:30 UTC closed on the NEXT day
+    in Tokyo, and filing it under the UTC date would put it in the wrong cell
+    of this grid. Same reasoning as _hm() above and config.local_today().
+
+    Attribution is by EXIT time, not target_date: this grid answers "what did
+    the book earn or lose that day", and a position closed at resolution is
+    routinely settled the morning after its market date, once the day's
+    settlement-grade observation is actually published.
+    """
+    if not p.exit_time:
+        return None
+    try:
+        station_offset = config.get_station(p.station_icao).utc_offset_hours
+    except KeyError:
+        station_offset = 8
+    try:
+        dt = datetime.fromisoformat(str(p.exit_time))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return datetime.fromtimestamp(dt.timestamp() + station_offset * 3600, tz=timezone.utc).date()
+
+
+def _daily_pnl(positions):
+    """date -> {pnl, n, staked, tip}, plus a count of positions with no usable
+    exit timestamp (which belong in no cell and are reported, not dropped silently)."""
+    import paper_trading_report as ptr  # noqa: E402,F811 - same arithmetic as the P&L tile
+
+    buckets = {}
+    undated = 0
+    for p in positions:
+        d = _exit_local_date(p)
+        if d is None:
+            undated += 1
+            continue
+        buckets.setdefault(d, []).append(p)
+
+    days = {}
+    for d, ps in buckets.items():
+        summary = ptr.summarize_positions(ps)
+        if not summary:  # no position that day had a usable realized return
+            continue
+        # Per-station split, one summarize_positions() call per station -- that
+        # is the function's documented contract (single station in, stats out),
+        # and it makes the hover text reconcile exactly with the station table.
+        by_station = {}
+        for p in ps:
+            by_station.setdefault(p.station_icao, []).append(p)
+
+        parts = []
+        for icao in sorted(by_station):
+            s = ptr.summarize_positions(by_station[icao])
+            if s:
+                parts.append(f"{icao} {s['total_pnl_usd']:+.2f} ({s['n_trades']} trade"
+                             f"{'' if s['n_trades'] == 1 else 's'})")
+        days[d] = {
+            "pnl": float(summary["total_pnl_usd"]),
+            "n": int(summary["n_trades"]),
+            "staked": float(summary["total_staked_usd"]),
+            "tip": "  ".join(parts),
+        }
+    return days, undated
+
+
+def _pnl_calendar(positions, empty_msg):
+    """Month grids + a summary strip for one track's closed positions."""
+    days, undated = _daily_pnl(positions)
+    if not days:
+        return f"<div class='empty'>{empty_msg}</div>"
+
+    first, last = min(days), max(days)
+    # Heat is scaled to the biggest single day IN THIS GRID, so the shading is
+    # readable on a $3/day paper book and on a $0.40/day real-money one without
+    # either being tuned by hand. It is therefore a WITHIN-track ranking, never
+    # a cross-track one -- another reason the two grids stay in separate cards.
+    peak = max(abs(v["pnl"]) for v in days.values()) or 1.0
+    today_sgt = (datetime.now(timezone.utc) + timedelta(hours=8)).date()
+
+    months = []
+    y, m = first.year, first.month
+    while (y, m) <= (last.year, last.month):
+        months.append((y, m))
+        y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+
+    blocks = []
+    for y, m in months:
+        lead, ndays = calmod.monthrange(y, m)  # lead = weekday of the 1st, Mon=0
+        month_pnl = sum(v["pnl"] for d, v in days.items() if (d.year, d.month) == (y, m))
+        month_n = sum(v["n"] for d, v in days.items() if (d.year, d.month) == (y, m))
+        cells = [f"<div class='calhead'>{d}</div>" for d in CAL_DOW]
+        cells += ["<div class='cell blank'></div>"] * lead
+        for dom in range(1, ndays + 1):
+            d = datetime(y, m, dom, tzinfo=timezone.utc).date()
+            today_cls = " today" if d == today_sgt else ""
+            v = days.get(d)
+            if v is None:
+                # A day inside the run with no closes reads differently from a
+                # day before the book existed: "nothing closed" vs "not yet
+                # trading". Only the first is a fact about the strategy.
+                if first <= d <= last:
+                    cells.append(f"<div class='cell flat{today_cls}'><div class='d'>{dom}</div>"
+                                 "<div class='amt'>&middot;</div><div class='n'>no closes</div></div>")
+                else:
+                    cells.append(f"<div class='cell void{today_cls}'><div class='d'>{dom}</div></div>")
+                continue
+            gain = v["pnl"] >= 0
+            cls = "gain" if gain else "loss"
+            # 14-64% of the accent colour mixed into the card background: enough
+            # for the shape of the month to read at a glance, never so much that
+            # the number on top of it stops being legible in either theme.
+            mix = 14 + 50 * min(1.0, abs(v["pnl"]) / peak)
+            var = "--good" if gain else "--bad"
+            amt = f"{'+' if gain else '-'}${abs(v['pnl']):,.2f}"
+            tip = f"{d.isoformat()}  {amt} on ${v['staked']:,.2f} staked\n{v['tip']}"
+            cells.append(
+                f"<div class='cell {cls}{today_cls}' title='{html.escape(tip)}' "
+                f"style='background:color-mix(in srgb, var({var}) {mix:.0f}%, var(--card))'>"
+                f"<div class='d'>{dom}</div>"
+                f"<div class='amt'>{amt}</div>"
+                f"<div class='n'>{v['n']} trade{'' if v['n'] == 1 else 's'}</div></div>"
+            )
+        mt_cls = "pos" if month_pnl >= 0 else "neg"
+        blocks.append(
+            f"<div class='calmonth'><b>{calmod.month_name[m]} {y}</b>"
+            f"<span class='mn'>{month_n} closed</span>"
+            f"<span class='mtot {mt_cls}'>{'+' if month_pnl >= 0 else '-'}${abs(month_pnl):,.2f}</span></div>"
+            f"<div class='tablewrap'><div class='cal'>{''.join(cells)}</div></div>"
+        )
+
+    total = sum(v["pnl"] for v in days.values())
+    green = sum(1 for v in days.values() if v["pnl"] > 0)
+    red = sum(1 for v in days.values() if v["pnl"] < 0)
+    best = max(days.items(), key=lambda kv: kv[1]["pnl"])
+    worst = min(days.items(), key=lambda kv: kv[1]["pnl"])
+    span = (last - first).days + 1
+    quiet = span - len(days)
+    stats = [
+        f"Realized <b class='{'pos' if total >= 0 else 'neg'}'>"
+        f"{'+' if total >= 0 else '-'}${abs(total):,.2f}</b> over {span} day(s)",
+        f"<b class='pos'>{green}</b> up / <b class='neg'>{red}</b> down"
+        + (f" / <b>{quiet}</b> with no closes" if quiet else ""),
+        f"Best <b class='pos'>+${best[1]['pnl']:,.2f}</b> ({best[0].isoformat()})",
+        f"Worst <b class='neg'>-${abs(worst[1]['pnl']):,.2f}</b> ({worst[0].isoformat()})",
+    ]
+    if undated:
+        stats.append(f"<b>{undated}</b> closed position(s) carry no exit timestamp and sit in no cell")
+    return "".join(blocks) + f"<div class='calstats'>{'&middot;'.join(f'<span>{s}</span>' for s in stats)}</div>"
+
+
+try:
+    pnl_calendar_html = _pnl_calendar(
+        closed_positions,
+        "No closed paper trades yet &mdash; days fill in as positions close.",
+    )
+    pnl_cal_cap = (
+        "PAPER track &middot; each cell is that day&rsquo;s <b>realized</b> P&amp;L, summed by the same "
+        "code as the tile above &middot; a trade lands on the day it CLOSED, in its own station&rsquo;s "
+        "local time &middot; shading is relative to this grid&rsquo;s biggest day; the orange outline is "
+        "today (SGT)"
+    )
+    if open_positions:
+        pnl_cal_cap += (f" &middot; <b>{len(open_positions)} position(s) still open and counted nowhere "
+                        "here</b> &mdash; an unresolved overhang can hold a green month up on its own")
+except Exception as exc:  # noqa: BLE001
+    warnings.append(f"P&L calendar failed: {exc}")
+    pnl_calendar_html = "<div class='empty'>daily P&amp;L calendar unavailable</div>"
+    pnl_cal_cap = ""
+
 # --- real-money card ---------------------------------------------------------
 # Deliberately the FIRST card on the page and visually the loudest. Everything
 # below it is paper; this is the only section where a number moving means real
@@ -618,6 +821,14 @@ try:
             "<div class='tablewrap'><table class='ptable'>" + LIVE_COLS +
             f"<tbody>{''.join(_pos_row(p, with_order_id=True) for p in shown_live)}</tbody>"
             "</table></div>"
+        )
+        # Real money gets its own daily grid, inside its own card. Same builder
+        # as the paper calendar further down the page, never the same grid: the
+        # heat scale is per-grid, so a $0.40 real day and a $40 paper day would
+        # otherwise be shaded against each other.
+        blocks.append(
+            "<p class='cap' style='margin:18px 0 6px'>Real-money daily realized P&amp;L</p>"
+            + _pnl_calendar(live_closed, "No closed real-money trades yet.")
         )
 
     realmoney_html = "".join(blocks)
@@ -922,6 +1133,40 @@ page = """<!doctype html>
   .pdetail { font-family:var(--mono); font-size:10.5px; color:var(--muted); margin-left:auto;
     white-space:nowrap; }
   .tablewrap { overflow-x:auto; }
+  /* Daily P&L calendar. min-width keeps a 7-column grid readable on a phone by
+     letting .tablewrap scroll it, rather than crushing seven cells into 320px. */
+  .cal { display:grid; grid-template-columns:repeat(7,1fr); gap:4px; min-width:560px; }
+  .calhead { font-family:var(--mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--muted); text-align:center; padding-bottom:2px; }
+  .cell { border:1px solid var(--line); border-radius:5px; padding:6px 7px 5px; min-height:64px;
+    background:var(--card); display:flex; flex-direction:column; gap:1px; }
+  .cell.blank { border:none; background:transparent; min-height:0; }
+  .cell.void { border-style:dashed; opacity:.4; }
+  .cell .d { font-family:var(--mono); font-size:10.5px; color:var(--muted); }
+  .cell .amt { font-family:var(--mono); font-size:13.5px; font-variant-numeric:tabular-nums;
+    line-height:1.2; letter-spacing:-.02em; }
+  .cell .n { font-size:10.5px; color:var(--muted); margin-top:auto; }
+  /* The class carries a flat fallback colour and the inline style mixes the
+     real intensity on top -- a browser without color-mix() still shows every
+     day's SIGN, just not its magnitude. */
+  .cell.gain { background:var(--good-bg); border-color:var(--good); }
+  .cell.loss { background:var(--bad-bg); border-color:var(--bad); }
+  .cell.gain .amt { color:var(--good); }
+  .cell.loss .amt { color:var(--bad); }
+  .cell.gain .n, .cell.loss .n { color:var(--ink-2); }
+  .cell.flat .amt { color:var(--muted); }
+  .cell.today { outline:2px solid var(--heat); outline-offset:1px; }
+  .calmonth { display:flex; align-items:baseline; gap:12px; margin:20px 0 8px;
+    font-family:var(--mono); font-size:12px; color:var(--ink-2); }
+  .calmonth b { color:var(--ink); font-size:12.5px; }
+  .calmonth .mn { color:var(--muted); font-size:11px; }
+  .calmonth .mtot { margin-left:auto; font-variant-numeric:tabular-nums; font-weight:700; }
+  .calmonth .mtot.pos { color:var(--good); } .calmonth .mtot.neg { color:var(--bad); }
+  .calmonth:first-child { margin-top:0; }
+  .calstats { display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:14px; font-size:12.5px;
+    color:var(--ink-2); }
+  .calstats b { font-family:var(--mono); font-variant-numeric:tabular-nums; color:var(--ink); }
+  .calstats b.pos { color:var(--good); } .calstats b.neg { color:var(--bad); }
   .evstation { font-family:var(--mono); font-size:12px; letter-spacing:.03em; color:var(--ink-2);
     margin:16px 0 6px; }
   .evstation:first-child { margin-top:0; }
@@ -1017,6 +1262,12 @@ page = """<!doctype html>
   </div>
 
   <div class="card">
+    <h2>Daily P&amp;L</h2>
+    <p class="cap">@@PNLCALCAP@@</p>
+    @@PNLCALENDAR@@
+  </div>
+
+  <div class="card">
     <h2>Edge &mdash; latest EV table</h2>
     <p class="cap">@@EVCAP@@</p>
     @@EVCARD@@
@@ -1109,6 +1360,8 @@ page = (
     .replace("@@STATIONCOUNT@@", str(station_count))
     .replace("@@STATIONSCAP@@", stations_cap)
     .replace("@@STATIONTABLE@@", stations_table_html)
+    .replace("@@PNLCALCAP@@", pnl_cal_cap)
+    .replace("@@PNLCALENDAR@@", pnl_calendar_html)
     .replace("@@TIMESTRIPS@@", time_strips_html)
     .replace("@@NOWMARKGROUPS@@", nowmark_groups_json)
     .replace("@@COUNTDOWNMS@@", str(countdown_target_ms))
