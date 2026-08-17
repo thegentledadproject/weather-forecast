@@ -136,6 +136,27 @@ def test_missing_settlement_is_unknown_never_a_loss():
     assert pnl is None and won is None
 
 
+def test_cost_excludes_stops_with_no_settlement_from_BOTH_sides():
+    """An unsettled stop (today's, typically) must not have its realized loss
+    charged to the stop rule while contributing no held counterpart -- that is
+    what inflated the per-station cost columns before _score tracked a matched
+    realized figure separately."""
+    settled_one = _stop(local_hour=TIGHTEN_HOUR + 1, bucket_c=32, side="NO")
+    unsettled = _stop(local_hour=TIGHTEN_HOUR + 1, bucket_c=31, side="NO")
+    unsettled.target_date = date(2026, 8, 18)  # no reading for this date
+    s = sla._score([settled_one, unsettled], _settled(temp=33.0))
+
+    assert s["unknown"] == 1 and s["known"] == 1
+    # realized covers both; the cost line covers only the settled one.
+    assert abs(s["realized"] - 2 * realized_of(settled_one)) < 1e-9
+    assert abs(s["matched_realized"] - realized_of(settled_one)) < 1e-9
+    assert abs(s["cost"] - (s["held"] - realized_of(settled_one))) < 1e-9
+
+
+def realized_of(position):
+    return sla.realized_pnl(position)
+
+
 def test_reading_outside_the_configured_window_is_flagged_as_clamped():
     station = config.get_station("WSSS")
     _pnl, _won, clamped = sla.hold_to_settlement(

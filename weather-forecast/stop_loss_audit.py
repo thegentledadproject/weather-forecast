@@ -70,9 +70,15 @@ re-scores itself against the new one.
 USAGE
 -----
     python stop_loss_audit.py                    # paper track, every station
+    python stop_loss_audit.py --per-station      # one row per station
     python stop_loss_audit.py --track live       # real-money track
     python stop_loss_audit.py --station WMKK
     python stop_loss_audit.py --no-detail        # summary only
+
+START WITH --per-station. Pooled, these effects average into something
+modest; per station they are concentrated, and on the 2026-08-17 book the
+tightening's entire net cost was ONE station while three others were saving
+money on the same rule.
 
 DEPENDENCIES
 ------------
@@ -231,8 +237,18 @@ def audit(stations: List[str], is_paper: bool = True, limit: int = 1000) -> dict
 
 def _score(group: List[Position], settled) -> dict:
     """Realized vs held-to-settlement for one group, with the clamp-pinned
-    rows tracked separately so the comparison can be reprinted without them."""
-    realized = held = firm_realized = firm_held = 0.0
+    rows tracked separately so the comparison can be reprinted without them.
+
+    TWO REALIZED FIGURES, AND THE COST USES THE SECOND. `realized` is every
+    scoreable stop in the group; `matched_realized` is only those that also
+    have a settlement reading. Cost must be computed on the matched subset --
+    subtracting a group's FULL realized from a held column that skipped the
+    unsettled rows charges those rows' losses to the stop rule while giving
+    them no counterfactual credit. On today's book that gap is the four stops
+    taken on a day that has not settled yet, and it inflated the per-station
+    cost columns by $8.28 in total.
+    """
+    realized = matched_realized = held = firm_realized = firm_held = 0.0
     known = wins = unknown = clamped_n = firm_n = 0
     for position in group:
         real = realized_pnl(position)
@@ -244,6 +260,7 @@ def _score(group: List[Position], settled) -> dict:
             unknown += 1
             continue
         held += hold
+        matched_realized += real
         known += 1
         wins += bool(won)
         if clamped:
@@ -252,9 +269,11 @@ def _score(group: List[Position], settled) -> dict:
             firm_realized += real
             firm_held += hold
             firm_n += 1
-    return {"n": len(group), "realized": realized, "held": held, "known": known,
-            "wins": wins, "unknown": unknown, "clamped": clamped_n,
-            "firm_n": firm_n, "firm_realized": firm_realized, "firm_held": firm_held}
+    return {"n": len(group), "realized": realized, "matched_realized": matched_realized,
+            "held": held, "known": known, "wins": wins, "unknown": unknown,
+            "cost": held - matched_realized, "clamped": clamped_n, "firm_n": firm_n,
+            "firm_realized": firm_realized, "firm_held": firm_held,
+            "firm_cost": firm_held - firm_realized}
 
 
 def print_report(stations: List[str], is_paper: bool = True, limit: int = 1000,
@@ -293,14 +312,16 @@ def print_report(stations: List[str], is_paper: bool = True, limit: int = 1000,
         if s["known"]:
             print(f"  held to settlement          {s['held']:+9.2f} USD"
                   f"   ({s['wins']}/{s['known']} would have won)")
-            print(f"  upper bound on cost of cutting {s['held'] - s['realized']:+9.2f} USD")
+            # Both sides of this line cover the same n -- see _score.
+            print(f"  upper bound on cost of cutting {s['cost']:+9.2f} USD"
+                  f"   (over the {s['known']} with settlement truth)")
         if s["unknown"]:
             print(f"  {s['unknown']} position(s) have no settlement-grade reading"
-                  " -- left out of the held column, not scored as losses")
+                  " -- out of BOTH columns of the cost line, not scored as losses")
         if s["clamped"]:
             print(f"  excl. {s['clamped']} clamp-pinned row(s) (n={s['firm_n']}): "
                   f"realized {s['firm_realized']:+.2f} vs held {s['firm_held']:+.2f}"
-                  f" -> {s['firm_held'] - s['firm_realized']:+.2f} USD")
+                  f" -> {s['firm_cost']:+.2f} USD")
 
     if detail and groups[TIGHTENING_ONLY]:
         print(f"\n--- every tightening-only stop ---")
@@ -321,6 +342,62 @@ def print_report(stations: List[str], is_paper: bool = True, limit: int = 1000,
     print("have blocked under the exposure caps. See the module docstring.\n")
 
 
+def print_per_station(stations: List[str], is_paper: bool = True, limit: int = 1000) -> None:
+    """One row per station instead of one pooled report.
+
+    WHY THIS IS THE MORE USEFUL VIEW. Pooled, the tightening reads as a
+    modest net cost. Per station it is not a system-wide effect at all: on
+    the 2026-08-17 book its ENTIRE net cost was one station, while at three
+    others the same rule saved money -- so a change made on the pooled number
+    would help one station and quietly hurt three. The stations that never
+    produce a tightening-only stop matter just as much: a station losing
+    heavily to stops with a zero in that column is losing it to the LOOSE
+    morning threshold, and nothing done to the 10:00 rule will touch it.
+    """
+    track = "PAPER" if is_paper else "REAL-MONEY"
+    print(f"\n=== Stop-loss audit by station — {track} track ===")
+    print(f"{'stn':6s} {'clsd':>4s} {'stops':>5s} {'%cl':>4s} | "
+          f"{'<'+str(config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL):>4s} {'anyw':>4s} {'TO':>3s} {'%st':>4s} | "
+          f"{'TO cost':>8s} | {'all stops':>9s} {'cost':>8s} | {'?':>2s}")
+    totals = {"closed": 0, "stops": 0, "to": 0, "to_cost": 0.0, "all_cost": 0.0, "unknown": 0}
+    for icao in sorted(stations):
+        result = audit([icao], is_paper=is_paper, limit=limit)
+        groups, settled = result["groups"], result["settled"]
+        if not result["stop_n"]:
+            print(f"{icao:6s} {result['closed_n']:4d} {0:5d} {'-':>4s} | "
+                  f"{'-':>4s} {'-':>4s} {'-':>3s} {'-':>4s} | {'-':>8s} | {'-':>9s} {'-':>8s} | {'-':>2s}")
+            totals["closed"] += result["closed_n"]
+            continue
+        to = _score(groups[TIGHTENING_ONLY], settled)
+        every = _score(groups[TIGHTENING_ONLY] + groups[WOULD_FIRE_ANYWAY]
+                       + groups[BEFORE_TIGHTEN], settled)
+        n_to, n_stops = len(groups[TIGHTENING_ONLY]), result["stop_n"]
+        print(f"{icao:6s} {result['closed_n']:4d} {n_stops:5d} "
+              f"{n_stops / result['closed_n'] * 100:3.0f}% | "
+              f"{len(groups[BEFORE_TIGHTEN]):4d} {len(groups[WOULD_FIRE_ANYWAY]):4d} "
+              f"{n_to:3d} {n_to / n_stops * 100:3.0f}% | "
+              f"{to['cost']:+8.2f} | {every['realized']:+9.2f} {every['cost']:+8.2f} | "
+              f"{every['unknown'] or '':>2}")
+        for key, value in (("closed", result["closed_n"]), ("stops", n_stops), ("to", n_to),
+                           ("to_cost", to["cost"]), ("all_cost", every["cost"]),
+                           ("unknown", every["unknown"])):
+            totals[key] += value
+    print(f"{'ALL':6s} {totals['closed']:4d} {totals['stops']:5d} "
+          f"{totals['stops'] / totals['closed'] * 100 if totals['closed'] else 0:3.0f}% | "
+          f"{'':4s} {'':4s} {totals['to']:3d} "
+          f"{totals['to'] / totals['stops'] * 100 if totals['stops'] else 0:3.0f}% | "
+          f"{totals['to_cost']:+8.2f} | {'':9s} {totals['all_cost']:+8.2f} | "
+          f"{totals['unknown'] or '':>2}")
+    print("\n  TO cost   upper bound on what the "
+          f"{config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL:02d}:00 tightening cost that station")
+    print("  cost      upper bound on what stopping AT ALL cost it "
+          "(both: held minus realized, over the stops with settlement truth)")
+    print("  ?         stops with no settlement-grade reading yet -- excluded from BOTH")
+    print("            sides of the cost columns. Today's stops sit here until the day settles.")
+    print("  A NEGATIVE cost means the stops made that station money versus holding.")
+    print("  Read small-n rows with suspicion: a station with 4 closed trades has no signal.\n")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Score closed stop-losses against holding to settlement.")
@@ -332,8 +409,14 @@ if __name__ == "__main__":
                         help="Max closed positions loaded per station (default 1000).")
     parser.add_argument("--no-detail", dest="detail", action="store_false",
                         help="Summary only -- skip the per-position table.")
+    parser.add_argument("--per-station", action="store_true",
+                        help="One row per station instead of one pooled report. The pooled "
+                             "view hides that these effects are station-specific.")
     args = parser.parse_args()
 
     stations = [args.station] if args.station else list(config.STATIONS)
-    print_report(stations, is_paper=(args.track == "paper"),
-                 limit=args.limit, detail=args.detail)
+    if args.per_station:
+        print_per_station(stations, is_paper=(args.track == "paper"), limit=args.limit)
+    else:
+        print_report(stations, is_paper=(args.track == "paper"),
+                     limit=args.limit, detail=args.detail)
