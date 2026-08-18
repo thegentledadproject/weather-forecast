@@ -196,3 +196,33 @@ def test_paper_rows_without_a_stored_count_still_derive_it():
     assert abs(sla.settlement_shares(p) - 2.20 / ENTRY) < 1e-9
     pnl, _won, _ = sla.hold_to_settlement(p, _settled(temp=33.0))
     assert abs(pnl - (2.20 / ENTRY - 2.20)) < 1e-9
+
+
+def test_a_non_positive_entry_price_yields_no_shares_rather_than_dividing():
+    """
+    The derivation is only reached when no count was stored, and storage's
+    position_economics view guards the identical expression with
+    `CASE WHEN p.entry_price > 0`. The SQL and Python definitions of the
+    same derived count must agree about the degenerate row, and neither may
+    take down a whole audit run over one bad row.
+    """
+    p = _stop(side="NO", bucket_c=32, size_usd=2.20)
+    p.size_shares = None
+    p.entry_price = 0.0
+
+    assert sla.settlement_shares(p) == 0.0
+
+    # The cost side is untouched, so the row still reports its stake as lost
+    # rather than raising ZeroDivisionError.
+    pnl, won, _ = sla.hold_to_settlement(p, _settled(temp=33.0))
+    assert won is True
+    assert abs(pnl + 2.20) < 1e-9
+
+
+def test_a_stored_count_still_wins_when_the_price_is_degenerate():
+    """The guard must not shadow a real holding: shares held are shares held
+    whatever the recorded price says."""
+    p = _stop(side="NO", bucket_c=32, size_usd=2.20)
+    p.size_shares = 4.0
+    p.entry_price = 0.0
+    assert sla.settlement_shares(p) == 4.0

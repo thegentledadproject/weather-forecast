@@ -154,3 +154,80 @@ class TestViewDefinitionStaysCurrent:
             storage.load_open_positions()
 
         assert cookie() == before, "the view is being dropped and recreated on every connection"
+
+    def test_the_rebuild_tolerates_a_peer_winning_the_race(self, db):
+        """
+        The rebuild is DROP then CREATE, in autocommit, so the two are
+        separate transactions -- and more than one process runs it (the
+        daemon and the dashboard generator both open connections, the
+        latter on a timer). An interleaving of DROP, DROP, CREATE, CREATE
+        leaves the loser issuing its CREATE against a view a peer has
+        already written. That must be a no-op, not
+        "view position_economics already exists" raised out of _connect(),
+        which every storage call goes through.
+
+        _ensure_position_economics_view only ever calls conn.execute(), so a
+        proxy is enough to drive the REAL function through the real
+        interleaving -- sqlite3.Connection itself is immutable and cannot be
+        patched.
+        """
+        storage.open_position(_pos("p", "paper", size_usd=1.0, entry_price=0.10))
+
+        # Drift the stored definition, so the function gets past its
+        # early-return and actually rebuilds.
+        conn = sqlite3.connect(db)
+        conn.execute("DROP VIEW position_economics")
+        conn.execute("CREATE VIEW position_economics AS SELECT position_id FROM positions")
+        conn.commit()
+        conn.close()
+
+        class _PeerWinsAfterDrop:
+            """Delegates to a real connection; a peer creates the view the
+            instant this one drops it."""
+
+            def __init__(self, path):
+                self._conn = sqlite3.connect(path)
+                self._path = path
+
+            def execute(self, sql, *args):
+                result = self._conn.execute(sql, *args)
+                if sql.strip().upper().startswith("DROP VIEW"):
+                    self._conn.commit()
+                    peer = sqlite3.connect(self._path)
+                    try:
+                        peer.execute(storage._POSITION_ECONOMICS_VIEW_SQL)
+                        peer.commit()
+                    finally:
+                        peer.close()
+                return result
+
+            def close(self):
+                self._conn.commit()
+                self._conn.close()
+
+        proxy = _PeerWinsAfterDrop(db)
+        try:
+            storage._ensure_position_economics_view(proxy)   # must not raise
+        finally:
+            proxy.close()
+
+        row = _rows(db, "SELECT * FROM position_economics WHERE position_id = ?", ("p",))[0]
+        assert "notional_shares" in row, "the current definition should be in place"
+
+    def test_if_not_exists_is_never_stored_in_the_constant(self, db):
+        """
+        IF NOT EXISTS must be injected at execution and NOT live in
+        _POSITION_ECONOMICS_VIEW_SQL: sqlite_master strips those words, so a
+        constant carrying them would never equal the stored text, and the
+        drift check above would rebuild the view on every single connection.
+        """
+        assert "IF NOT EXISTS" not in storage._POSITION_ECONOMICS_VIEW_SQL
+
+        storage.open_position(_pos("p", "paper", size_usd=1.0, entry_price=0.10))
+        stored = _rows(
+            db, "SELECT sql FROM sqlite_master WHERE type='view' AND name='position_economics'"
+        )[0]["sql"]
+        assert stored.strip() == storage._POSITION_ECONOMICS_VIEW_SQL.strip(), (
+            "stored definition must match the constant verbatim, or the drift "
+            "comparison rebuilds on every connection"
+        )

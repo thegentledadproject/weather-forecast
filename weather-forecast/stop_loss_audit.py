@@ -226,9 +226,22 @@ def settlement_shares(position: Position) -> float:
     to reconcile them: a settlement payout is physically share_count x $1.00,
     so the count wins on the payout side, and size_usd stays on the cost side
     as the money actually recorded as spent.
+
+    A NON-POSITIVE entry_price yields 0.0 shares rather than dividing. The
+    derivation is only reachable when no count was stored, and storage's
+    position_economics view already guards every one of these same
+    expressions with `CASE WHEN p.entry_price > 0` -- the two definitions of
+    the derived count must agree about the degenerate case, or SQL and Python
+    disagree about the same row. 0.0 is the honest answer: a position that
+    records no shares and no price paid redeems nothing, and returning it
+    keeps hold_to_settlement()'s cost side (size_usd, untouched) intact so
+    such a row still reports its stake as lost rather than crashing the
+    audit for every other row in the run.
     """
     if position.size_shares is not None:
         return float(position.size_shares)
+    if not position.entry_price or position.entry_price <= 0:
+        return 0.0
     return position.size_usd / position.entry_price
 
 

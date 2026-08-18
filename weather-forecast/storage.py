@@ -112,6 +112,26 @@ def _ensure_position_economics_view(conn: sqlite3.Connection) -> None:
     a write lock and bump the schema cookie, invalidating prepared statements
     across the daemon for a view that holds no data. Comparing the stored SQL
     first makes the common case a single read.
+
+    THE REBUILD IS NOT ATOMIC, so the CREATE tolerates a peer having won the
+    race. Each execute() here is its own transaction in autocommit, and more
+    than one process reaches this code: the daemon and the dashboard
+    generator both open connections, the latter on a 5-minute timer. Two of
+    them interleaving as DROP, DROP, CREATE, CREATE would leave the second
+    CREATE raising "view position_economics already exists" out of
+    _connect(), i.e. out of the one function every storage call goes
+    through. IF NOT EXISTS makes that loser a no-op, which is correct: the
+    peer just wrote the definition this process was about to write. The
+    window is only open until someone has stored the current definition, so
+    in practice this is the first moments after a deploy or an edit to the
+    SQL above.
+
+    IF NOT EXISTS is injected HERE rather than kept in
+    _POSITION_ECONOMICS_VIEW_SQL because sqlite_master stores the CREATE
+    text with those words STRIPPED. Putting them in the constant would make
+    the comparison above never match, and the view would then be dropped and
+    rebuilt on every single connection -- precisely the schema-write storm
+    the comparison exists to avoid.
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'position_economics'"
@@ -119,7 +139,8 @@ def _ensure_position_economics_view(conn: sqlite3.Connection) -> None:
     if row is not None and (row[0] or "").strip() == _POSITION_ECONOMICS_VIEW_SQL.strip():
         return
     conn.execute("DROP VIEW IF EXISTS position_economics")
-    conn.execute(_POSITION_ECONOMICS_VIEW_SQL)
+    conn.execute(_POSITION_ECONOMICS_VIEW_SQL.replace(
+        "CREATE VIEW ", "CREATE VIEW IF NOT EXISTS ", 1))
 
 
 def _connect() -> sqlite3.Connection:
