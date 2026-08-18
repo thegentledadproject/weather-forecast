@@ -12,10 +12,20 @@ Two mechanisms, checked in priority order:
      "let it run" logic should override cutting a loss past this bar.
   2. Fixed profit-take -- the only upside exit.
 
-Both tighten after the edge-decay hour (config.py) -- consistent with
-the edge-decay analysis: once the morning's edge window closes, there's
-no new information coming to justify riding out volatility, so gains and
-losses should both be locked in faster.
+Both tighten after the edge-decay hour (config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL,
+10:00 local) -- consistent with the edge-decay analysis: once the morning's
+edge window closes, there's no new information coming to justify riding out
+volatility, so gains and losses should both be locked in faster.
+
+THAT HOUR IS NO LONGER THE HOUR ENTRIES STOP. Entries closed at 10:00 when
+this was written; since 2026-08-17 they close at 08:00 (config.SCHEDULE_WINDOWS),
+because trades opened after 08:00 measured negative. The tightening was
+deliberately left at 10:00, so there are now two hours a day where the entry
+window is shut and these thresholds are still on their loose setting. Whether
+tightening should follow the entry close down to 08:00 is an open question
+about exits; it needs the capital a stop frees to be modeled, which
+stop_loss_audit.py cannot do. Do not read "the edge window closes" above as
+"entries stop" -- they are two different instants now.
 
 THERE WAS A THIRD: A TRAILING STOP. REMOVED 2026-08-17, and worth knowing
 why before anyone reintroduces one. It armed once a position's peak gain

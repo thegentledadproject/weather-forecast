@@ -446,9 +446,18 @@ PROFIT_TAKE_PCT = 0.50      # take profit once gain reaches +50% of the risk uni
 STOP_LOSS_PCT = 0.30        # cut once loss reaches -30% of the risk unit
 
 # After this local hour, tighten both thresholds (see risk_manager.py) --
-# reflects the edge-decay curve: once the primary trading window closes,
-# be quicker to lock in gains and quicker to cut losses, since there's no
-# more new edge coming to justify holding through volatility.
+# reflects the edge-decay curve: be quicker to lock in gains and quicker to
+# cut losses, since there's no more new edge coming to justify holding
+# through volatility.
+#
+# THIS USED TO SAY "once the primary trading window closes", and that phrasing
+# was true only while entries also stopped at 10:00. They stop at 08:00 as of
+# 2026-08-17 (see SCHEDULE_WINDOWS above), and this hour was deliberately NOT
+# moved with them -- so the two are now two hours apart and the tightening is
+# no longer keyed to the entry close. Kept at 10:00 because moving it is a
+# question about EXITS that needs the capital a stop frees to be modeled;
+# stop_loss_audit.py measures the tightening's cost but its held-to-settlement
+# column is explicitly an upper bound and cannot answer it.
 EDGE_DECAY_TIGHTEN_HOUR_LOCAL = 10  # 10:00 local, per the scanning-schedule analysis
 TIGHTENED_PROFIT_TAKE_PCT = 0.25
 TIGHTENED_STOP_LOSS_PCT = 0.15

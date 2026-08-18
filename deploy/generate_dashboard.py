@@ -597,6 +597,26 @@ except Exception as exc:  # noqa: BLE001
 CAL_DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
+def _usd(amount):
+    """'+$12.34' / '-$12.34', with the sign DERIVED from the value.
+
+    Every signed dollar figure in the calendar used to rebuild this inline, and
+    two of the four sites asserted the sign they expected instead of reading
+    it: "Best" hardcoded a '+' and "Worst" a '-'. A grid always has a best and
+    a worst day and NEITHER has a guaranteed sign -- on an all-winning grid the
+    worst day is still a profit, and it rendered as "Worst -$5.00" in red; on
+    an all-losing grid the best day is still a loss, and it rendered as the
+    garbled "Best +$-12.34". Both are reachable on a young real-money track
+    with a handful of closes.
+    """
+    return f"{'+' if amount >= 0 else '-'}${abs(amount):,.2f}"
+
+
+def _pn(amount):
+    """CSS class for a signed figure -- derived, for the same reason as _usd."""
+    return "pos" if amount >= 0 else "neg"
+
+
 def _exit_local_date(p):
     """The calendar date this trade's P&L landed on, in the position's OWN
     station-local time -- not UTC, and not a blanket SGT.
@@ -714,7 +734,7 @@ def _pnl_calendar(positions, empty_msg):
             # the number on top of it stops being legible in either theme.
             mix = 14 + 50 * min(1.0, abs(v["pnl"]) / peak)
             var = "--good" if gain else "--bad"
-            amt = f"{'+' if gain else '-'}${abs(v['pnl']):,.2f}"
+            amt = _usd(v["pnl"])
             tip = f"{d.isoformat()}  {amt} on ${v['staked']:,.2f} staked\n{v['tip']}"
             cells.append(
                 f"<div class='cell {cls}{today_cls}' title='{html.escape(tip)}' "
@@ -723,11 +743,10 @@ def _pnl_calendar(positions, empty_msg):
                 f"<div class='amt'>{amt}</div>"
                 f"<div class='n'>{v['n']} trade{'' if v['n'] == 1 else 's'}</div></div>"
             )
-        mt_cls = "pos" if month_pnl >= 0 else "neg"
         blocks.append(
             f"<div class='calmonth'><b>{calmod.month_name[m]} {y}</b>"
             f"<span class='mn'>{month_n} closed</span>"
-            f"<span class='mtot {mt_cls}'>{'+' if month_pnl >= 0 else '-'}${abs(month_pnl):,.2f}</span></div>"
+            f"<span class='mtot {_pn(month_pnl)}'>{_usd(month_pnl)}</span></div>"
             f"<div class='tablewrap'><div class='cal'>{''.join(cells)}</div></div>"
         )
 
@@ -739,12 +758,11 @@ def _pnl_calendar(positions, empty_msg):
     span = (last - first).days + 1
     quiet = span - len(days)
     stats = [
-        f"Realized <b class='{'pos' if total >= 0 else 'neg'}'>"
-        f"{'+' if total >= 0 else '-'}${abs(total):,.2f}</b> over {span} day(s)",
+        f"Realized <b class='{_pn(total)}'>{_usd(total)}</b> over {span} day(s)",
         f"<b class='pos'>{green}</b> up / <b class='neg'>{red}</b> down"
         + (f" / <b>{quiet}</b> with no closes" if quiet else ""),
-        f"Best <b class='pos'>+${best[1]['pnl']:,.2f}</b> ({best[0].isoformat()})",
-        f"Worst <b class='neg'>-${abs(worst[1]['pnl']):,.2f}</b> ({worst[0].isoformat()})",
+        f"Best <b class='{_pn(best[1]['pnl'])}'>{_usd(best[1]['pnl'])}</b> ({best[0].isoformat()})",
+        f"Worst <b class='{_pn(worst[1]['pnl'])}'>{_usd(worst[1]['pnl'])}</b> ({worst[0].isoformat()})",
     ]
     if undated:
         stats.append(f"<b>{undated}</b> closed position(s) carry no exit timestamp and sit in no cell")
