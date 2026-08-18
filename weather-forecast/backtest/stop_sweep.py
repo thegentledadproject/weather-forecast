@@ -54,6 +54,36 @@ leaves the tightened one at the old number and silently reintroduces a
 tightening this sweep is not trying to model. Both are always set together
 below.
 
+FIRST RUN, 2026-08-18: IT DOES NOT SUPPORT MOVING THE STOP
+----------------------------------------------------------
+Over 2026-08-10..17, all stations, ~80 closed positions per row, the
+aggregate looked clean -- 15% -1.3%, 30% (live) +8.8%, 45% +8.9%, 60%
++12.2%, 80% +11.3%, none +10.7% -- i.e. "widen the stop to about 60%".
+
+Three checks say do not act on that:
+
+  - PER STATION the optimum is scattered across the entire range. Five
+    stations score best at the TIGHTEST 15% (WMKK, RPLL, RCSS, ZGGG,
+    ZGSZ), four at NO STOP AT ALL (RJTT, RKPK, VHHH, ZSPD), two at the
+    current 30% (WSSS, RKSI). There is no common distance.
+  - The aggregate optimum is carried by two stations. ZSPD alone runs
+    +1.7% at 30% against +75.4% at 60%; without it and VHHH the curve
+    flattens.
+  - The EARLIER window (2026-08-02..09) REVERSES the ordering -- tighter
+    scores better there. That window replays only 6-8 closed positions
+    because today's bias gates keep most stations collection-only in it,
+    so it does not refute the later window; it just fails to confirm it.
+
+Per-station n is 4-13 and per-trade sd is over 100%, so none of these
+differences is separable from noise. The tool is the deliverable; the
+answer needs more data. Re-run it when the post-fix book is several times
+larger, and treat a recommendation as earned only if the ordering holds
+per station AND across windows.
+
+What DID survive this analysis is a different change: the stop TIGHTENING
+was removed on the same day (config.TIGHTENED_STOP_LOSS_PCT), on
+stop_loss_audit evidence that is direct rather than simulated.
+
 DEPENDENCIES
 ------------
 config.py, risk_manager.py (local), backtest/engine.py (local)
