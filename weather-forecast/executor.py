@@ -623,10 +623,32 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         # requested $1: the whole point of this rung is to find out what the
         # real order would have been, so storing the requested figure would
         # discard the one number the mode exists to produce.
+        #
+        # entry_price is spec.expected_price, NOT spec.limit_price. The limit
+        # is padded, and OrderSpec says what each field is: limit_price is
+        # "the worst price accepted" while notional_usd is "expected_price *
+        # size_shares -- the likely cost". Storing the padded limit as the
+        # price PAID contradicts _pad_limit's own docstring ("padding does not
+        # mean paying more, it means being willing to") and, worse, made the
+        # row internally inconsistent: size_usd was the cost at one price and
+        # entry_price was another, so size_usd / entry_price disagreed with
+        # size_shares by exactly the pad. Measured 2026-08-17 across the
+        # stored simulation rows: 2 of 7 were off, by one tick and two ticks,
+        # and only those two had a pad above a single tick.
+        #
+        # The live rung has never had this gap -- it stores entry_price =
+        # fill_price alongside size_usd = fill_price * fill_shares, and all 8
+        # stored live rows satisfy size_usd == entry_price * size_shares.
+        # Simulation now records on the same basis, so the invariant holds on
+        # both rungs and anything that multiplies shares by a price agrees
+        # with anything that reads the stake.
+        #
+        # spec.expected_price is always set here: the ok=False return above
+        # gates every path that leaves it at its 0.0 default.
         storage.open_position(make_position(
             size_usd=spec.notional_usd,
             size_shares=spec.size_shares,
-            entry_price=spec.limit_price,
+            entry_price=spec.expected_price,
         ))
         return
 

@@ -551,6 +551,44 @@ def test_simulation_records_the_resolved_size_not_the_requested_one(monkeypatch,
     assert pos.is_paper is True                  # zero real risk
     assert pos.size_shares is not None
     assert pos.size_usd >= 1.00                  # what the real order would have cost
+    # Same invariant the live rung is held to above: the stake, the share
+    # count and the entry price must describe ONE fill.
+    assert pos.size_usd == pytest.approx(pos.entry_price * pos.size_shares, rel=1e-6)
+
+
+def test_simulation_does_not_record_the_padded_limit_as_the_price_paid(monkeypatch, mode, captured):
+    """limit_price is "the worst price accepted"; notional_usd is
+    "expected_price * size_shares -- the likely cost" (OrderSpec). Recording
+    the padded limit as entry_price while the stake was computed at the
+    expected price made size_usd / entry_price disagree with size_shares by
+    exactly the pad -- 2 of the 7 stored simulation rows were off, by one and
+    two ticks."""
+    mode("simulation")
+    stub_book(monkeypatch, tick="0.01")
+
+    spec_seen = {}
+    real_build = wallet_client.build_entry_order
+
+    def capture(**kwargs):
+        spec = real_build(**kwargs)
+        spec_seen["spec"] = spec
+        return spec
+
+    monkeypatch.setattr(wallet_client, "build_entry_order", capture)
+    # 0.68 on a 0.01 tick pads by the full 2 ticks (3% of 0.68 is 0.0204), which
+    # is the exact shape of the stored WSSS 2026-08-12 32-YES row: 5 shares,
+    # $3.40 staked, and 0.70 recorded as the entry price. At 0.33 the 3% cap
+    # lands under one tick, the pad is zero, and this test would pass without
+    # exercising anything -- hence the explicit assertion that a pad exists.
+    executor.open_position(make_decision(size_usd=1.00, price=0.68))
+
+    spec = spec_seen["spec"]
+    assert spec.limit_price > spec.expected_price, "no pad -- this test proves nothing"
+
+    pos = captured["opened"][0]
+    assert pos.entry_price == spec.expected_price
+    assert pos.entry_price != spec.limit_price
+    assert pos.size_usd == pytest.approx(pos.entry_price * pos.size_shares, rel=1e-6)
 
 
 def test_entry_abandoned_when_tick_alignment_blows_the_slippage_budget(monkeypatch, mode, captured):
