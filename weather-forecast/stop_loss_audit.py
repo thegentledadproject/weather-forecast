@@ -207,6 +207,25 @@ def settlement_shares(position: Position) -> float:
     models.Position documents as the paper/manual_review case: no real shares
     exist there, so size_usd/entry_price is not an approximation of a truth
     that exists elsewhere -- it IS the definition of the notional position.
+
+    "PAPER" IS NOT THE SAME SET AS "NO STORED COUNT". models.Position says
+    size_shares is None for paper, but SIMULATION mode is is_paper=True and
+    DOES record one (executor.py's simulation rung stores spec.notional_usd
+    and spec.size_shares deliberately -- "the whole point of this rung is to
+    find out what the real order would have been"). So the stored count is
+    read on the paper track too, and it is not always the derived one: on
+    2026-08-17, 4 paper stop rows carried a count and 2 differed materially
+    (5.000000 stored vs 4.857143 derived).
+
+    THOSE TWO FIELDS CAN DISAGREE ABOUT THE SAME FILL. 5.0 shares at an entry
+    of 0.70 is $3.50 of notional, but that row's size_usd is $3.40, because
+    the simulation rung takes the two numbers from separate fields of the
+    order spec rather than deriving one from the other. The live rung has no
+    such gap -- it stores size_usd = fill_price x fill_shares (executor.py)
+    -- which is why 0 of 3 live stop rows differ. This function does not try
+    to reconcile them: a settlement payout is physically share_count x $1.00,
+    so the count wins on the payout side, and size_usd stays on the cost side
+    as the money actually recorded as spent.
     """
     if position.size_shares is not None:
         return float(position.size_shares)
@@ -226,11 +245,15 @@ def hold_to_settlement(position: Position, settled: Dict[Tuple[str, str], float]
     paper_trading_report's stake-x-return basis, which implies the DERIVED
     count -- because that column has to reconcile with the dashboard's P&L
     tile to the cent. Where a stored count differs from the derived one the
-    two bases differ by (stored - derived) x payout. Measured across the live
-    book on 2026-08-17 that difference was floating-point noise on 1 of 8
-    rows and exactly zero on the other 7, so this is a correctness guard for
-    a partial fill that has not happened yet, not a restatement of any
-    number this tool has printed.
+    two bases differ by (stored - derived) x payout.
+
+    THAT IS NOT HYPOTHETICAL, THOUGH IT IS SMALL. Measured 2026-08-17: no
+    live row differs, but one WSSS simulation row that WON at settlement
+    redeems 5.000000 shares rather than the derived 4.857143, which moved
+    WSSS's held-to-settlement total from -18.0167 to -17.8738 (+$0.14) and
+    its "cost of stopping" by the same amount. Every other figure this tool
+    prints is unchanged. See settlement_shares() for why the two fields
+    disagree on simulation rows.
     """
     key = (position.station_icao, position.target_date.isoformat())
     temp = settled.get(key)
