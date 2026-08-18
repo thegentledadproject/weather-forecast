@@ -162,6 +162,26 @@ def classify(position: Position) -> Optional[str]:
             else TIGHTENING_ONLY)
 
 
+def tightening_label() -> str:
+    """How the post-hour threshold should be described, given current config.
+
+    SEPARATE AND PURE so it can be tested without storage, the same reason
+    _interpret_fill() and _interpret_collateral() are separate in
+    wallet_client. The stop tightening was removed on 2026-08-18 by setting
+    TIGHTENED_STOP_LOSS_PCT equal to STOP_LOSS_PCT; printing that constant
+    verbatim then read "tightened to 30%" while 30% was ALSO the loose
+    distance -- describing a tightening that no longer happens, directly
+    above a bucket that can only hold rows stopped before that date.
+
+    classify() is unaffected either way: it attributes a stop from the
+    observed bid against the LOOSE threshold, never from the tightened
+    constant, which is why the historical split stays correct.
+    """
+    if config.TIGHTENED_STOP_LOSS_PCT < config.STOP_LOSS_PCT:
+        return f"tightened to {config.TIGHTENED_STOP_LOSS_PCT:.0%}"
+    return "no longer tightened -- any rows below are historical"
+
+
 def loose_trigger_price(position: Position) -> float:
     """The bid the LOOSE threshold was waiting for -- the level a
     tightening-only stop never reached."""
@@ -366,7 +386,7 @@ def print_report(stations: List[str], is_paper: bool = True, limit: int = 1000,
           f"   ({config.STOP_LOSS_PCT:.0%} of the risk unit was the threshold)")
     after = len(groups[WOULD_FIRE_ANYWAY]) + len(groups[TIGHTENING_ONLY])
     print(f"    at/after {hour:02d}:00 local        {after}"
-          f"   (tightened to {config.TIGHTENED_STOP_LOSS_PCT:.0%})")
+          f"   ({tightening_label()})")
     print(f"      would have fired anyway    {len(groups[WOULD_FIRE_ANYWAY])}")
     print(f"      TIGHTENING-ONLY            {len(groups[TIGHTENING_ONLY])}"
           f"   = {len(groups[TIGHTENING_ONLY]) / stop_n:.0%} of all stop-losses")

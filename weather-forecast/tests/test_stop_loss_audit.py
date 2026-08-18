@@ -238,3 +238,21 @@ def test_a_stored_count_still_wins_when_the_price_is_degenerate():
     p.size_shares = 4.0
     p.entry_price = 0.0
     assert sla.settlement_shares(p) == 4.0
+
+
+def test_header_does_not_claim_a_tightening_that_was_removed(monkeypatch):
+    """
+    The stop tightening was removed on 2026-08-18 by setting
+    TIGHTENED_STOP_LOSS_PCT equal to STOP_LOSS_PCT. The header printed that
+    constant verbatim, so it read "tightened to 30%" while 30% was also the
+    loose distance -- describing a tightening that no longer happens, above
+    a bucket that can now only hold historical rows.
+    """
+    monkeypatch.setattr(config, "TIGHTENED_STOP_LOSS_PCT", config.STOP_LOSS_PCT)
+    assert sla.tightening_label() == "no longer tightened -- any rows below are historical"
+
+
+def test_header_still_reports_a_real_tightening(monkeypatch):
+    """And it must not hide one that IS configured."""
+    monkeypatch.setattr(config, "TIGHTENED_STOP_LOSS_PCT", 0.15)
+    assert sla.tightening_label() == "tightened to 15%"
