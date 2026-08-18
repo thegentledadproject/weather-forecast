@@ -163,3 +163,36 @@ def test_reading_outside_the_configured_window_is_flagged_as_clamped():
         _stop(), _settled(temp=station.bucket_max_c + 5.0))
     assert clamped is True
     assert sla.hold_to_settlement(_stop(), _settled(temp=32.0))[2] is False
+
+
+# --- settlement payout uses the shares actually held -------------------------
+
+def test_settlement_payout_uses_the_stored_share_count_not_a_derived_one():
+    """models.Position.size_shares exists because re-deriving the count as
+    size_usd/entry_price "uses the wrong price". A settlement payout is
+    shares x $1.00, so on a live fill that did not divide evenly the stored
+    count is the only correct multiplier."""
+    p = _stop(side="NO", bucket_c=32, size_usd=2.20)
+    p.size_shares = 4.0          # a partial fill: 2.20/0.44 would say 5.0
+    pnl, won, _ = sla.hold_to_settlement(p, _settled(temp=33.0))
+    assert won is True
+    assert abs(sla.settlement_shares(p) - 4.0) < 1e-9
+    # 4 shares redeem at $1.00 against the $2.20 actually spent
+    assert abs(pnl - (4.0 - 2.20)) < 1e-9
+
+
+def test_a_loser_pays_nothing_whichever_share_count_applies():
+    p = _stop(side="NO", bucket_c=32, size_usd=2.20)
+    p.size_shares = 4.0
+    pnl, won, _ = sla.hold_to_settlement(p, _settled(temp=32.0))
+    assert won is False and abs(pnl + 2.20) < 1e-9
+
+
+def test_paper_rows_without_a_stored_count_still_derive_it():
+    """size_shares is None for paper/manual_review -- no real shares exist, so
+    the derivation is the definition of the notional, not an approximation."""
+    p = _stop(side="NO", bucket_c=32, size_usd=2.20)
+    assert p.size_shares is None
+    assert abs(sla.settlement_shares(p) - 2.20 / ENTRY) < 1e-9
+    pnl, _won, _ = sla.hold_to_settlement(p, _settled(temp=33.0))
+    assert abs(pnl - (2.20 / ENTRY - 2.20)) < 1e-9

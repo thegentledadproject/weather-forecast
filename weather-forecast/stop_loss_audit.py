@@ -31,9 +31,10 @@ would have paid HELD TO SETTLEMENT.
 
 WHAT THE "HELD" COLUMN IS, AND WHAT IT IS NOT
 ---------------------------------------------
-It is: this position, held to resolution, paid 1.0 or 0.0 per share, with no
-fee (redeeming a resolved position is not a taker fill -- see
-executor.close_position()).
+It is: this position, held to resolution, paid 1.0 or 0.0 per share actually
+held (models.Position.size_shares where it was recorded -- see
+settlement_shares()), with no fee (redeeming a resolved position is not a
+taker fill -- see executor.close_position()).
 
 It is NOT "what the book would have earned with stops disabled." A stop frees
 capital, and under the exposure and per-cycle budget caps that capital funded
@@ -192,12 +193,44 @@ def load_settlements(stations: List[str], cutoff: date) -> Dict[Tuple[str, str],
     return settled
 
 
+def settlement_shares(position: Position) -> float:
+    """How many outcome tokens this position would have redeemed.
+
+    PREFERS THE STORED COUNT. models.Position.size_shares is the actual number
+    of shares held, recorded precisely because "re-deriving it as
+    size_usd/entry_price uses the wrong price" -- a real fill does not have to
+    divide evenly. A settlement payout is share_count x $1.00, so on the live
+    track the stored count is the only correct multiplier and the derived one
+    is an estimate that happens to agree.
+
+    Falls back to the derivation only when the field is None, which
+    models.Position documents as the paper/manual_review case: no real shares
+    exist there, so size_usd/entry_price is not an approximation of a truth
+    that exists elsewhere -- it IS the definition of the notional position.
+    """
+    if position.size_shares is not None:
+        return float(position.size_shares)
+    return position.size_usd / position.entry_price
+
+
 def hold_to_settlement(position: Position, settled: Dict[Tuple[str, str], float]):
     """(pnl_usd, won, clamped) had this position been held to resolution.
 
     Returns (None, None, False) when no settlement-grade reading exists for
     that station and date -- unknown, which must never be scored as a loss.
     `clamped` marks the rows described in caveat 2.
+
+    THE TWO COLUMNS USE DIFFERENT SHARE BASES, ON PURPOSE. The payout side
+    uses settlement_shares() (the true count, where recorded); the cost side
+    is size_usd, what was actually spent. realized_pnl() meanwhile keeps
+    paper_trading_report's stake-x-return basis, which implies the DERIVED
+    count -- because that column has to reconcile with the dashboard's P&L
+    tile to the cent. Where a stored count differs from the derived one the
+    two bases differ by (stored - derived) x payout. Measured across the live
+    book on 2026-08-17 that difference was floating-point noise on 1 of 8
+    rows and exactly zero on the other 7, so this is a correctness guard for
+    a partial fill that has not happened yet, not a restatement of any
+    number this tool has printed.
     """
     key = (position.station_icao, position.target_date.isoformat())
     temp = settled.get(key)
@@ -207,9 +240,9 @@ def hold_to_settlement(position: Position, settled: Dict[Tuple[str, str], float]
     bucket = bucket_for_temp(temp, station.bucket_min_c, station.bucket_max_c,
                              station.bucket_edge_mode)
     won = (bucket == position.bucket_c) if position.side == "YES" else (bucket != position.bucket_c)
-    shares = position.size_usd / position.entry_price
     clamped = not (station.bucket_min_c < temp < station.bucket_max_c)
-    return shares * (1.0 if won else 0.0) - position.size_usd, won, clamped
+    payout = settlement_shares(position) * (1.0 if won else 0.0)
+    return payout - position.size_usd, won, clamped
 
 
 def audit(stations: List[str], is_paper: bool = True, limit: int = 1000) -> dict:
