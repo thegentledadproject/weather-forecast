@@ -460,7 +460,25 @@ STOP_LOSS_PCT = 0.30        # cut once loss reaches -30% of the risk unit
 # column is explicitly an upper bound and cannot answer it.
 EDGE_DECAY_TIGHTEN_HOUR_LOCAL = 10  # 10:00 local, per the scanning-schedule analysis
 TIGHTENED_PROFIT_TAKE_PCT = 0.25
-TIGHTENED_STOP_LOSS_PCT = 0.15
+
+# THE STOP IS NO LONGER TIGHTENED (2026-08-18). It was 0.15, i.e. half the
+# loose distance, and stop_loss_audit.py scored every stop that fired only
+# because of it: 23 such stops, realized -50.49 against -21.31 had they been
+# held to settlement, and 7 of the 18 with settlement truth would have WON.
+# Tightening the stop cost +21.49 USD and bought nothing measurable.
+#
+# THE TAKE-PROFIT TIGHTENING ABOVE IS DELIBERATELY UNCHANGED. The audit
+# scores stops; it has nothing to say about exiting winners earlier, and
+# "the stop half was not worth it" is not evidence about the other half.
+# Changing both on one measurement would be borrowing the stop's evidence
+# to justify a take-profit change nobody has measured.
+#
+# Written as a reference to STOP_LOSS_PCT, not a repeated 0.30, so the two
+# cannot drift apart if the loose distance is ever retuned. That the wider
+# 30% distance is itself expensive (+253 USD of the +278 total, see the
+# audit) is a SEPARATE and much larger question, and needs the backtest
+# sweep rather than a constant edited by hand.
+TIGHTENED_STOP_LOSS_PCT = STOP_LOSS_PCT
 
 # --- Lottery-priced positions (risk_manager.py, entry_manager.py) ----------
 # Below this entry price, a percentage stop-loss is structurally meaningless:

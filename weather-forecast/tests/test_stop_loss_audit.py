@@ -33,7 +33,19 @@ def _stop(icao="WSSS", local_hour=11, bid=None, side="NO", bucket_c=32,
     """A closed stop-loss whose exit lands at `local_hour` in the station's own
     timezone, quoted at `bid` gross."""
     if bid is None:
-        bid = ENTRY - (LOOSE_D + TIGHT_D) / 2  # between the two thresholds
+        # HALF the loose distance: a stop that fired WITHOUT reaching the
+        # level the loose threshold was waiting for. Written as a fraction
+        # of LOOSE_D rather than the midpoint of LOOSE_D and TIGHT_D
+        # because the stop tightening was removed on 2026-08-18 and those
+        # two are now the same number -- the midpoint would sit exactly ON
+        # the loose threshold and classify as would-fire-anyway.
+        #
+        # The scenario is still real and still needs classifying: rows
+        # stopped before that date DID fire inside the loose distance, and
+        # classify() attributes them from the observed bid against the
+        # LOOSE threshold, never from TIGHTENED_STOP_LOSS_PCT -- so it
+        # reads that history correctly whatever the live constant says.
+        bid = ENTRY - LOOSE_D / 2
     fee = 0.0117
     reason = (f"stop_loss (live, pnl=-18.6% net; gross {bid:.4f} - exit fee "
               f"{fee:.4f}/share = net {bid - fee:.4f})") if note else "stop_loss"
@@ -81,7 +93,7 @@ def test_non_stop_exits_are_not_scored():
 def test_gross_price_comes_from_the_fee_note_not_the_stored_net_price():
     p = _stop()
     assert sla.gross_exit_price(p) > p.exit_price
-    assert abs(sla.gross_exit_price(p) - (ENTRY - (LOOSE_D + TIGHT_D) / 2)) < 1e-9
+    assert abs(sla.gross_exit_price(p) - (ENTRY - LOOSE_D / 2)) < 1e-9  # _stop()'s default bid
 
 
 def test_pre_fee_model_rows_fall_back_to_the_stored_price():

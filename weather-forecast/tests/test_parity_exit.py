@@ -84,17 +84,27 @@ def test_explicit_hour_matches_wall_clock_for_every_hour(monkeypatch):
 
 
 def test_decision_flips_exactly_at_tighten_hour():
-    # Stop-loss thresholds: normal 0.30, tightened 0.15 (config.py), both
-    # applied to the risk unit min(entry, 1-entry) -- here 0.40, so the
-    # stop sits 0.12 below entry before the tighten hour and 0.06 below
-    # it after. A pinned -0.20 pnl (0.08 below a 0.40 entry) is a hold
-    # under the loose threshold and a stop_loss under the tightened one:
-    # exactly straddles the config-driven boundary this test checks.
-    assert config.STOP_LOSS_PCT == 0.30
-    assert config.TIGHTENED_STOP_LOSS_PCT == 0.15
+    # The point of this test is that the threshold set flips at
+    # config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL and that local_hour drives it --
+    # which is what lets a replay apply the thresholds of the SIMULATED
+    # hour rather than the hour the backtest happens to run at.
+    #
+    # It used to straddle the STOP thresholds. The stop tightening was
+    # removed on 2026-08-18 (see config.TIGHTENED_STOP_LOSS_PCT) because
+    # stop_loss_audit scored it as costing money and buying nothing, so a
+    # stop can no longer flip at the hour. The TAKE-PROFIT tightening is
+    # untouched and still can, so the boundary is exercised through it.
+    #
+    # Take-profit: loose 0.50, tightened 0.25, both applied to the risk unit
+    # min(entry, 1-entry) -- here 0.40 on a 0.40 entry, so the trigger sits
+    # at +0.50 pnl (price 0.60) before the hour and +0.25 (price 0.50)
+    # after. 0.55 is +0.375 pnl: a hold under the loose threshold and a
+    # take_profit under the tightened one.
+    assert config.PROFIT_TAKE_PCT == 0.50
+    assert config.TIGHTENED_PROFIT_TAKE_PCT == 0.25
 
     position = _make_position(entry_price=0.40)
-    current_price = 0.32  # pnl_pct == -0.20
+    current_price = 0.55  # pnl_pct == +0.375
 
     decisions = {
         h: risk_manager.evaluate_exit(position, current_price, local_hour=h)
@@ -114,9 +124,20 @@ def test_decision_flips_exactly_at_tighten_hour():
             assert decision.should_exit is True, (
                 f"hour {h} (>= tighten hour {tighten_hour}) unexpectedly held: {decision}"
             )
-            assert decision.reason == "stop_loss"
+            assert decision.reason == "take_profit"
 
     # And explicitly confirm the transition is at the configured hour,
     # not one before or one after it.
     assert decisions[tighten_hour - 1].should_exit is False
     assert decisions[tighten_hour].should_exit is True
+
+
+def test_the_stop_distance_no_longer_changes_at_the_hour():
+    """The 2026-08-18 removal itself, pinned: a loss inside the loose
+    distance is a hold at EVERY hour now, where it used to stop after
+    10:00. This is the behaviour stop_loss_audit measured as costing
+    +21.49 USD across 23 stops, 7 of whose 18 settled rows would have won."""
+    position = _make_position(entry_price=0.40)
+    for h in range(24):
+        d = risk_manager.evaluate_exit(position, 0.32, local_hour=h)  # pnl -0.20
+        assert d.should_exit is False, f"hour {h} stopped on a -20% loss: {d}"
