@@ -83,6 +83,7 @@ from clients import market_client, wallet_client
 # governs is any process that does NOT go through scheduler.py's CLI.
 EXECUTION_MODE = {
     "WSSS": "simulation",
+    "RCSS": "simulation",
     "WMKK": "manual_review",
 }
 

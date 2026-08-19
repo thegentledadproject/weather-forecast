@@ -814,11 +814,29 @@ MAX_POSITION_USD = 150.0
 
 # Stations allowed to leave paper trading. Membership here is necessary but
 # NOT sufficient -- a station must ALSO be STATION_MATURITY == "mature"
-# (see live_size_cap_usd() below, which enforces the conjunction). WSSS is
-# the only station with a confirmed measured edge; per the 2026-08-09
-# divergence review the other twelve are collectively negative and none of
-# them belong anywhere near this list.
-LIVE_TRADING_STATIONS = {"WSSS"}
+# (see live_size_cap_usd() below, which enforces the conjunction).
+#
+# NEITHER MEMBER IS HERE ON MEASURED EDGE. Both are live only via
+# MATURITY_OVERRIDE below, and as of 2026-08-19 BOTH fail the beats_market
+# criterion -- WSSS on staleness (its run predates HEAD), RCSS on substance
+# (model Brier 0.145 vs market 0.062 over the 9 entries scored so far).
+# RCSS was added 2026-08-19 at the operator's instruction, mirroring the
+# WSSS setup. Its bias half of the case is now genuinely strong -- -1.82C
+# is large but pinned to +/-0.31C over 13 pairs and stable across halves,
+# which is precisely the correctable case ENABLE_FORECAST_BIAS_CORRECTION
+# exists for -- and its market-calibration half is the weakest in the
+# allowlist. See its MATURITY_OVERRIDE entry.
+#
+# Everything on the live track is bounded by ONE shared blast radius
+# (LIVE_MAX_CONCURRENT_POSITIONS / _TOTAL_EXPOSURE_USD / _ORDERS_PER_DAY),
+# so a second station does not enlarge the exposure -- it competes with
+# WSSS for the same 3 slots and the same $11.25. Adding a third would need
+# that trade-off re-read, not just another name here.
+#
+# NOTE this widens what the PROCESS-GLOBAL second gate authorises:
+# POLYMARKET_LIVE_TRADING=true is not per-station, so this set is the only
+# thing scoping real money to particular stations. Read both together.
+LIVE_TRADING_STATIONS = {"WSSS", "RCSS"}
 
 # Fixed notional for every simulation/live order, in dollars. This REPLACES
 # Kelly sizing entirely for those modes rather than capping it: at $1 the
@@ -1678,8 +1696,57 @@ MATURITY_MIN_SIMULATED_ORDERS = 3
 # REMOVE THIS once brier_model < brier_market on n >= MATURITY_MIN_BRIER_
 # ENTRIES under current code -- at which point the measured criteria will
 # carry WSSS on their own and this line becomes a lie that still works.
+#
+# RCSS, set 2026-08-19 at the operator's instruction, mirroring WSSS.
+# Measured on the box the same day (17 obs, 13 pairs), it passes FOUR of the
+# six criteria and this entry overrides the other two:
+#
+#   [ok] observations    17 settlement-grade, need 10
+#   [ok] bias_pairs      13, need 8
+#   [ok] bias_precision  -1.82C pinned to +/-0.31C, need <= 0.50
+#   [ok] bias_stability  -1.89 then -1.76, gap 0.13 vs 2x0.69 combined SE
+#   [--] order_path      0 resolved simulated orders, need 3
+#   [--] beats_market    9 entries scored (2026-08-06..08-16), need 20 --
+#                        and on those 9, model Brier 0.145 vs MARKET 0.062
+#
+# ON THE BIAS, which the first version of this comment got wrong: -1.82C is
+# the coldest bias in the registry, but MAGNITUDE IS NOT THE TEST and was
+# never meant to be. The system gates on stderr precisely because a large
+# bias measured tightly is correctable while a small one measured noisily is
+# not, and this one is tight (+/-0.31) and stationary across halves. The
+# 2026-08-09 figures that said otherwise (-1.80 +/-1.25 over 3 pairs) were
+# ten days stale by the time this station was allowlisted; the correction is
+# now doing its job and RCSS clears the collection-first gate on live data.
+#
+# THE REAL OBJECTION IS beats_market. The market's prices are more than
+# TWICE as well calibrated as the model at this station (0.062 vs 0.145) --
+# a wider gap than WSSS ever showed (0.144 vs 0.171 on its own n=7 window).
+# n=9 is under the threshold and so decides nothing formally, but it points
+# one way, and it is the criterion that most deserves the word "mature".
+# This override is therefore the same bet WSSS's is -- bounded money spent
+# on execution-path evidence -- and NOT a claim of edge. By this system's
+# own best estimate the EV of these trades is negative.
+#
+#   Also unlike WSSS: Taiwan is absent from WWIS, so there is no official-
+#   forecast leg at all and calibration runs on Open-Meteo + METAR alone.
+#
+# UNLIKE WSSS, RCSS HAS ZERO ORDER-PATH EVIDENCE (0 resolved simulated
+# orders against 7 for WSSS), which is the one gap that is cheap to close
+# and worth closing FIRST: `manual_trigger.py --station RCSS --mode
+# simulation` needs the allowlist above only, not this override.
+#
+# The blast radius is the same one WSSS runs inside and is SHARED, not
+# per-station: $1.55-$3.75 per order, 3 concurrent and $11.25 total across
+# both stations, 10 submissions a day.
+#
+# REMOVE THIS once brier_model < brier_market for RCSS on n >=
+# MATURITY_MIN_BRIER_ENTRIES under current code -- or sooner, if that gap
+# stays where it is.
 MATURITY_OVERRIDE: dict = {
     "WSSS": ("mature", "buying execution-path evidence, not edge"),
+    "RCSS": ("mature", "operator decision 2026-08-19, mirroring WSSS: buying "
+                       "execution-path evidence, not edge -- the market outscores "
+                       "the model 0.062 to 0.145 on the 9 entries scored so far"),
 }
 
 # Frozen snapshot for the BACKTEST replica only. backtest/entry_sim.py must
