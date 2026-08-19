@@ -498,6 +498,47 @@ TIGHTENED_STOP_LOSS_PCT = STOP_LOSS_PCT
 # docstring for the measurement.)
 LOTTERY_PRICE_THRESHOLD = 0.15
 
+# The take-profit distance for those same lottery-priced entries, as a
+# fraction of the risk unit -- which below 0.50 IS the entry price, so 0.50
+# means "sell at 1.5x entry" and 4.0 means "sell at 5x entry".
+#
+# SHIPPED AS A STRICT NO-OP: it defaults to PROFIT_TAKE_PCT, so today's
+# behaviour is unchanged. It exists because the carve-out above is
+# ONE-SIDED and nothing had measured whether it should be. The stop is
+# exempted for lottery entries; the profit-take never was, so a 0.08 entry
+# holds through its full 8c of downside while its upside is cut at 0.12 --
+# a 4-cent move on a 1-cent tick, which is the same sub-tick argument that
+# disqualified the stop. On a ticket bought at 0.08 against model_prob
+# 0.267 the hold-to-par payoff is 12.5x, and +50% takes a thin slice of it.
+#
+# THE 2026-08-19 OBSERVATION THAT PROMPTED THIS, and its limits: WSSS
+# 33 YES, entered 0.08, ordered sold SIX times at 0.12-0.13 by this very
+# threshold, every one killed (thin book, then an exchange halt), and it
+# reached 0.92. The leg made +$10.45 where the designed exit was +$0.55.
+# That is ONE trade and it is the luckiest possible sample -- it is a
+# reason to measure, not evidence of the right value.
+#
+# THE FIRST SWEEP SAYS THE ANECDOTE IS BACKWARDS. Over 2026-08-10..17,
+# 13 stations, ~21 closed lottery positions per row, the lottery cohort
+# scores MONOTONICALLY WORSE as the take widens: 10% -20.9%, 25% -31.1%,
+# 50% (live) -38.2%, 100% -46.5%, 200% -65.5%, 400%/none -80.9%. Tighter
+# is better everywhere tested, and every row is NEGATIVE.
+#
+# Do NOT act on that either. The window is 7/8 peak-blind (9-11h of price
+# coverage per day), which under-triggers wide takes specifically and so
+# biases the result in exactly the direction it came out. See
+# backtest/take_sweep.py, which prints that coverage on every run and
+# states the bar a recommendation has to clear.
+LOTTERY_PROFIT_TAKE_PCT = PROFIT_TAKE_PCT
+
+# The post-EDGE_DECAY_TIGHTEN_HOUR_LOCAL partner, exactly as
+# TIGHTENED_PROFIT_TAKE_PCT is for the normal distance. Written as a
+# reference so the two cannot drift apart -- and note THE ALIAS GOTCHA
+# (backtest/stop_sweep.py): `=` binds the VALUE at import, so anything
+# rebinding LOTTERY_PROFIT_TAKE_PCT at runtime must set this one too or it
+# silently keeps the old number for half the trading day.
+TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = TIGHTENED_PROFIT_TAKE_PCT
+
 # Hard ceiling on entry price. Above this, a bought bucket stops behaving
 # like a position and starts behaving like a bond with a stop-loss on it:
 #

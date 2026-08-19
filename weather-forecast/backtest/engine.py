@@ -726,6 +726,13 @@ def run(
             "EDGE_DECAY_TIGHTEN_HOUR_LOCAL": config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL,
             "TIGHTENED_PROFIT_TAKE_PCT": config.TIGHTENED_PROFIT_TAKE_PCT,
             "TIGHTENED_STOP_LOSS_PCT": config.TIGHTENED_STOP_LOSS_PCT,
+            # The lottery carve-out's two halves. Recorded because
+            # backtest/take_sweep.py VARIES the take across runs, and a
+            # manifest that omitted the constant being swept would label
+            # every row of that sweep identically.
+            "LOTTERY_PRICE_THRESHOLD": config.LOTTERY_PRICE_THRESHOLD,
+            "LOTTERY_PROFIT_TAKE_PCT": config.LOTTERY_PROFIT_TAKE_PCT,
+            "TIGHTENED_LOTTERY_PROFIT_TAKE_PCT": config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT,
             "MAX_SINGLE_CYCLE_MOVE": config.MAX_SINGLE_CYCLE_MOVE,
             "MIN_EXIT_PRICE": config.MIN_EXIT_PRICE,
             "BUCKET_MIN_C": config.BUCKET_MIN_C,

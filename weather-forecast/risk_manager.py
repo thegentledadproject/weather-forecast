@@ -131,10 +131,12 @@ def _active_thresholds(local_hour: Optional[int] = None) -> dict:
     if local_hour >= config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL:
         return {
             "profit_take_pct": config.TIGHTENED_PROFIT_TAKE_PCT,
+            "lottery_profit_take_pct": config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT,
             "stop_loss_pct": config.TIGHTENED_STOP_LOSS_PCT,
         }
     return {
         "profit_take_pct": config.PROFIT_TAKE_PCT,
+        "lottery_profit_take_pct": config.LOTTERY_PROFIT_TAKE_PCT,
         "stop_loss_pct": config.STOP_LOSS_PCT,
     }
 
@@ -248,7 +250,22 @@ def evaluate_exit(
     #    is attainable at EVERY entry price. On the old basis it needed
     #    price >= 1.5 x entry, which no market can print above an entry of
     #    0.667.
-    if (current_price - position.entry_price) >= thresholds["profit_take_pct"] * unit:
+    #
+    #    LOTTERY ENTRIES GET THEIR OWN DISTANCE (config.LOTTERY_PROFIT_TAKE_PCT),
+    #    which defaults to this same number -- so this is today a no-op and
+    #    the branch exists to be swept, not because a better value is known.
+    #    The carve-out above turns the STOP off for these entries on the
+    #    grounds that the threshold distance is sub-tick and that cutting a
+    #    ticket on noise forfeits the tail that justifies buying it. Both
+    #    halves of that argument apply to the upside exit too, and neither
+    #    had ever been measured against it. backtest/take_sweep.py is the
+    #    measurement; until it can answer, the default keeps behaviour
+    #    identical.
+    take_pct = (
+        thresholds["lottery_profit_take_pct"] if is_lottery
+        else thresholds["profit_take_pct"]
+    )
+    if (current_price - position.entry_price) >= take_pct * unit:
         return ExitDecision(
             position_id=position.position_id,
             should_exit=True,
