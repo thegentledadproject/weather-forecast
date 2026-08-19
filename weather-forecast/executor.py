@@ -747,19 +747,54 @@ def close_position(
     exit_time = datetime.now(timezone.utc).isoformat()
     status = status or f"closed_{decision.reason}"
 
-    gross_exit_price = decision.current_price
-    if status == "closed_resolution":
-        exit_fee_per_share = 0.0
-    else:
-        exit_fee_per_share = risk_manager.taker_fee_per_share(gross_exit_price)
-    exit_price = max(gross_exit_price - exit_fee_per_share, 0.0)
-    net_pnl_pct = risk_manager.compute_pnl_pct(position.entry_price, exit_price)
-    fee_note = (
-        f"gross {gross_exit_price:.4f} - exit fee {exit_fee_per_share:.4f}/share "
-        f"= net {exit_price:.4f}"
-    )
+    def _economics(gross_exit_price: float):
+        """
+        (net exit price, net P&L, fee note) for one candidate gross price.
 
-    def _record(reason_tag: str) -> None:
+        Deliberately a function of the gross price rather than a value
+        computed once: WHICH price is the truth differs per rung, and is
+        not known until that rung has run its order. See _record().
+        """
+        if status == "closed_resolution":
+            exit_fee_per_share = 0.0
+        else:
+            exit_fee_per_share = risk_manager.taker_fee_per_share(gross_exit_price)
+        exit_price = max(gross_exit_price - exit_fee_per_share, 0.0)
+        return (
+            exit_price,
+            risk_manager.compute_pnl_pct(position.entry_price, exit_price),
+            f"gross {gross_exit_price:.4f} - exit fee {exit_fee_per_share:.4f}/share "
+            f"= net {exit_price:.4f}",
+        )
+
+    def _record(reason_tag: str, gross_exit_price: float) -> None:
+        """
+        THE GROSS PRICE IS AN ARGUMENT BECAUSE IT IS NOT decision.current_price.
+        ------------------------------------------------------------------
+        It used to be. decision.current_price is the quote read BEFORE the
+        order was built, and a FOK limit is a worst-price bound rather than
+        a target -- so on every rung that actually places an order the quote
+        is the one number that is certainly not what happened:
+
+          live       -> result.fill_price (what the exchange matched at),
+                        falling back to spec.limit_price exactly as the
+                        entry path does when the response carries no price.
+          simulation -> spec.expected_price, the tick-aligned price the
+                        order would have been priced at. Same basis the
+                        entry rung moved to on 2026-08-17, so the two agree.
+          paper /
+          manual_review /
+          resolution -> decision.current_price. No order exists on these,
+                        so the observed quote is the whole available truth.
+
+        Measured on the live book 2026-08-19 (WSSS 33 YES, 12.5 shares):
+        quote 0.92, limit 0.90, booked 0.9163 net. A fill at the limit was
+        worth 0.8955 net -- that one exit overstated by ~$0.26 on a $1.00
+        stake, and every live exit in the table carried the same bias. The
+        log line at the foot of _close_via_order_path() has always PRINTED
+        the fill price while the stored row said something else.
+        """
+        exit_price, net_pnl_pct, fee_note = _economics(gross_exit_price)
         storage.close_position(
             position_id=position.position_id,
             exit_price=exit_price,
@@ -776,32 +811,34 @@ def close_position(
             action = "REDEEM this position -- the market has RESOLVED, there is nothing left to sell into."
         else:
             action = f"SELL {position.size_usd:.2f} USD of this position now."
+        _, net_pnl_pct, _ = _economics(decision.current_price)
         print(
             f"\n[ACTION NEEDED] {position.station_icao} {position.bucket_c}°C "
             f"({position.side}) -- {decision.reason.upper()}\n"
-            f"  Entry: {position.entry_price:.3f}  Current: {gross_exit_price:.3f}  "
+            f"  Entry: {position.entry_price:.3f}  Current: {decision.current_price:.3f}  "
             f"P&L: {decision.pnl_pct:+.1%} gross, {net_pnl_pct:+.1%} net of the exit fee\n"
             f"  Recommended: {action}\n"
         )
         # Logged as closed so it doesn't get re-flagged identically every
         # scan cycle while a human hasn't acted yet.
-        _record("manual review")
+        _record("manual review", decision.current_price)
         return
 
     if mode == "paper":
+        _, net_pnl_pct, fee_note = _economics(decision.current_price)
         print(
             f"[executor] PAPER EXIT: {position.station_icao} {position.bucket_c}°{position.side} "
-            f"-- {decision.reason.upper()} @ {gross_exit_price:.3f} ({fee_note}), "
+            f"-- {decision.reason.upper()} @ {decision.current_price:.3f} ({fee_note}), "
             f"pnl={net_pnl_pct:+.1%} net of the exit fee -- zero real risk, auto-filled."
         )
-        _record("paper")
+        _record("paper", decision.current_price)
         return
 
-    _close_via_order_path(position, decision, mode, status, exit_price, net_pnl_pct, fee_note, _record)
+    _close_via_order_path(position, decision, mode, status, _economics, _record)
 
 
 def _close_via_order_path(
-    position, decision, mode, status, exit_price, net_pnl_pct, fee_note, record,
+    position, decision, mode, status, economics, record,
 ) -> None:
     """
     The shared simulation/live exit path.
@@ -821,7 +858,7 @@ def _close_via_order_path(
                else "Recorded as redeemed.")
         )
         print(f"[executor] {tag}: {label} -- {note}")
-        record(mode)
+        record(mode, decision.current_price)
         return
 
     spec = wallet_client.build_exit_order(
@@ -848,12 +885,16 @@ def _close_via_order_path(
                         side=position.side)
 
     if mode == "simulation":
+        # spec.expected_price, not decision.current_price: the tick-aligned
+        # price this order would have carried. Same basis as the simulated
+        # ENTRY rung, so size_usd / price and size_shares agree on both legs.
+        _, net_pnl_pct, fee_note = economics(spec.expected_price)
         print(
             f"[executor] SIMULATION EXIT: {label} -- {decision.reason.upper()} "
             f"order resolved but NOT submitted: {spec.describe()}; "
             f"pnl={net_pnl_pct:+.1%} net ({fee_note})."
         )
-        record("simulation")
+        record("simulation", spec.expected_price)
         return
 
     if not result.filled:
@@ -864,9 +905,14 @@ def _close_via_order_path(
         )
         return
 
+    # The one price the exchange actually matched at. The fallback to the
+    # padded limit mirrors the entry path: a fill with no price attached is
+    # still a fill, and the limit is its worst-case bound.
+    fill_price = result.fill_price or spec.limit_price
+    _, net_pnl_pct, fee_note = economics(fill_price)
     print(
         f"[executor] LIVE EXIT: {label} -- {decision.reason.upper()} "
-        f"{spec.size_shares:.2f} shares @ {result.fill_price or spec.limit_price:.4f} "
+        f"{spec.size_shares:.2f} shares @ {fill_price:.4f} "
         f"(order {result.order_id}), pnl={net_pnl_pct:+.1%} net ({fee_note}). REAL MONEY."
     )
-    record("live")
+    record("live", fill_price)

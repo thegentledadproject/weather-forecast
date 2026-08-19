@@ -848,6 +848,18 @@ def _exit_pass(clock, tick, portfolio, prices, last_observed, counters) -> None:
         # gross while live booked them net would overstate every
         # simulated exit by the fee, which is a large fraction of a
         # typical exit's gain.
+        #
+        # "IN PAPER MODE" IS NOW THE LOAD-BEARING HALF OF THAT SENTENCE
+        # (2026-08-19). The rungs no longer agree on which price is the
+        # truth: live records result.fill_price and simulation records
+        # spec.expected_price, because both place an order and a FOK limit
+        # is a worst-price bound rather than a target. Paper places none, so
+        # the quote is all it has -- and a replay has no order path at all,
+        # which is exactly why paper is the rung it must mirror. Matching
+        # live here instead would mean inventing a fill this data cannot
+        # support. Same shape as the ENTRY PRICE PARITY note in
+        # backtest/fill_model.py, which resolves the identical question the
+        # identical way on the other leg.
         gross_exit_price = decision.current_price
         exit_fee_per_share = risk_manager.taker_fee_per_share(gross_exit_price)
         net_exit_price = max(gross_exit_price - exit_fee_per_share, 0.0)
