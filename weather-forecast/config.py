@@ -516,9 +516,23 @@ LOTTERY_PRICE_THRESHOLD = 0.15
 #     Tail probabilities are where a fallback-spread calibration is least
 #     trustworthy, and this is where it would be sized largest.
 #
-# 0.75 is where the normal-regime stop (30% of the risk unit) stops
-# exceeding total available upside, and where MAX_PLAUSIBLE_RAW_EDGE
-# regains its teeth. Until now nothing bounded the top end at all: the
+# 0.75 is sited by the SECOND bullet alone: it is exactly where
+# MAX_PLAUSIBLE_RAW_EDGE regains its teeth, because raw edge <= 1 - price
+# makes a flat 0.25 ceiling unreachable above that point.
+#
+# It is NOT sited by the stop, though this comment used to say it was.
+# The claim was that 0.75 is where the stop stops exceeding total
+# available upside -- true only on the OLD entry-price basis, where
+# 0.30 x entry crosses 1 - entry at 0.769. Measured against the risk unit
+# this file actually uses, the stop distance is 0.30 x min(entry,
+# 1 - entry) against upside 1 - entry, which is under upside at EVERY
+# price: there is no crossover anywhere to site a ceiling at. Anyone
+# re-deriving MAX_ENTRY_PRICE from the stop would get a different and
+# wrong answer. (Corrected 2026-08-19. The wording also predated the
+# stop-regime tightening being dropped -- TIGHTENED_STOP_LOSS_PCT is now
+# just STOP_LOSS_PCT, so there is no "normal regime" to qualify.)
+#
+# Until now nothing bounded the top end at all: the
 # only price screens were `market_price >= 1.0` and EV_MIN_PRICE_SCREEN
 # at the bottom. Entries this expensive were kept out only ACCIDENTALLY,
 # by net EV being a ratio -- (model_prob - price)/price has a ceiling of

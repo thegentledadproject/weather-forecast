@@ -233,9 +233,16 @@ def test_risk_unit_is_floored_for_degenerate_entry_prices(entry_price):
 
 def test_max_entry_price_is_below_where_the_gates_go_blind():
     """
-    0.75 is not arbitrary: above it MAX_PLAUSIBLE_RAW_EDGE can never fire
-    (raw edge <= 1 - price), and the normal-regime stop would start
-    exceeding total available upside.
+    0.75 is not arbitrary: it is exactly where MAX_PLAUSIBLE_RAW_EDGE stops
+    being reachable, since raw edge <= 1 - price caps the largest
+    expressible edge at 1 - price.
+
+    It is NOT sited by the stop. This test used to also assert that the
+    stop stops exceeding upside at 0.75 -- vacuously true at every price on
+    the risk-unit basis, so it pinned nothing. That crossover belongs to the
+    old entry-price basis (0.30 x entry crosses 1 - entry at 0.769). The
+    genuine invariant is already covered by
+    test_stop_never_risks_more_than_the_remaining_upside above.
     """
     assert config.MAX_ENTRY_PRICE <= 0.75
 
@@ -243,9 +250,6 @@ def test_max_entry_price_is_below_where_the_gates_go_blind():
     assert config.MAX_PLAUSIBLE_RAW_EDGE >= (1.0 - ceiling_price), (
         "MAX_ENTRY_PRICE has drifted above the point where the flat edge ceiling stops being reachable"
     )
-
-    unit = risk_manager.risk_unit(ceiling_price)
-    assert config.STOP_LOSS_PCT * unit < (1.0 - ceiling_price)
 
 
 def test_plausibility_ceiling_is_continuous_at_0_50_and_binds_above_it():
