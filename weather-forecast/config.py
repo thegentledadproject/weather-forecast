@@ -98,6 +98,35 @@ _SEA_MONSOON_PHASE_BY_MONTH = {
 # read from that city's real event; bounds DRIFT seasonally (see the
 # bucket_min_c note on models.StationConfig), so the live token map remains
 # authoritative on the trading path.
+#
+# BOUNDS RESWEEP 2026-08-20. Every one of the 13 stations had drifted off its
+# 2026-08-06 reading and ev_engine was logging BOUNDS DRIFT on essentially
+# every cycle -- RKPK and ZBAA by a full 5 and 4 degrees. Each pair below is
+# now set from 8 days of that log (the live event's own bounds, as parsed from
+# the discovered token map).
+#
+# WHAT DRIFT DOES AND DOES NOT REACH:
+#   - Trading: nothing. market_discovery.derive_bucket_bounds() reads the live
+#     token map and IS authoritative, and position_manager settles on the live
+#     event's bounds too. These are a cross-check.
+#   - Backtest: yes. engine.py and report.py clamp bucket_for_temp() to this
+#     pair, so a stale bound silently moves where a replay's tail settles.
+#   - Discovery: only latently. parse_bucket_label() takes these as its
+#     LAST-RESORT fallback for an edge label carrying no parseable number --
+#     "the edge buckets parse themselves", so today the fallback is never
+#     reached. It is a safety net, and a safety net wants to be right.
+#
+# THESE WILL GO STALE AGAIN, and quickly -- Polymarket re-centres a city's
+# window every few days, not seasonally. ZBAA changed 8 times in 8 days. The
+# rule used below is: take the CURRENT window, except where the window
+# oscillates rather than trends, in which case take the MODAL one over the
+# sample, because for an unstable window the mode is the better cross-check.
+# A value spanning every observation is not available: the window is always
+# exactly config.EXPECTED_BUCKET_COUNT buckets wide, so an envelope would
+# describe an event shape Polymarket never lists.
+#
+# Re-run by reading the drift log off the box:
+#   journalctl -u polyweather --since '8 days ago' #     | grep -oE 'BOUNDS DRIFT for [A-Z]{4}: live event lists [0-9]+-[0-9]+'
 STATIONS = {
     "WSSS": StationConfig(
         icao="WSSS",
@@ -122,8 +151,10 @@ STATIONS = {
         # Was 25/35 ("confirmed" July 2026); the live August event runs 27-37.
         # Polymarket re-centers the window seasonally -- these are cross-checks,
         # the discovered token map decides at trade time.
-        bucket_min_c=27,
-        bucket_max_c=37,
+        # Reswept 2026-08-20 (was 27-37): 28-38 on 54 of 74 cycles sampled, and the current window;
+        # 25-35 seen once (Aug 12).
+        bucket_min_c=28,
+        bucket_max_c=38,
     ),
     "WMKK": StationConfig(
         icao="WMKK",
@@ -141,8 +172,15 @@ STATIONS = {
         polymarket_city_slug="kuala-lumpur",
         monsoon_phase_by_month=_SEA_MONSOON_PHASE_BY_MONTH,
         seed_observations=[],  # not yet populated -- see clients/official/met_malaysia.py
-        bucket_min_c=27,  # live August 2026 event range (same drift caveat as WSSS)
-        bucket_max_c=37,
+        # Reswept 2026-08-20 (was 27-37): 28-38 on 68 of 102 cycles and the
+        # current window; moved four times in six days -- 28-38 (Aug 13),
+        # 29-39 (Aug 14), 28-38 (Aug 16), 26-36 (Aug 18), 28-38 (Aug 19).
+        # Immaterial to the stop-precision analysis either way: WMKK's
+        # settlements over 2026-08-02..19 are all 32-35, nowhere near either
+        # edge under 27-37 or 28-38, so no NO position can be misscored by
+        # tail-bucket clamping under either pair.
+        bucket_min_c=28,
+        bucket_max_c=38,
     ),
     # --- Northeast Asia (UTC+9) -------------------------------------------
     # monsoon_phase_by_month deliberately {} for every station below: the
@@ -165,8 +203,10 @@ STATIONS = {
         official_client_key="wwis",
         polymarket_city_slug="tokyo",
         utc_offset_hours=9,
-        bucket_min_c=26,  # live 2026-08-06 event: 26 "or below" .. 36 "or higher"
-        bucket_max_c=36,
+        # Reswept 2026-08-20 (was 26-36): wandered 23-33 / 22-32 / 24-34 through Aug 12-16, then
+        # settled on 25-35 from Aug 17 (current).
+        bucket_min_c=25,
+        bucket_max_c=35,
         wwis_city_name="Tokyo",
     ),
     "RKSI": StationConfig(
@@ -182,8 +222,10 @@ STATIONS = {
         official_client_key="wwis",
         polymarket_city_slug="seoul",  # Polymarket titles this "Seoul (Incheon)"
         utc_offset_hours=9,
-        bucket_min_c=27,  # live 2026-08-06 event: 27..37
-        bucket_max_c=37,
+        # Reswept 2026-08-20 (was 27-37): a steady one-way fall: 28-38 -> 26-36 -> 24-34 -> 22-32 ->
+        # 23-33 from Aug 16 (current, 66 of 150 cycles).
+        bucket_min_c=23,
+        bucket_max_c=33,
         # WWIS lists "Seoul", not Incheon -- the city forecast is a PROXY for
         # the airport station ~50 km west on the coast. Documented gap, not a
         # silent equivalence; Open-Meteo runs at the airport's own lat/lon.
@@ -204,8 +246,10 @@ STATIONS = {
         official_client_key="wwis",
         polymarket_city_slug="busan",
         utc_offset_hours=9,
-        bucket_min_c=30,  # live 2026-08-06 event: 30..40
-        bucket_max_c=40,
+        # Reswept 2026-08-20 (was 30-40): was 5 DEGREES off. 25-35 on 87 of 150 cycles and current;
+        # dipped to 21-31 for Aug 15-16 only.
+        bucket_min_c=25,
+        bucket_max_c=35,
         wwis_city_name="Busan",
     ),
     # --- Greater China + Southeast Asia (UTC+8) ---------------------------
@@ -233,8 +277,9 @@ STATIONS = {
                                        # settlement site are the same place.
         official_client_key="hko",
         polymarket_city_slug="hong-kong",
-        bucket_min_c=27,  # live 2026-08-06 event: 27..37
-        bucket_max_c=37,
+        # Reswept 2026-08-20 (was 27-37): 26-36 on 48 of 68 cycles and current.
+        bucket_min_c=26,
+        bucket_max_c=36,
         # 0.1 C settlement precision + "range that contains" resolution text
         # means floor semantics, not whole-degree rounding: 33.9 C is bucket
         # 33, never 34.
@@ -254,8 +299,10 @@ STATIONS = {
                                        # (RPLL), so no site substitution.
         official_client_key="wwis",
         polymarket_city_slug="manila",
-        bucket_min_c=25,  # live 2026-08-06 event: 25..35
-        bucket_max_c=35,
+        # Reswept 2026-08-20 (was 25-35): 22-32 current; 23-33 and 24-34 also seen. Thin sample --
+        # RPLL has only 4 closed positions ever.
+        bucket_min_c=22,
+        bucket_max_c=32,
         wwis_city_name="Metro Manila",  # WWIS's exact listing (not "Manila")
     ),
     "RCSS": StationConfig(
@@ -270,8 +317,10 @@ STATIONS = {
                                        # the city normal is a close stand-in.
         official_client_key="wwis",
         polymarket_city_slug="taipei",
-        bucket_min_c=28,  # live 2026-08-06 event: 28..38
-        bucket_max_c=38,
+        # Reswept 2026-08-20 (was 28-38): 29-39 through Aug 12-17, then 26-36 from Aug 18 (current).
+        # RCSS is on the LIVE track, so keep this one honest.
+        bucket_min_c=26,
+        bucket_max_c=36,
         # Taiwan is absent from the WMO WWIS index (UN service), so there is
         # no official-source city to name -- the wwis client returns None
         # honestly and calibration runs on Open-Meteo + METAR alone. A CWA
@@ -293,8 +342,9 @@ STATIONS = {
                                        # would move this the WRONG way. Needs Pudong.
         official_client_key="wwis",
         polymarket_city_slug="shanghai",
-        bucket_min_c=27,  # live 2026-08-06 event: 27..37
-        bucket_max_c=37,
+        # Reswept 2026-08-20 (was 27-37): 25-35 on 88 of 142 cycles and current; 24-34 and 26-36 seen.
+        bucket_min_c=25,
+        bucket_max_c=35,
         wwis_city_name="Shanghai",
     ),
     "ZBAA": StationConfig(
@@ -309,8 +359,13 @@ STATIONS = {
                                        # reference station.
         official_client_key="wwis",
         polymarket_city_slug="beijing",
-        bucket_min_c=30,  # live 2026-08-06 event: 30..40
-        bucket_max_c=40,
+        # Reswept 2026-08-20 (was 30-40): was 4 degrees off, and this is the WORST-BEHAVED window of
+        # the 13: eight changes in eight days, spanning 22-32 to 27-37.
+        # 27-37 is the MODAL value (54 of 142), NOT the current one
+        # (26-36, Aug 19) -- for a window that oscillates rather than
+        # trends, the mode is the cross-check that fires least often.
+        bucket_min_c=27,
+        bucket_max_c=37,
         wwis_city_name="Beijing",
     ),
     "ZGGG": StationConfig(
@@ -325,8 +380,10 @@ STATIONS = {
                                        # located for Guangzhou. Not guessed.
         official_client_key="wwis",
         polymarket_city_slug="guangzhou",
-        bucket_min_c=29,  # live 2026-08-06 event: 29..39
-        bucket_max_c=39,
+        # Reswept 2026-08-20 (was 29-39): 27-37 through Aug 13-17, then 30-40 from Aug 18 (current).
+        # Matched neither value before this.
+        bucket_min_c=30,
+        bucket_max_c=40,
         wwis_city_name="Guangzhou",
     ),
     "ZGSZ": StationConfig(
@@ -341,8 +398,9 @@ STATIONS = {
                                        # within the same city.
         official_client_key="wwis",
         polymarket_city_slug="shenzhen",
-        bucket_min_c=28,  # live 2026-08-06 event: 28..38
-        bucket_max_c=38,
+        # Reswept 2026-08-20 (was 28-38): 27-37 on 88 of 122 cycles and current.
+        bucket_min_c=27,
+        bucket_max_c=37,
         wwis_city_name="Shenzhen",
     ),
     # --- South Asia (UTC+5) -----------------------------------------------
@@ -359,8 +417,9 @@ STATIONS = {
         official_client_key="wwis",
         polymarket_city_slug="karachi",
         utc_offset_hours=5,
-        bucket_min_c=27,  # live 2026-08-06 event: 27..37
-        bucket_max_c=37,
+        # Reswept 2026-08-20 (was 27-37): 28-38 on every cycle observed (23). OPKC is collection-only.
+        bucket_min_c=28,
+        bucket_max_c=38,
         wwis_city_name="Karachi",
         # The market's own resolution text names "Masroor Airbase Station"
         # (OPMR, ~15 km west across Karachi's sea-breeze gradient) while
