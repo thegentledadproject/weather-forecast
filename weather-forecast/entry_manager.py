@@ -347,6 +347,13 @@ def collection_only_reason(
     enforce_bias_quality is opt-in so replays that never modelled the bias
     keep their existing meaning instead of silently rejecting everything --
     the same opt-in shape entry_sim's enforce_collection_gate already uses.
+
+    config.BIAS_GATE_OVERRIDE_STATIONS exempts named stations from the
+    bias half (never from the observation count, never for a station on
+    the real-money allowlist). It lives inside this function rather than
+    at the call site precisely BECAUSE this function is shared: an
+    override applied in live code and not in backtest/entry_sim.py would
+    be the drift this purity was designed to prevent.
     Live always passes True.
 
     Kept pure (registry lookup only, no storage) so backtest/entry_sim.py
@@ -371,6 +378,13 @@ def collection_only_reason(
         )
 
     if not enforce_bias_quality:
+        return None
+
+    # Operator override, per station, for the bias half ONLY -- the
+    # observation count above still had to pass. See
+    # config.bias_gate_is_overridden for why it refuses real-money
+    # stations, and BIAS_GATE_OVERRIDE_STATIONS for what it costs.
+    if config.bias_gate_is_overridden(station_icao):
         return None
 
     if bias_n is None:
@@ -1021,6 +1035,22 @@ def decide_portfolio_entries(
             collection_only_decision(result, token_id, gate_reason)
             for result, token_id in candidates_with_token_ids(ev_results, token_map)
         ]
+
+    # An overridden station passes the gate SILENTLY otherwise, and a
+    # silent pass is indistinguishable from a station that earned it.
+    # Same once-per-station-per-day budget as the block notice above.
+    if config.bias_gate_is_overridden(station_icao):
+        warn_key = (station_icao, ev_results[0].target_date, "override")
+        if warn_key not in _collection_only_logged:
+            _collection_only_logged.add(warn_key)
+            print(
+                f"[entry_manager] {station_icao} is entering on an UNMEASURED forecast bias: "
+                f"config.BIAS_GATE_OVERRIDE_STATIONS exempts it from the bias-quality gate "
+                f"(measured pairs={bias_n}, stderr="
+                f"{'unknown' if bias_stderr is None else f'{bias_stderr:.2f}C'}). "
+                f"Positions opened for this station are not evidence of edge until its bias "
+                f"is measured. Paper track only -- {station_icao} is not in LIVE_TRADING_STATIONS."
+            )
 
     decisions = decide_entries(ev_results, token_map, min_net_ev=min_net_ev)
     decisions = veto_same_bucket_conflicts(decisions)

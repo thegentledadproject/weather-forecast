@@ -417,3 +417,59 @@ def test_forecast_bias_stats_fails_closed(monkeypatch):
     assert entry_manager.collection_only_reason(
         "WSSS", GRADUATED_OBS, bias_n=None, bias_stderr=None, enforce_bias_quality=True,
     ) is not None
+
+
+# --- the per-station override (2026-08-20) ---------------------------------
+#
+# VHHH's bias is not noisy, it is unmeasurable: HKO publishes its
+# settlement-grade climate record a month at a time, weeks late, so the
+# station's observations and its stored forecasts cover disjoint date
+# ranges and forecast_error_samples returns nothing at all. It cannot
+# collect its way out the way every other gated station can, so the
+# operator exempted it. These pin what the exemption may and may not do.
+
+def test_override_lets_an_exempt_station_through_the_bias_check(monkeypatch):
+    monkeypatch.setattr(config, "BIAS_GATE_OVERRIDE_STATIONS", {"WSSS"})
+    monkeypatch.setattr(config, "LIVE_TRADING_STATIONS", set())
+    assert entry_manager.collection_only_reason(
+        "WSSS", GRADUATED_OBS, bias_n=0, bias_stderr=None, enforce_bias_quality=True,
+    ) is None
+
+
+def test_override_does_not_skip_the_observation_count(monkeypatch):
+    # The count is the floor the override must never lower: a station with
+    # no settlement-grade history is blind, exempt or not.
+    monkeypatch.setattr(config, "BIAS_GATE_OVERRIDE_STATIONS", {"WSSS"})
+    monkeypatch.setattr(config, "LIVE_TRADING_STATIONS", set())
+    reason = entry_manager.collection_only_reason(
+        "WSSS", 0, bias_n=0, bias_stderr=None, enforce_bias_quality=True,
+    )
+    assert reason is not None and "observation(s)" in reason
+
+
+def test_override_refuses_to_apply_to_a_real_money_station(monkeypatch):
+    # "Trade this station on an unmeasured bias" must never be true of
+    # money. A station in both sets resolves to GATED, not to armed.
+    monkeypatch.setattr(config, "BIAS_GATE_OVERRIDE_STATIONS", {"WSSS"})
+    monkeypatch.setattr(config, "LIVE_TRADING_STATIONS", {"WSSS"})
+    reason = entry_manager.collection_only_reason(
+        "WSSS", GRADUATED_OBS, bias_n=0, bias_stderr=None, enforce_bias_quality=True,
+    )
+    assert reason is not None and "forecast/observation pair" in reason
+
+
+def test_override_does_not_leak_to_unlisted_stations(monkeypatch):
+    monkeypatch.setattr(config, "BIAS_GATE_OVERRIDE_STATIONS", {"VHHH"})
+    monkeypatch.setattr(config, "LIVE_TRADING_STATIONS", set())
+    reason = entry_manager.collection_only_reason(
+        "WSSS", GRADUATED_OBS, bias_n=0, bias_stderr=None, enforce_bias_quality=True,
+    )
+    assert reason is not None and "forecast/observation pair" in reason
+
+
+def test_vhhh_is_the_shipped_override_and_is_paper_only():
+    # The actual shipped configuration, not a monkeypatched one.
+    assert config.bias_gate_is_overridden("VHHH")
+    assert "VHHH" not in config.LIVE_TRADING_STATIONS
+    assert not config.live_mode_is_permitted("VHHH", "live")
+    assert not config.live_mode_is_permitted("VHHH", "simulation")

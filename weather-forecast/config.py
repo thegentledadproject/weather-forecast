@@ -1457,6 +1457,63 @@ MIN_BIAS_PAIRS_BEFORE_ENTRY = 5
 # RCSS n=3 sd 2.16 -> SE 1.25 (not).
 MAX_BIAS_STANDARD_ERROR_C = 0.5
 
+# --- Per-station override of the BIAS-QUALITY half of the gate -----------
+# Stations listed here skip the MIN_BIAS_PAIRS_BEFORE_ENTRY /
+# MAX_BIAS_STANDARD_ERROR_C checks in
+# entry_manager.collection_only_reason(). They do NOT skip
+# MIN_RESOLUTION_OBS_BEFORE_ENTRY: a station with no settlement-grade
+# history at all stays blind, and this override cannot open it.
+#
+# VHHH, added 2026-08-20 at the operator's instruction, is the case this
+# exists for. Its bias is not merely noisy, it is UNMEASURABLE and will
+# stay that way for weeks: HKO's CLMMAXT climate dataset publishes a whole
+# month at a time, weeks in arrears, so VHHH's 60 settlement-grade
+# observations stop at 2026-07-31 while its stored forecasts start
+# 2026-08-06. storage.forecast_error_samples joins on target_date, so the
+# intersection is EXACTLY ZERO and no amount of waiting inside the current
+# month changes it (see HKO_INGEST_LOOKBACK_DAYS' note). Every other gated
+# station could earn its way out by collecting; VHHH cannot.
+#
+# WHAT THIS BUYS AND WHAT IT COSTS. It buys the forward record that the
+# batch backfill will not produce on its own: 243 cycles over 14
+# station-days were blocked with 1-4 candidates each, and none of them can
+# ever be scored because there is no settlement truth for them either.
+# It costs the protection the gate was written for on 2026-08-09, and the
+# blocked candidates carry that failure's exact signature -- NO on the hot
+# buckets (34/33/35/36/37), YES on the cool ones (29/30/31/32), i.e. "the
+# model runs cooler than the market" on every bucket in one direction,
+# which is what a cold forecast bias looks like and what every measured
+# neighbour has (RCSS -1.80, WMKK -1.76, RKPK -1.49, RKSI -1.48,
+# ZGGG -1.17). TREAT VHHH POSITIONS OPENED FROM 2026-08-20 AS TRADES ON AN
+# UNMEASURED BIAS, not as evidence of edge, until August CLMMAXT publishes
+# (~2026-09-16) and the bias can be measured for real.
+#
+# REMOVE THE STATION FROM THIS SET once its bias is measured -- leaving it
+# here permanently disables the check that would then have real data.
+BIAS_GATE_OVERRIDE_STATIONS = {"VHHH"}
+
+
+def bias_gate_is_overridden(station_icao: str) -> bool:
+    """
+    Whether `station_icao` skips the bias-quality checks.
+
+    REFUSES TO APPLY TO ANY REAL-MONEY STATION. The override says "trade
+    this station on an unmeasured bias", which is a sentence that must
+    never be true of money. LIVE_TRADING_STATIONS is the allowlist that
+    authorises the real order path (config.live_mode_is_permitted ANDs it
+    with maturity), so a station in both sets is a contradiction -- and it
+    resolves in the safe direction: the override stops working and the
+    station goes back to being gated, rather than the allowlist silently
+    inheriting permission to spend on numbers nobody has checked.
+
+    That is deliberately the failure mode for the one-line edit somebody
+    makes later. Promoting VHHH to LIVE_TRADING_STATIONS without first
+    deleting it here does not arm it; it re-blocks it.
+    """
+    if station_icao in LIVE_TRADING_STATIONS:
+        return False
+    return station_icao in BIAS_GATE_OVERRIDE_STATIONS
+
 # Shared budget across ALL approved legs for one station on one day -- e.g.
 # a YES leg on the top bucket plus NO legs hedging tail buckets, opened
 # together (see entry_manager.apply_portfolio_budget). Without this, each
