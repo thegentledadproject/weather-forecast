@@ -18,7 +18,7 @@ config.py, models.py (local)
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import config
 from models import PointForecast, ObservedReading, Position
@@ -414,6 +414,56 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
             params,
         ).fetchall()
     return [float(forecast_mean) - float(observed) for observed, forecast_mean in rows]
+
+
+def forecast_means_by_date(station_icao: str) -> Dict[date, float]:
+    """
+    The per-date blended forecast mean for this station, in degrees C, for
+    every target date it has any usable stored forecast for.
+
+    THIS IS forecast_error_samples()' FORECAST TERM, LIFTED OUT. Same
+    sources, same exclusion list, same `date(f.fetched_at) <= target_date`
+    lookahead rule, same AVG -- the only thing dropped is the join to
+    observations, because the caller supplies the truth instead.
+
+    That caller is bucket_bias_audit.py, which measures the same bias
+    against the bucket the MARKET settled into rather than against a
+    settlement-grade temperature. Hong Kong is the case that needs it:
+    HKO's climate extract publishes a month at a time, weeks late, so
+    VHHH's observations and its forecasts cover disjoint date ranges and
+    forecast_error_samples() returns nothing at all for it.
+
+    It lives HERE, next to forecast_error_samples(), and not in the audit
+    module, for exactly the reason that function's own docstring gives for
+    mirroring blend_central_estimate: two copies of "which forecasts count"
+    drift, and a bias measured over a different forecast set than the one
+    the estimate blends is not the number anybody thinks it is.
+    """
+    excluded = tuple(config.FORECAST_SOURCES_EXCLUDED_BY_STATION.get(station_icao, ()))
+    exclusion_sql = ""
+    params: list = [station_icao]
+    if excluded:
+        exclusion_sql = f"  AND f.source NOT IN ({','.join('?' * len(excluded))}) "
+        params.extend(excluded)
+
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT f.target_date, AVG(f.max_temp_c) "
+            "FROM forecasts f "
+            "WHERE f.station_icao = ? "
+            "  AND f.max_temp_c IS NOT NULL "
+            "  AND date(f.fetched_at) <= f.target_date "
+            + exclusion_sql +
+            "GROUP BY f.target_date",
+            params,
+        ).fetchall()
+
+    out: Dict[date, float] = {}
+    for target_date, forecast_mean in rows:
+        if forecast_mean is None:
+            continue
+        out[date.fromisoformat(str(target_date))] = float(forecast_mean)
+    return out
 
 
 def load_forecast_history(station_icao: str, source: str, limit: int = 90) -> List[PointForecast]:
