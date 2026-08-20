@@ -56,6 +56,40 @@ def local_today(station: Optional[Union[str, StationConfig]] = None) -> date:
     return (datetime.now(timezone.utc) + timedelta(hours=offset)).date()
 
 
+def local_day_bounds_utc(
+    station: Union[str, StationConfig], target_date: date
+) -> tuple:
+    """
+    (start, end) of one station's local calendar day, as aware UTC
+    datetimes. The day is half-open: start <= t < end.
+
+    THE UNIT OF "IS THIS FORECAST ALLOWED TO KNOW THE ANSWER YET".
+    Comparing a fetched_at to the target date in UTC -- which
+    storage.forecast_error_samples() did until 2026-08-21 -- is wrong in
+    BOTH directions once the registry spans UTC+5 to UTC+9. At UTC+8 the
+    local day for 2026-08-10 runs 2026-08-09T16:00Z to 2026-08-10T16:00Z,
+    so `date(fetched_at) <= target_date` admits everything from 16:00Z to
+    23:59Z on the target date: up to eight hours AFTER the maximum being
+    forecast was already set. 72 real WSSS rows sat in the bias sample
+    that way, and lookahead pulls a measured spread DOWN, which is the
+    direction that makes the model look more certain than it is.
+
+    The same bound read from the other end is what keeps a day-ahead
+    forecast out of a sample the live blend never used: `end` cuts
+    hindsight, `start` cuts lead the trading path did not have.
+    """
+    offset = (
+        get_station(station).utc_offset_hours
+        if isinstance(station, str)
+        else station.utc_offset_hours
+    )
+    midnight = datetime(
+        target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc
+    )
+    start = midnight - timedelta(hours=offset)
+    return start, start + timedelta(days=1)
+
+
 # --- Observation source ranking -------------------------------------------
 # Most markets settle on Wunderground's station history, which is the
 # airport METAR record ("metar_daily_max", ingested by clients/metar_client
