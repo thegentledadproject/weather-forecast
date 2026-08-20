@@ -80,8 +80,10 @@ executor.py (local)
 backtest/resolution.py (local) -- for the settlement-source fallback
     below. A LIVE module importing from backtest/ deserves the raised
     eyebrow, so: bucket_for_temp() and resolution_exit_price() are pure
-    functions over (temperature, bucket bounds, edge mode) and import
-    nothing but math, datetime and config. Writing a second copy here
+    functions over (temperature, bucket bounds, edge mode), touching only
+    math and config. (The module also imports backtest/settings.py, but
+    solely for observation_visible(), which is a backtest-only lookahead
+    guard and is not called from here.) Writing a second copy here
     is the actually dangerous option -- bucket_for_temp() deliberately
     avoids round() because banker's rounding disagrees with
     probability.py on exactly the half-degree bucket edges, and a
