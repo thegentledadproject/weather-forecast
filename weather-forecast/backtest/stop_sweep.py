@@ -46,6 +46,21 @@ prices, identical entries at the point the stop first matters, and differs
 only in the stop distance. Read the ordering and the spread between rows,
 not the absolute level of any one of them.
 
+WHAT STOP_LOSS_PCT MEANS CHANGED ON 2026-08-20
+----------------------------------------------
+config.STOP_EXEMPT_ABOVE_PRICE now exempts entries at or above 0.45 from
+the stop entirely, so this sweep no longer varies a distance that applies
+to every position -- it varies one that applies inside [LOTTERY_PRICE_THRESHOLD,
+STOP_EXEMPT_ABOVE_PRICE). Rows produced before that commit are NOT
+comparable to rows produced after it, and the per-station table in the
+first run below is a reading of the OLD, unconditional stop.
+
+That also retires the specific puzzle in the first run: WMKK scoring best
+at the tightest distance. Conditioning the stop on entry price was never
+one of the settings this tool sweeps, and the paper book measured directly
+against settlement says WMKK's stop is 83% precise below 0.30 and 33% at
+or above 0.45. Sweeping one number across both bands averages those.
+
 THE ALIAS GOTCHA
 ----------------
 config.TIGHTENED_STOP_LOSS_PCT is written as `= STOP_LOSS_PCT`, which

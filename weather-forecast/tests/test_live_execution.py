@@ -1836,3 +1836,102 @@ def test_a_caller_supplied_client_neither_reads_nor_writes_the_cache(monkeypatch
 
     assert result != ("ok", "cached answer")
     assert wallet_client._collateral_cache["result"] == ("ok", "cached answer")
+
+
+# --------------------------------------------------------------------------
+# executor: the RECORDED exit price is what the order did, not what the
+# book said before it was sent
+# --------------------------------------------------------------------------
+
+def test_live_exit_records_the_fill_price_not_the_pre_trade_quote(monkeypatch, mode, captured):
+    """
+    THE 2026-08-19 GAP. close_position() derived the stored exit price from
+    decision.current_price -- the quote read BEFORE the order was built --
+    and never looked at result.fill_price, though the entry path has always
+    used it. A FOK sell is a worst-price bound, so quote and fill routinely
+    differ by the limit pad, and every live exit was booked at the quote.
+
+    Live case: WSSS 33 YES, 12.5 shares, quote 0.92, limit 0.90. Booked at
+    0.9163 net; if it filled at the limit the position was worth 0.8955 net,
+    overstating that one exit by ~$0.26 on a $1.00 stake.
+    """
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=True, simulated=False, spec=spec,
+            order_id="0xfill", fill_price=0.90, fill_shares=spec.size_shares,
+        ),
+    )
+
+    import risk_manager
+    executor.close_position(make_position(size_shares=12.5), _exit_decision(price=0.92))
+
+    assert len(captured["closed"]) == 1
+    recorded = captured["closed"][0]["exit_price"]
+    assert recorded == pytest.approx(0.90 - risk_manager.taker_fee_per_share(0.90))
+
+
+def test_live_exit_pnl_and_fee_note_describe_the_fill_too(monkeypatch, mode, captured):
+    """
+    The stored `reason` text carries the gross price, the fee and the net
+    P&L. Correcting exit_price while leaving that string built from the
+    stale quote would leave the row disagreeing with itself.
+    """
+    mode("live")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(
+        wallet_client, "submit_order",
+        lambda spec, live: wallet_client.OrderResult(
+            submitted=True, filled=True, simulated=False, spec=spec,
+            order_id="0xfill", fill_price=0.90, fill_shares=spec.size_shares,
+        ),
+    )
+
+    executor.close_position(make_position(size_shares=12.5), _exit_decision(price=0.92))
+
+    reason = captured["closed"][0]["reason"]
+    assert "gross 0.9000" in reason, reason
+    assert "0.9200" not in reason, reason
+
+
+def test_simulation_exit_records_the_tick_aligned_price_not_the_raw_quote(monkeypatch, mode, captured):
+    """
+    Simulation places no order, so there is no fill to read -- its analogue
+    of the fill price is spec.expected_price, the tick-aligned quote the
+    order would actually have been priced at. The entry rung was moved onto
+    that basis on 2026-08-17; recording the raw quote here reopens exactly
+    the entry/exit inconsistency that closed.
+
+    A SELL aligns DOWN, so a 0.925 quote on a 0.01 tick is a 0.92 order.
+    """
+    mode("simulation")
+    stub_book(monkeypatch, tick="0.01")
+    monkeypatch.setattr(wallet_client, "get_client", _explode)
+
+    import risk_manager
+    executor.close_position(
+        make_position(mode="simulation", size_shares=12.5), _exit_decision(price=0.925)
+    )
+
+    assert len(captured["closed"]) == 1
+    recorded = captured["closed"][0]["exit_price"]
+    assert recorded == pytest.approx(0.92 - risk_manager.taker_fee_per_share(0.92))
+
+
+def test_paper_exit_still_records_the_observed_quote(monkeypatch, mode, captured):
+    """
+    Guards the fix against over-reach. Paper places no order at all, so the
+    observed quote IS the whole truth available; there is no spec and no
+    fill to prefer over it.
+    """
+    mode("live")
+    monkeypatch.setattr(wallet_client, "build_exit_order", _explode)
+    monkeypatch.setattr(wallet_client, "submit_order", _explode)
+
+    import risk_manager
+    executor.close_position(make_position(mode="paper"), _exit_decision(price=0.925))
+
+    recorded = captured["closed"][0]["exit_price"]
+    assert recorded == pytest.approx(0.925 - risk_manager.taker_fee_per_share(0.925))

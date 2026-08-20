@@ -726,6 +726,17 @@ def run(
             "EDGE_DECAY_TIGHTEN_HOUR_LOCAL": config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL,
             "TIGHTENED_PROFIT_TAKE_PCT": config.TIGHTENED_PROFIT_TAKE_PCT,
             "TIGHTENED_STOP_LOSS_PCT": config.TIGHTENED_STOP_LOSS_PCT,
+            # The lottery carve-out's two halves. Recorded because
+            # backtest/take_sweep.py VARIES the take across runs, and a
+            # manifest that omitted the constant being swept would label
+            # every row of that sweep identically.
+            "LOTTERY_PRICE_THRESHOLD": config.LOTTERY_PRICE_THRESHOLD,
+            "LOTTERY_PROFIT_TAKE_PCT": config.LOTTERY_PROFIT_TAKE_PCT,
+            "TIGHTENED_LOTTERY_PROFIT_TAKE_PCT": config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT,
+            # The stop carve-out's upper half, for the same reason: it
+            # decides WHICH positions STOP_LOSS_PCT reaches, so a sweep of
+            # that constant means something different on either side of it.
+            "STOP_EXEMPT_ABOVE_PRICE": config.STOP_EXEMPT_ABOVE_PRICE,
             "MAX_SINGLE_CYCLE_MOVE": config.MAX_SINGLE_CYCLE_MOVE,
             "MIN_EXIT_PRICE": config.MIN_EXIT_PRICE,
             "BUCKET_MIN_C": config.BUCKET_MIN_C,
@@ -848,6 +859,18 @@ def _exit_pass(clock, tick, portfolio, prices, last_observed, counters) -> None:
         # gross while live booked them net would overstate every
         # simulated exit by the fee, which is a large fraction of a
         # typical exit's gain.
+        #
+        # "IN PAPER MODE" IS NOW THE LOAD-BEARING HALF OF THAT SENTENCE
+        # (2026-08-19). The rungs no longer agree on which price is the
+        # truth: live records result.fill_price and simulation records
+        # spec.expected_price, because both place an order and a FOK limit
+        # is a worst-price bound rather than a target. Paper places none, so
+        # the quote is all it has -- and a replay has no order path at all,
+        # which is exactly why paper is the rung it must mirror. Matching
+        # live here instead would mean inventing a fill this data cannot
+        # support. Same shape as the ENTRY PRICE PARITY note in
+        # backtest/fill_model.py, which resolves the identical question the
+        # identical way on the other leg.
         gross_exit_price = decision.current_price
         exit_fee_per_share = risk_manager.taker_fee_per_share(gross_exit_price)
         net_exit_price = max(gross_exit_price - exit_fee_per_share, 0.0)
