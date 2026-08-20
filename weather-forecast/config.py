@@ -260,11 +260,26 @@ STATIONS = {
         # 0.1 C precision), NOT on any Wunderground airport page. lat/lon
         # therefore point at the Observatory (urban Tsim Sha Tsui) so every
         # forecast targets the settlement site; the VHHH ICAO is kept only as
-        # the registry key and for reference. The airport (Chek Lap Kok,
-        # marine-exposed) reads systematically cooler than the Observatory's
-        # heat island -- which is why metar_ingest_mode="skip": one biased
-        # proxy reading in the 60%-weight observation blend shifts the
-        # central estimate by whole buckets.
+        # the registry key and for reference.
+        #
+        # THE AIRPORT IS NOT THE SETTLEMENT SITE, AND IT READS WARMER, NOT
+        # COOLER. This comment used to say Chek Lap Kok was "marine-exposed"
+        # and therefore cooler than "the Observatory's heat island". That is
+        # backwards on daily MAXIMA, measured 2026-08-20 over 92 published
+        # days (2026-05, 2026-06, 2025-08) of HKO's own CLMMAXT for both
+        # stations:
+        #
+        #   HKO - HKA   mean -0.915 C,  sd 0.74
+        #   the two sites differ by >= 1.0 C -- a whole bucket -- on 53% of days
+        #
+        # The heat-island argument is about night-time minima; by mid
+        # afternoon the reclaimed-land airport site runs hotter than the
+        # harbourside Observatory. The DECISION (metar_ingest_mode="skip",
+        # one biased proxy reading in the 60%-weight observation blend shifts
+        # the central estimate by whole buckets) was always right. The reason
+        # written beside it was wrong in sign, which is worse than no reason:
+        # it invites a "fix" in the wrong direction, and on 2026-08-20 it
+        # nearly got one.
         display_name="Hong Kong Observatory",
         country="Hong Kong",
         lat=22.3020,

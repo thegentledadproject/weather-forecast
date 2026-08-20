@@ -45,6 +45,41 @@ from clients.official.base import OfficialClient
 HKO_WEATHER_API_URL = "https://data.weather.gov.hk/weatherAPI/opendata/weather.php"
 HKO_CLIMATE_API_URL = "https://data.weather.gov.hk/weatherAPI/opendata/opendata.php"
 
+# WHAT THE MARKET ACTUALLY SETTLES ON, quoted from the event's own
+# resolution text (Gamma, fetched 2026-08-20 for
+# highest-temperature-in-hong-kong-on-august-21-2026):
+#
+#   "the highest temperature recorded by the Hong Kong Observatory ...
+#    specifically the 'Absolute Daily Max (deg. C)' ... in the relevant
+#    'Daily Extract'"  -> https://www.weather.gov.hk/en/cis/climat.htm
+#
+# So the settlement site is the OBSERVATORY, station code "HKO" below, and
+# CLMMAXT is the machine-readable form of that same Daily Extract record.
+#
+# SOURCES CONSIDERED AND REJECTED -- recorded because each one looks
+# plausible enough to be "fixed" into the code later:
+#
+#   station="HKA" (Hong Kong International Airport). A REAL station code
+#     that returns real data, which is what makes it dangerous: swapping it
+#     in produces a working ingest that silently settles on the wrong site.
+#     Measured 2026-08-20 over 92 days, HKO - HKA is -0.915 C and the two
+#     disagree by a whole bucket on 53% of days. It also publishes LATER
+#     than HKO (2026-07 was still empty for HKA while HKO had the full
+#     month), so it is worse on the one axis -- lag -- that might have
+#     justified it. Same trap in rhrread: filter on place ==
+#     "Hong Kong Observatory", never "Chek Lap Kok".
+#
+#   station="CLK". Not a valid CLMMAXT station at all -- the API answers
+#     "Please include valid parameters in API request." Verified
+#     2026-08-20. It is a wind/tide station; it has no temperature series.
+#
+#   rss.weather.gov.hk/rss/CurrentWeather.xml. Byte-for-byte the same
+#     readings as rhrread, wrapped in an HTML table inside CDATA. Strictly
+#     harder to parse for exactly zero new data.
+#
+#   weather.gov.hk/en/wxinfo/currwx/current.htm. robots-disallowed, and
+#     only the human render of rhrread.
+
 # The place name HKO's own APIs use for its principal settlement
 # station, as returned live in both rhrread's temperature.data and
 # (implicitly) the climate record's "HKO" station code.
