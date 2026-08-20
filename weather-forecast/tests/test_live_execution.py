@@ -291,8 +291,17 @@ def test_declines_when_upsizing_is_disabled(monkeypatch):
     assert "LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE is off" in spec.reason
 
 
-def test_upsizing_raises_the_order_to_exactly_the_market_minimum(monkeypatch):
-    """With the flag on, the order is raised to the minimum and no further."""
+def test_upsizing_raises_the_order_to_the_market_minimum_and_no_further(monkeypatch):
+    """
+    With the flag on, the order is raised to the minimum and no further --
+    where "the minimum" means the dollars that still buy 5 shares at the
+    WORST price the order may fill at, not at the expected one.
+
+    This used to assert exactly 5.00 shares / $2.50, which is the sizing
+    that stranded WSSS 32NO on 2026-08-19 (see
+    test_exchange_minimum_survives_a_fill_at_the_padded_limit). At a 0.50
+    ask the pad makes the limit 0.51, so the floor costs 5 x 0.51 = $2.55.
+    """
     monkeypatch.setattr(config, "LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE", True)
     monkeypatch.setattr(config, "LIVE_SIZE_OVERSHOOT_CEILING_USD", 5.0)
     stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
@@ -300,8 +309,10 @@ def test_upsizing_raises_the_order_to_exactly_the_market_minimum(monkeypatch):
     spec = wallet_client.build_entry_order("TOK", 0.50, 1.00)
 
     assert spec.ok, spec.reason
-    assert spec.size_shares == 5.0
-    assert spec.notional_usd == pytest.approx(2.50)
+    assert spec.notional_usd / spec.limit_price >= 5.0
+    # ...and no further: one share-grid step beyond the floor is the most
+    # rounding can add, so anything past that is oversizing.
+    assert spec.notional_usd <= 5.0 * spec.limit_price + spec.expected_price * 0.01
 
 
 def test_shipped_ceiling_admits_the_worst_case_minimum_order(monkeypatch):
@@ -323,6 +334,42 @@ def test_shipped_ceiling_admits_the_worst_case_minimum_order(monkeypatch):
     stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
     spec = wallet_client.build_entry_order("TOK", config.MAX_ENTRY_PRICE, 1.00)
     assert spec.ok, spec.reason
+
+
+def test_exchange_minimum_survives_a_fill_at_the_padded_limit(monkeypatch):
+    """
+    A BUY is submitted in DOLLARS, but the exchange minimum is in SHARES.
+    Sizing those dollars at expected_price leaves zero headroom: one tick of
+    adverse movement inside the pad buys fewer shares than the minimum, and
+    the resulting position CANNOT BE SOLD -- build_exit_order floors the
+    sell size and the book refuses anything under the minimum.
+
+    Not hypothetical. WSSS:2026-08-20:32:NO, 2026-08-19T21:00:36Z:
+
+        LIVE: WSSS 32NO resized -- $1.00 -> $2.25 by the exchange minimum
+        LIVE FILL: WSSS 32NO 4.89 shares @ 0.4600 = $2.25
+
+    $2.25 is 5.00 shares at the 0.45 expected price. It filled at 0.46,
+    inside the one-tick pad, and bought 4.891 -- stranding $2.25 of real
+    money with no working stop-loss until the market resolved.
+
+    The production change that makes this fail: sizing the minimum bump off
+    limit_price rather than expected_price. Sizing the ORDINARY case off
+    expected_price stays correct -- the pad is protection, not a forecast --
+    but a floor denominated in shares has to be funded at the worst price
+    the order can actually fill at.
+    """
+    stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
+
+    spec = wallet_client.build_entry_order("TOK", 0.45, 1.00)
+
+    assert spec.ok, spec.reason
+    shares_at_worst_fill = spec.notional_usd / spec.limit_price
+    assert shares_at_worst_fill >= 5.0, (
+        f"${spec.notional_usd:.2f} fills only {shares_at_worst_fill:.3f} shares at the "
+        f"{spec.limit_price:.4f} limit -- below the 5.0 minimum, so the position "
+        f"could not be sold"
+    )
 
 
 def test_upsizing_still_refuses_past_the_overshoot_ceiling(monkeypatch):
@@ -361,8 +408,11 @@ def test_upsizing_makes_the_real_book_tradeable(monkeypatch, price):
     spec = wallet_client.build_entry_order("TOK", price, 1.00)
 
     assert spec.ok, spec.reason
-    assert spec.size_shares == 5.0
-    assert spec.notional_usd == pytest.approx(5.0 * price)
+    # At or above ~0.33 the pad applies, so the floor is funded at the limit
+    # and costs slightly more than 5 x price. Below that the pad is capped
+    # under one tick and the two coincide.
+    assert spec.notional_usd / spec.limit_price >= 5.0
+    assert spec.notional_usd >= 5.0 * price - 1e-9
     assert spec.notional_usd <= config.LIVE_SIZE_OVERSHOOT_CEILING_USD
 
 
@@ -985,13 +1035,21 @@ def test_the_overshoot_ceiling_binds_on_the_worst_case(monkeypatch):
     Otherwise the pad is a hole in the only cap on trade size: the expected
     cost passes while the price actually payable does not.
     """
-    monkeypatch.setattr(config, "LIVE_SIZE_OVERSHOOT_CEILING_USD", 4.80)
+    # Sits BETWEEN the floor's expected cost (5 x limit) and its worst-case
+    # cost (those shares at the limit), so the expected figure clears the
+    # ceiling and only the payable one does not. Derived rather than typed:
+    # the gap is a function of the pad, and hardcoding it made this test
+    # silently stop exercising its own point when the sizing changed.
+    limit = wallet_client._pad_limit(0.95, "0.01", "BUY")
+    expected_cost = 5.0 * limit
+    monkeypatch.setattr(config, "LIVE_SIZE_OVERSHOOT_CEILING_USD",
+                        expected_cost + 0.01)
     stub_book(monkeypatch, tick="0.01", min_order_size=5.0)
 
     spec = wallet_client.build_entry_order("TOK", 0.95, 1.00)
 
-    assert spec.notional_usd <= 4.80          # expected cost is under the ceiling
-    assert not spec.ok                         # ...but the worst case is not
+    assert spec.notional_usd <= expected_cost + 0.01   # expected cost is under the ceiling
+    assert not spec.ok                                  # ...but the worst case is not
     assert "worst-case" in spec.reason
 
 

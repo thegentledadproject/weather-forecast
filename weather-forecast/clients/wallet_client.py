@@ -568,6 +568,10 @@ def build_entry_order(token_id: str, price: float, size_usd: float) -> OrderSpec
     # price. Sizing off the padded limit would buy fewer shares than the
     # money asked for, on the assumption of a worst case that usually does
     # not happen -- the pad is protection, not a forecast.
+    #
+    # THE EXCHANGE MINIMUM IS THE ONE EXCEPTION, and it is funded at the
+    # limit instead. See _shares_at_worst_fill() below: a floor denominated
+    # in SHARES cannot be sized off a price the fill is not held to.
     limit_price = _pad_limit(expected_price, tick_size, "BUY")
 
     # Round shares UP onto the builder's 2-decimal grid so the submitted
@@ -613,8 +617,42 @@ def build_entry_order(token_id: str, price: float, size_usd: float) -> OrderSpec
         spec.notional_usd = bumped_notional
         return False
 
-    if min_order_size is not None and size_shares < min_order_size:
-        if _bump_to(min_order_size, f"market minimum of {min_order_size} shares"):
+    def _shares_at_worst_fill(notional_usd: float) -> float:
+        """
+        Shares this order delivers if it fills at the padded limit -- the
+        worst price it is allowed to fill at, and therefore the only one a
+        SHARE floor may be checked against.
+
+        A BUY IS SUBMITTED IN DOLLARS, NOT SHARES. submit_order() sends
+        MarketOrderArgs.amount = notional_usd for a BUY and the exchange
+        derives the shares as amount/fill_price, so the share count is an
+        OUTPUT of the fill, not something the order pins down. Sizing the
+        minimum at expected_price leaves zero headroom inside the pad, and
+        one tick of adverse movement lands the position below the floor --
+        where build_exit_order() can never sell it, because the same
+        minimum applies on the way out.
+
+        Not hypothetical. WSSS:2026-08-20:32:NO, 2026-08-19T21:00:36Z:
+        resized $1.00 -> $2.25 as 5.00 shares at 0.45, filled at 0.46,
+        received 4.891. $2.25 of real money with no working stop-loss,
+        exitable only by resolution.
+
+        The cost of funding at the limit is one tick of extra notional on
+        orders that bump -- $2.30 rather than $2.25 here. That is the
+        correct direction to be wrong in: an oversized order is a smaller
+        problem than an unsellable one, and the overshoot ceiling below
+        still bounds it.
+        """
+        return notional_usd / limit_price
+
+    if min_order_size is not None and _shares_at_worst_fill(spec.notional_usd) < min_order_size:
+        # Bump the SHARE count by the pad ratio, so notional_usd stays
+        # size_shares x expected_price. Setting the notional directly would
+        # break that identity, and executor's simulation branch records
+        # exactly those three fields -- size_usd, size_shares, entry_price
+        # -- as one row, whose internal consistency was fixed on 2026-08-17.
+        if _bump_to(min_order_size * limit_price / expected_price,
+                    f"market minimum of {min_order_size} shares"):
             return spec
 
     if spec.notional_usd < ASSUMED_MIN_ORDER_USD:

@@ -987,7 +987,9 @@ LIVE_TRADE_SIZE_USD = 1.0
 # LIVE_TRADE_SIZE_USD stays $1: it is the size ASKED FOR, and it is what
 # entry_manager sizes to. The exchange minimum then raises the order to the
 # smallest legal size for that bucket's price, so actual orders land at
-# roughly $1.55-$3.75 rather than $1. That is not the requested size and is
+# roughly $1.55-$3.86 rather than $1 (the top of that range was $3.75 before
+# the minimum began being funded at the padded limit; see the exposure note
+# below). That is not the requested size and is
 # not treated as if it were -- Position.size_usd records the RESOLVED
 # notional, so P&L, exposure and every report read the real number.
 #
@@ -1016,12 +1018,28 @@ LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE = True
 # stranding a real position is worse than the exposure that opened it.
 #
 # The exposure ceiling admits the concurrent-position limit at the
-# worst-case single trade, and the two stay aligned: at a 5-share minimum
-# the most expensive legal entry is MAX_ENTRY_PRICE x 5 = $3.75, so three
-# of them is exactly $11.25. LIVE_SIZE_OVERSHOOT_CEILING_USD ($5.00) does
-# NOT set the trade size -- it is headroom above that worst case, and only
-# becomes the binding number if a bucket reports a minimum larger than 5
-# shares.
+# worst-case single trade -- and since 2026-08-20 the two are NO LONGER
+# EXACTLY ALIGNED. They used to be: at a 5-share minimum the most expensive
+# legal entry was MAX_ENTRY_PRICE x 5 = $3.75, and three of those is exactly
+# $11.25.
+#
+# WHAT MOVED. A BUY is submitted in dollars while the exchange minimum is in
+# SHARES, so the floor is now funded at the PADDED LIMIT rather than at the
+# expected price (wallet_client._shares_at_worst_fill -- a fill one tick
+# inside the pad used to deliver fewer than 5 shares and strand a position
+# that could never be sold). At MAX_ENTRY_PRICE the floor is therefore 5.14
+# shares costing $3.86, payable at up to $3.96 rather than $3.75. Three of
+# those want $11.87 against an $11.25 cap.
+#
+# LEFT AS IT IS, DELIBERATELY. The third entry gets blocked rather than
+# sized up, which is the same safe direction the 8-share case below relies
+# on, and $11.25 is a blast radius rather than a number the sizing needs to
+# be consistent with. Raising it to $11.87 would be a decision to carry more
+# real exposure, and is the operator's to make, not a bookkeeping tidy-up.
+#
+# LIVE_SIZE_OVERSHOOT_CEILING_USD ($5.00) does NOT set the trade size -- it
+# is headroom above that worst case, and only becomes the binding number if
+# a bucket reports a minimum larger than 5 shares.
 #
 # That is the case to watch. A bucket demanding, say, 8 shares at 0.60
 # would cost $4.80: still under the ceiling, but three of them need $14.40
