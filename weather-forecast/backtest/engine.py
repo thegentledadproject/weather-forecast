@@ -733,6 +733,10 @@ def run(
             "LOTTERY_PRICE_THRESHOLD": config.LOTTERY_PRICE_THRESHOLD,
             "LOTTERY_PROFIT_TAKE_PCT": config.LOTTERY_PROFIT_TAKE_PCT,
             "TIGHTENED_LOTTERY_PROFIT_TAKE_PCT": config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT,
+            # The stop carve-out's upper half, for the same reason: it
+            # decides WHICH positions STOP_LOSS_PCT reaches, so a sweep of
+            # that constant means something different on either side of it.
+            "STOP_EXEMPT_ABOVE_PRICE": config.STOP_EXEMPT_ABOVE_PRICE,
             "MAX_SINGLE_CYCLE_MOVE": config.MAX_SINGLE_CYCLE_MOVE,
             "MIN_EXIT_PRICE": config.MIN_EXIT_PRICE,
             "BUCKET_MIN_C": config.BUCKET_MIN_C,

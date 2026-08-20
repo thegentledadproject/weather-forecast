@@ -539,6 +539,69 @@ LOTTERY_PROFIT_TAKE_PCT = PROFIT_TAKE_PCT
 # silently keeps the old number for half the trading day.
 TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = TIGHTENED_PROFIT_TAKE_PCT
 
+# THE MIRROR OF LOTTERY_PRICE_THRESHOLD: entries AT OR ABOVE this price
+# also skip the percentage stop-loss.
+#
+# The lottery carve-out exempts the cheap end because the stop distance
+# there is sub-tick. This one exempts the expensive end for a different
+# and directly measured reason: up here the stop is simply WRONG most of
+# the times it fires.
+#
+# MEASURED 2026-08-20 on the paper book (2026-08-02..19), scoring every
+# stop that fired against what the position was worth AT SETTLEMENT --
+# "stop precision", the fraction of stops taken on positions that would
+# have LOST anyway. A stop that fires on an eventual winner is a false
+# positive. WMKK, the largest single-station book at 37 closed positions:
+#
+#     entry < 0.30        6 stops    83% precise
+#     entry 0.30 - 0.45   3 stops    67% precise
+#     entry >= 0.45       9 stops    33% precise
+#
+# and book-wide over all 11 stations the same fall, monotone:
+# 0.15-0.30 78% (n=40), 0.30-0.45 62% (n=21), 0.45-0.60 44% (n=18),
+# 0.60+ 29% (n=21). Ten of eleven stations show a gain from dropping the
+# stop on the >= 0.45 cut; only RJTT does not (n=3, and RJTT is 0/7 at
+# settlement over the whole window).
+#
+# The mechanism is the risk unit. A NO at 0.55 has a risk unit of 0.45,
+# so STOP_LOSS_PCT buys a 13.5c stop distance -- well inside a bucket's
+# ordinary intraday swing on a day whose maximum has not been set yet.
+# A cheap YES that sags usually IS dying, because the day is drifting
+# away from the bucket it needed; an expensive NO that sags is watching
+# the temperature approach one bucket out of several it can still miss.
+# Settlement is decided by observation, not by the price path, which is
+# why this measurement needs no price history and is untouched by the
+# price-store coverage gap that caveats every replay number.
+#
+# WHAT THIS IS WORTH, and it is NOT the headline. WMKK's nine stops at
+# entry >= 0.45 realized -72.19 USD against +51.00 held to settlement,
+# but "held" is not what removing a stop buys: those positions would
+# still have hit their take-profit on the way up. Scoring winners at
+# their take-profit target and losers at zero gives +47.64 (at today's
+# tightened 0.25 take) to +71.37 (at the loose 0.50) on 176.21 USD of
+# stake -- enough to move the WMKK book from -7.1% to roughly +4%.
+#
+# WHY 0.45 AND NOT 0.50. 0.50 is where the risk unit flips from entry
+# price to (1 - entry), and putting the boundary exactly there would
+# entangle this carve-out with that flip -- see [[risk-unit-thresholds]]
+# and the no-op boundary it documents. 0.45 sits below it, is where the
+# measured precision has already fallen under a coin flip, and is a
+# band edge in the analysis rather than a fitted optimum. Nothing here
+# separates 0.45 from 0.40 or 0.50; the evidence is the ORDERING.
+#
+# THIS DOES NOT CONTRADICT backtest/stop_sweep.py, whose first run said
+# WMKK scores best at the TIGHTEST distance. That sweep varies one stop
+# distance uniformly across all entry prices and re-decides its own
+# entries over a peak-blind window. It never tested conditioning the
+# stop on entry price, which is the only thing changed here.
+#
+# THE HONEST LIMITS: nine stops over seven days at WMKK, eighteen at
+# 0.45-0.60 book-wide. A day-level bootstrap of the held delta on the
+# WMKK cut is positive in every resample, but that interval is over the
+# upper bound, not over what the change actually buys. Set this to 1.01
+# to disable the carve-out entirely and restore the old behaviour.
+STOP_EXEMPT_ABOVE_PRICE = 0.45
+
 # Hard ceiling on entry price. Above this, a bought bucket stops behaving
 # like a position and starts behaving like a bond with a stop-loss on it:
 #

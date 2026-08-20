@@ -8,9 +8,24 @@ live price movement -- independent of whether the underlying weather
 outcome has resolved yet.
 
 Two mechanisms, checked in priority order:
-  1. Hard stop-loss from entry -- a safety net that always applies. No
-     "let it run" logic should override cutting a loss past this bar.
-  2. Fixed profit-take -- the only upside exit.
+  1. Hard stop-loss from entry. It does NOT always apply: two price
+     bands are exempt from it, config.LOTTERY_PRICE_THRESHOLD below and
+     config.STOP_EXEMPT_ABOVE_PRICE above. Within the band it does cover,
+     no "let it run" logic overrides cutting a loss past this bar.
+  2. Fixed profit-take -- the only upside exit, and the one exit that
+     applies at every entry price.
+
+THE STOP NOW COVERS ONE BAND, NOT EVERY POSITION (upper half added
+2026-08-20). Both exemptions come from the same finding read at its two
+ends: the stop is a price-noise filter, and it is only worth having where
+the noise it filters is smaller than the move it reacts to. Below 0.15
+the threshold distance is under Polymarket's 1-cent tick, so it fires on
+book wobble. At 0.45 and above the distance is large in cents but small
+against a bucket's intraday range before the day's maximum is set, so it
+fires on positions that go on to WIN -- measured at 33% precision against
+settlement at WMKK, versus 83% below 0.30, and falling monotonically with
+entry price across all 11 stations. config.STOP_EXEMPT_ABOVE_PRICE carries
+the full measurement, the sizing of what it buys, and its limits.
 
 Both tighten after the edge-decay hour (config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL,
 10:00 local) -- consistent with the edge-decay analysis: once the morning's
@@ -231,8 +246,29 @@ def evaluate_exit(
     # peak that may itself be one tick of noise.
     is_lottery = position.entry_price < config.LOTTERY_PRICE_THRESHOLD
 
+    # The mirror carve-out (config.STOP_EXEMPT_ABOVE_PRICE, 2026-08-20).
+    # Expensive entries skip the stop too, for the opposite reason: not
+    # that its distance is too small to mean anything, but that it is
+    # large enough to be triggered by an ordinary intraday swing on a day
+    # whose maximum has not been set yet. Scored against settlement on
+    # the paper book, the stop's precision falls monotonically with entry
+    # price -- 83% below 0.30, 33% at or above 0.45 at WMKK -- so up here
+    # it fires on eventual WINNERS two times in three. The numbers, the
+    # mechanism and the limits are all in config.py above the constant.
+    #
+    # Downside protection for these is unchanged in kind from the lottery
+    # case: resolution detection in position_manager still closes them,
+    # and MAX_ENTRY_PRICE still caps how much stake can be at risk.
+    is_stop_exempt_high = position.entry_price >= config.STOP_EXEMPT_ABOVE_PRICE
+
     # 1. Hard stop-loss -- always checked first, overrides everything else.
-    if not is_lottery and (position.entry_price - current_price) >= thresholds["stop_loss_pct"] * unit:
+    #    NOT "a safety net that always applies": there are now two price
+    #    bands where it does not apply at all. See the module docstring.
+    if (
+        not is_lottery
+        and not is_stop_exempt_high
+        and (position.entry_price - current_price) >= thresholds["stop_loss_pct"] * unit
+    ):
         return ExitDecision(
             position_id=position.position_id,
             should_exit=True,
