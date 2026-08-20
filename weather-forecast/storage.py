@@ -402,6 +402,54 @@ def count_observations_from_source(station_icao: str, source: str) -> int:
     return int(row[0]) if row else 0
 
 
+def _forecast_means_in_local_day(station_icao: str) -> Dict[date, float]:
+    """
+    Per target date, the mean of the forecasts ISSUED DURING THAT
+    STATION'S OWN LOCAL TARGET DAY -- the set the live blend actually
+    averages, and the single definition both public callers below share.
+
+    THE WINDOW REPLACED A UTC DATE COMPARISON, AND IT CUTS BOTH ENDS.
+    `date(fetched_at) <= target_date` was wrong in two ways at once once
+    day-ahead forecasts started being stored (2026-08-21):
+
+      * its upper end leaked HINDSIGHT. A UTC+8 day ends at 16:00Z, so
+        every row fetched 16:00-23:59Z on the target date had already seen
+        the maximum it "forecast". 72 real WSSS rows qualified, and
+        dropping them moved that station's measured spread 0.6437 ->
+        0.6931 -- the lookahead was making the model look MORE certain,
+        which is the dangerous direction (see config.SPREAD_FLOOR_C).
+
+      * it had no lower end at all, so a 41h-lead day-ahead row would be
+        averaged into the same mean as the 17h row the blend used. The
+        bias correction would then be fitted on a forecast set nobody
+        trades on -- exactly the drift forecast_means_by_date() warns
+        about below.
+
+    config.local_day_bounds_utc() owns the arithmetic; spread_audit.py
+    measures against the same bound, so "lookahead" and "negative lead"
+    are one concept with one implementation.
+    """
+    station = config.get_station(station_icao)
+    buckets: Dict[date, List[float]] = {}
+    for target_date_iso, fetched_at, temp_c in forecast_rows_with_fetch_time(
+        station_icao
+    ):
+        try:
+            target_date = date.fromisoformat(target_date_iso)
+            fetched = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+        except ValueError:
+            # A row we cannot place in time cannot be shown to be free of
+            # lookahead, so it does not get the benefit of the doubt.
+            continue
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        start, end = config.local_day_bounds_utc(station, target_date)
+        if not (start <= fetched < end):
+            continue
+        buckets.setdefault(target_date, []).append(temp_c)
+    return {d: sum(v) / len(v) for d, v in buckets.items()}
+
+
 def forecast_error_samples(station_icao: str, source: str) -> List[float]:
     """
     One (forecast - settled truth) error in degrees C per target date this
@@ -434,26 +482,20 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
     on the live path: no blended forecast that day, so no error to measure.
     The pair stays consistent in both directions.
     """
-    excluded = tuple(config.FORECAST_SOURCES_EXCLUDED_BY_STATION.get(station_icao, ()))
-    exclusion_sql = ""
-    params = [station_icao, source]
-    if excluded:
-        exclusion_sql = f"  AND f.source NOT IN ({','.join('?' * len(excluded))}) "
-        params.extend(excluded)
-
     with _db() as conn:
         rows = conn.execute(
-            "SELECT o.max_temp_c, AVG(f.max_temp_c) "
-            "FROM observations o JOIN forecasts f "
-            "  ON f.station_icao = o.station_icao AND f.target_date = o.target_date "
-            "WHERE o.station_icao = ? AND o.source = ? "
-            "  AND f.max_temp_c IS NOT NULL AND o.max_temp_c IS NOT NULL "
-            "  AND date(f.fetched_at) <= o.target_date "
-            + exclusion_sql +
-            "GROUP BY o.target_date",
-            params,
+            "SELECT target_date, max_temp_c FROM observations "
+            "WHERE station_icao = ? AND source = ? AND max_temp_c IS NOT NULL",
+            (station_icao, source),
         ).fetchall()
-    return [float(forecast_mean) - float(observed) for observed, forecast_mean in rows]
+    truth = {str(r[0]): float(r[1]) for r in rows}
+
+    means = _forecast_means_in_local_day(station_icao)
+    return [
+        mean - truth[target_date.isoformat()]
+        for target_date, mean in means.items()
+        if target_date.isoformat() in truth
+    ]
 
 
 def forecast_means_by_date(station_icao: str) -> Dict[date, float]:
@@ -479,31 +521,49 @@ def forecast_means_by_date(station_icao: str) -> Dict[date, float]:
     drift, and a bias measured over a different forecast set than the one
     the estimate blends is not the number anybody thinks it is.
     """
+    return _forecast_means_in_local_day(station_icao)
+
+
+def forecast_rows_with_fetch_time(station_icao: str) -> List[Tuple[str, str, float]]:
+    """
+    Every usable stored forecast for one station as
+    (target_date, fetched_at, max_temp_c), UNAGGREGATED and with no
+    lookahead filter of its own.
+
+    THE TWO OMISSIONS ARE THE POINT, and neither is a relaxation.
+    forecast_error_samples() and forecast_means_by_date() both AVG per
+    target date and both cut lookahead at `date(fetched_at) <= target_date`
+    -- a UTC calendar comparison. spread_audit.py needs to re-average the
+    subset of rows that existed at a given LEAD, measured against the end
+    of the station's own local day, so it needs the fetch times the AVG
+    throws away and a cutoff strictly tighter than the UTC one (a station
+    at UTC+8 finishes its day at 16:00Z, so 16:00Z-23:59Z on the target
+    date is same-calendar-day and still lookahead). Handing back rows and
+    letting the caller cut is the only way to get that; the caller is
+    responsible for applying a non-negative lead, and its tests pin it.
+
+    What is NOT delegated is WHICH FORECASTS COUNT. The
+    FORECAST_SOURCES_EXCLUDED_BY_STATION filter is applied here, for the
+    reason forecast_means_by_date() gives at length: two copies of that
+    rule drift, and a spread measured over a different forecast set than
+    the one blend_central_estimate() averages is not the number anybody
+    thinks it is.
+    """
     excluded = tuple(config.FORECAST_SOURCES_EXCLUDED_BY_STATION.get(station_icao, ()))
     exclusion_sql = ""
-    params: list = [station_icao]
+    params = [station_icao]
     if excluded:
-        exclusion_sql = f"  AND f.source NOT IN ({','.join('?' * len(excluded))}) "
+        exclusion_sql = f"  AND source NOT IN ({','.join('?' * len(excluded))}) "
         params.extend(excluded)
 
     with _db() as conn:
         rows = conn.execute(
-            "SELECT f.target_date, AVG(f.max_temp_c) "
-            "FROM forecasts f "
-            "WHERE f.station_icao = ? "
-            "  AND f.max_temp_c IS NOT NULL "
-            "  AND date(f.fetched_at) <= f.target_date "
-            + exclusion_sql +
-            "GROUP BY f.target_date",
+            "SELECT target_date, fetched_at, max_temp_c FROM forecasts "
+            "WHERE station_icao = ? AND max_temp_c IS NOT NULL "
+            + exclusion_sql,
             params,
         ).fetchall()
-
-    out: Dict[date, float] = {}
-    for target_date, forecast_mean in rows:
-        if forecast_mean is None:
-            continue
-        out[date.fromisoformat(str(target_date))] = float(forecast_mean)
-    return out
+    return [(str(r[0]), str(r[1]), float(r[2])) for r in rows]
 
 
 def save_settled_bucket(

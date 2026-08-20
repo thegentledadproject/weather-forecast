@@ -42,21 +42,28 @@ def gather_forecasts(station) -> list:
     Step A: pull every available forecast source for this station, skipping
     failures silently.
 
-    STORES everything fetched, RETURNS only what this station blends. The two
-    differ where config.FORECAST_SOURCES_EXCLUDED_BY_STATION names a source
-    that is wrong at this station (RKSI/GFS runs 3-7C cold) -- collection
-    continues so the exclusion stays re-checkable against accruing data, while
-    the caller's central estimate stops reading it.
+    STORES everything fetched, RETURNS only what this station blends TODAY.
+    The two now differ in two ways:
+
+      * config.FORECAST_SOURCES_EXCLUDED_BY_STATION names a source that is
+        wrong at this station (RKSI/GFS runs 3-7C cold) -- collection
+        continues so the exclusion stays re-checkable against accruing
+        data, while the caller's central estimate stops reading it.
+
+      * Open-Meteo returns three days per request and all three are now
+        stored (see openmeteo_client._fetch_daily_max_series). ONLY
+        local_today's rows are returned.
+
+    THAT SECOND FILTER IS LOAD-BEARING. This return value goes straight
+    into calibration.blend_central_estimate(), which averages whatever
+    list it is handed and has no target-date filter of its own. Letting a
+    day-ahead row through would blend tomorrow's weather into today's
+    central estimate, and therefore into today's bucket probabilities and
+    today's orders. tests/test_forecast_lead_window.py pins it.
     """
     forecasts = []
-
-    ecmwf = openmeteo_client.get_ecmwf_forecast(station)
-    if ecmwf:
-        forecasts.append(ecmwf)
-
-    gfs = openmeteo_client.get_gfs_forecast(station)
-    if gfs:
-        forecasts.append(gfs)
+    forecasts.extend(openmeteo_client.get_ecmwf_forecast_series(station))
+    forecasts.extend(openmeteo_client.get_gfs_forecast_series(station))
 
     official = get_official_client(station.official_client_key)
     official_forecast = official.get_24hr_forecast(station)
@@ -66,7 +73,9 @@ def gather_forecasts(station) -> list:
     for f in forecasts:
         storage.save_forecast(f)
 
-    return config.blendable_forecasts(station.icao, forecasts)
+    today = config.local_today(station)
+    todays = [f for f in forecasts if f.target_date == today]
+    return config.blendable_forecasts(station.icao, todays)
 
 
 def gather_same_day_signal(station) -> str:

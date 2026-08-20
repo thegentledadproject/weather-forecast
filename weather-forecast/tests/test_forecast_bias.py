@@ -233,8 +233,12 @@ def test_forecast_error_samples_query(tmp_path, monkeypatch):
     The SQL itself, against a real sqlite file -- the one piece of this
     that no amount of stubbing exercises. Pins the three things the query
     decides: per-date forecast MEAN (not one row per forecast), only the
-    station's own settlement source, and no forecast fetched after the day
-    it claims to predict.
+    station's own settlement source, and no forecast fetched outside the
+    station's own local target day.
+
+    WSSS (UTC+8) rather than a synthetic station: the window is a fact
+    about the station's timezone, so these rows now need a real one. Its
+    2026-08-01 runs 2026-07-31T16:00Z to 2026-08-01T16:00Z.
     """
     db = tmp_path / "t.db"
     monkeypatch.setattr(config, "DB_PATH", str(db))
@@ -244,21 +248,21 @@ def test_forecast_error_samples_query(tmp_path, monkeypatch):
     conn.execute("CREATE TABLE forecasts (station_icao TEXT, source TEXT, target_date TEXT, "
                  "max_temp_c REAL, fetched_at TEXT, raw_note TEXT)")
     # Aug 1: settled 32.0; forecasts 30.0 + 31.0 -> mean 30.5 -> error -1.5
-    conn.execute("INSERT INTO observations VALUES ('X','2026-08-01',32.0,'metar_daily_max')")
-    conn.execute("INSERT INTO forecasts VALUES ('X','a','2026-08-01',30.0,'2026-07-31T00:00:00+00:00','')")
-    conn.execute("INSERT INTO forecasts VALUES ('X','b','2026-08-01',31.0,'2026-08-01T05:00:00+00:00','')")
+    conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-01',32.0,'metar_daily_max')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','a','2026-08-01',30.0,'2026-07-31T22:00:00+00:00','')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','b','2026-08-01',31.0,'2026-08-01T05:00:00+00:00','')")
     # Fetched two days LATE -- it has seen the day it "forecasts". Excluded.
-    conn.execute("INSERT INTO forecasts VALUES ('X','c','2026-08-01',32.0,'2026-08-03T00:00:00+00:00','')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','c','2026-08-01',32.0,'2026-08-03T00:00:00+00:00','')")
     # Aug 2: settled 30.0; forecast 30.0 -> error 0.0
-    conn.execute("INSERT INTO observations VALUES ('X','2026-08-02',30.0,'metar_daily_max')")
-    conn.execute("INSERT INTO forecasts VALUES ('X','a','2026-08-02',30.0,'2026-08-02T00:00:00+00:00','')")
+    conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-02',30.0,'metar_daily_max')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','a','2026-08-02',30.0,'2026-08-02T00:00:00+00:00','')")
     # Aug 3's observation is from the wrong source -- not settlement truth.
-    conn.execute("INSERT INTO observations VALUES ('X','2026-08-03',25.0,'open_meteo')")
-    conn.execute("INSERT INTO forecasts VALUES ('X','a','2026-08-03',31.0,'2026-08-03T00:00:00+00:00','')")
+    conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-03',25.0,'open_meteo')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','a','2026-08-03',31.0,'2026-08-03T05:00:00+00:00','')")
     conn.commit()
     conn.close()
 
-    assert sorted(storage.forecast_error_samples("X", "metar_daily_max")) == [-1.5, 0.0]
+    assert sorted(storage.forecast_error_samples("WSSS", "metar_daily_max")) == [-1.5, 0.0]
 
 
 def test_forecast_error_samples_skips_excluded_sources(tmp_path, monkeypatch):
@@ -273,7 +277,7 @@ def test_forecast_error_samples_skips_excluded_sources(tmp_path, monkeypatch):
     db = tmp_path / "t.db"
     monkeypatch.setattr(config, "DB_PATH", str(db))
     monkeypatch.setattr(
-        config, "FORECAST_SOURCES_EXCLUDED_BY_STATION", {"X": ("cold_model",)}
+        config, "FORECAST_SOURCES_EXCLUDED_BY_STATION", {"WSSS": ("cold_model",)}
     )
     import sqlite3
     conn = sqlite3.connect(str(db))
@@ -282,17 +286,17 @@ def test_forecast_error_samples_skips_excluded_sources(tmp_path, monkeypatch):
                  "max_temp_c REAL, fetched_at TEXT, raw_note TEXT)")
     # Settled 32.0. Good source says 31.0 (error -1.0); the excluded one says
     # 26.0, which would drag the pair's mean to 28.5 and the error to -3.5.
-    conn.execute("INSERT INTO observations VALUES ('X','2026-08-01',32.0,'metar_daily_max')")
-    conn.execute("INSERT INTO forecasts VALUES ('X','good','2026-08-01',31.0,'2026-07-31T00:00:00+00:00','')")
-    conn.execute("INSERT INTO forecasts VALUES ('X','cold_model','2026-08-01',26.0,'2026-07-31T00:00:00+00:00','')")
+    conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-01',32.0,'metar_daily_max')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','good','2026-08-01',31.0,'2026-07-31T22:00:00+00:00','')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','cold_model','2026-08-01',26.0,'2026-07-31T22:00:00+00:00','')")
     # A date whose ONLY forecast is the excluded source drops out entirely --
     # it does not fall back the way config.blendable_forecasts() does.
-    conn.execute("INSERT INTO observations VALUES ('X','2026-08-02',30.0,'metar_daily_max')")
-    conn.execute("INSERT INTO forecasts VALUES ('X','cold_model','2026-08-02',24.0,'2026-08-01T00:00:00+00:00','')")
+    conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-02',30.0,'metar_daily_max')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','cold_model','2026-08-02',24.0,'2026-08-01T22:00:00+00:00','')")
     conn.commit()
     conn.close()
 
-    assert storage.forecast_error_samples("X", "metar_daily_max") == [-1.0]
+    assert storage.forecast_error_samples("WSSS", "metar_daily_max") == [-1.0]
 
 
 def test_stations_without_an_exclusion_are_untouched(tmp_path, monkeypatch):
@@ -307,12 +311,12 @@ def test_stations_without_an_exclusion_are_untouched(tmp_path, monkeypatch):
     conn.execute("CREATE TABLE observations (station_icao TEXT, target_date TEXT, max_temp_c REAL, source TEXT)")
     conn.execute("CREATE TABLE forecasts (station_icao TEXT, source TEXT, target_date TEXT, "
                  "max_temp_c REAL, fetched_at TEXT, raw_note TEXT)")
-    conn.execute("INSERT INTO observations VALUES ('X','2026-08-01',32.0,'metar_daily_max')")
-    conn.execute("INSERT INTO forecasts VALUES ('X','a','2026-08-01',30.0,'2026-07-31T00:00:00+00:00','')")
+    conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-01',32.0,'metar_daily_max')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','a','2026-08-01',30.0,'2026-07-31T22:00:00+00:00','')")
     conn.commit()
     conn.close()
 
-    assert storage.forecast_error_samples("X", "metar_daily_max") == [-2.0]
+    assert storage.forecast_error_samples("WSSS", "metar_daily_max") == [-2.0]
 
 
 # --- which sources reach the blend ----------------------------------------

@@ -28,8 +28,35 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _fetch_daily_max(url: str, station: StationConfig, source_label: str, timeout: int = 10) -> Optional[PointForecast]:
-    """Shared logic for ECMWF/GFS single-model daily-max fetch, for a given station."""
+def _fetch_daily_max_series(
+    url: str, station: StationConfig, source_label: str, timeout: int = 10
+) -> List[PointForecast]:
+    """
+    Shared logic for the ECMWF/GFS single-model daily-max fetch: ONE
+    PointForecast per forecast day the API returned, from local_today
+    forward, in date order.
+
+    THE EXTRA DAYS WERE ALWAYS BEING PAID FOR. `forecast_days: 3` has
+    been in this request from the start and the response was indexed for
+    today alone, so tomorrow and the day after were fetched and thrown
+    away on every cycle at every station. The cost of keeping them is one
+    extra row per source per cycle; the cost of discarding them was that
+    every stored forecast sat in a 14-19h lead band, which made "does
+    forecast lead time affect the error spread?" unanswerable from this
+    database -- see spread_audit.py, which ran on 2026-08-21 and could
+    only report that there was no lead to vary.
+
+    PAST DATES ARE DROPPED, not stored. Open-Meteo's window is built from
+    the coordinates' own timezone and can open a day before
+    config.local_today(station) at the boundary; such a row is an
+    OBSERVATION wearing a forecast's source name, and storing it would put
+    a value with perfect hindsight into the bias sample.
+
+    The caller is responsible for not BLENDING the day-ahead rows --
+    pipeline.gather_forecasts() stores the series and returns only
+    today's, and storage._forecast_means_in_local_day() keeps them out of
+    the measured bias by the same local-day rule.
+    """
     params = {
         "latitude": station.lat,
         "longitude": station.lon,
@@ -49,32 +76,43 @@ def _fetch_daily_max(url: str, station: StationConfig, source_label: str, timeou
         # with the global UTC+8 local_today() would silently mismatch
         # for +9 (Japan/Korea) and +5 (Karachi) stations for part of
         # each day, losing the Tier-1 forecast exactly when it's needed.
-        today_str = config.local_today(station).isoformat()
+        today = config.local_today(station)
+        fetched_at = _now_iso()
 
-        if today_str not in dates:
-            return None
-        idx = dates.index(today_str)
-
-        return PointForecast(
-            station_icao=station.icao,
-            source=source_label,
-            target_date=config.local_today(station),
-            max_temp_c=float(maxes[idx]),
-            fetched_at=_now_iso(),
-        )
+        series = []
+        for date_str, value in zip(dates, maxes):
+            if value is None:
+                continue
+            target_date = date.fromisoformat(date_str)
+            if target_date < today:
+                continue
+            series.append(
+                PointForecast(
+                    station_icao=station.icao,
+                    source=source_label,
+                    target_date=target_date,
+                    max_temp_c=float(value),
+                    fetched_at=fetched_at,
+                )
+            )
+        return series
     except (requests.RequestException, KeyError, ValueError, IndexError) as exc:
         print(f"[openmeteo_client] {source_label} fetch failed for {station.icao}: {exc}")
-        return None
+        return []
 
 
-def get_ecmwf_forecast(station: StationConfig) -> Optional[PointForecast]:
-    """Fetch today's ECMWF IFS HRES daily-max forecast at the station's coordinates."""
-    return _fetch_daily_max(config.OPEN_METEO_ECMWF_URL, station, "open_meteo_ecmwf")
+def get_ecmwf_forecast_series(station: StationConfig) -> List[PointForecast]:
+    """ECMWF IFS HRES daily maxima at the station's coordinates, today forward."""
+    return _fetch_daily_max_series(
+        config.OPEN_METEO_ECMWF_URL, station, "open_meteo_ecmwf"
+    )
 
 
-def get_gfs_forecast(station: StationConfig) -> Optional[PointForecast]:
-    """Fetch today's GFS daily-max forecast at the station's coordinates (cross-check)."""
-    return _fetch_daily_max(config.OPEN_METEO_GFS_URL, station, "open_meteo_gfs")
+def get_gfs_forecast_series(station: StationConfig) -> List[PointForecast]:
+    """GFS daily maxima at the station's coordinates, today forward (cross-check)."""
+    return _fetch_daily_max_series(
+        config.OPEN_METEO_GFS_URL, station, "open_meteo_gfs"
+    )
 
 
 def get_ensemble_spread(station: StationConfig, timeout: int = 10) -> Optional[List[float]]:
