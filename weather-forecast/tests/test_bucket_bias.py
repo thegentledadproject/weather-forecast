@@ -1,5 +1,5 @@
 """
-tests/test_bucket_bias_audit.py
+tests/test_bucket_bias.py
 
 The bucket-derived bias estimator (added 2026-08-20).
 
@@ -7,7 +7,7 @@ Background: entry_manager's bias gate needs (forecast - settled truth) in
 degrees C, and for VHHH that truth is HKO's CLMMAXT extract, which
 publishes a month at a time weeks late. Its observations stop at
 2026-07-31 while its forecasts start 2026-08-06, so the two never overlap
-and forecast_error_samples() returns nothing. bucket_bias_audit measures
+and forecast_error_samples() returns nothing. bucket_bias measures
 the same quantity against the bucket the MARKET settled into instead.
 
 These pin the three things that decide whether the number is honest:
@@ -22,7 +22,7 @@ from datetime import date
 
 import pytest
 
-import bucket_bias_audit as bba
+import bucket_bias as bba
 import calibration
 import config
 
@@ -139,55 +139,174 @@ def test_bounds_come_from_the_event_not_config():
 
 
 # --- the sample and the statistic ------------------------------------------
+#
+# bucket_bias_samples() reads STORAGE now: ingest fetches and judges the
+# settlement once, everything downstream reads the recorded bucket. These
+# stub the two storage reads rather than the network.
+
+def _stub_storage(monkeypatch, forecasts, settled):
+    monkeypatch.setattr(bba.storage, "forecast_means_by_date", lambda icao: forecasts)
+    monkeypatch.setattr(bba.storage, "load_settled_buckets", lambda icao: settled)
+
 
 def test_error_sign_matches_forecast_error_samples(monkeypatch):
     # storage.forecast_error_samples returns forecast - observed, and
     # calibration.bias_stats reads positive as "forecasts run WARM". A
     # forecast of 30.0 against a settlement of 31.5 is COOL, so negative.
-    monkeypatch.setattr(bba.storage, "forecast_means_by_date",
-                        lambda icao: {date(2026, 8, 15): 30.0})
-    conn = _event("2026-08-15")
-    prices = {f"tok-{b}": (0.999 if b == 31 else 0.001) for b in range(27, 38)}
-    errors, skipped, detail = bba.bucket_bias_samples("VHHH", conn, _prices(prices))
+    _stub_storage(monkeypatch,
+                  {date(2026, 8, 15): 30.0},
+                  {date(2026, 8, 15): (31, 27, 37)})
+    errors, skipped, detail = bba.bucket_bias_samples("VHHH")
     assert errors == [pytest.approx(-1.5)]
     assert skipped == []
     assert detail[0][1] == 31
 
 
 def test_censored_settlement_is_skipped_with_a_reason(monkeypatch):
-    monkeypatch.setattr(bba.storage, "forecast_means_by_date",
-                        lambda icao: {date(2026, 8, 15): 30.0})
-    conn = _event("2026-08-15")
-    prices = {f"tok-{b}": (0.999 if b == 37 else 0.001) for b in range(27, 38)}
-    errors, skipped, _ = bba.bucket_bias_samples("VHHH", conn, _prices(prices))
+    _stub_storage(monkeypatch,
+                  {date(2026, 8, 15): 30.0},
+                  {date(2026, 8, 15): (37, 27, 37)})
+    errors, skipped, _ = bba.bucket_bias_samples("VHHH")
     assert errors == []
     assert len(skipped) == 1 and "censored" in skipped[0][1]
 
 
 def test_a_date_with_no_forecast_is_skipped_not_zeroed(monkeypatch):
-    monkeypatch.setattr(bba.storage, "forecast_means_by_date", lambda icao: {})
-    conn = _event("2026-08-15")
-    prices = {f"tok-{b}": (0.999 if b == 31 else 0.001) for b in range(27, 38)}
-    errors, skipped, _ = bba.bucket_bias_samples(
-        "VHHH", conn, _prices(prices), dates=[date(2026, 8, 15)])
+    _stub_storage(monkeypatch, {}, {date(2026, 8, 15): (31, 27, 37)})
+    errors, skipped, _ = bba.bucket_bias_samples("VHHH")
     assert errors == []
     assert len(skipped) == 1 and "forecast" in skipped[0][1]
+
+
+def test_a_date_with_no_settlement_yet_is_skipped_not_zeroed(monkeypatch):
+    _stub_storage(monkeypatch, {date(2026, 8, 15): 30.0}, {})
+    errors, skipped, _ = bba.bucket_bias_samples("VHHH")
+    assert errors == []
+    assert len(skipped) == 1 and "settled bucket" in skipped[0][1]
 
 
 def test_statistic_is_calibrations_not_a_local_copy(monkeypatch):
     # bias_stats is documented as shared on purpose so live and backtest
     # cannot compute it differently. This estimator is a third caller and
     # must not become a third implementation.
-    monkeypatch.setattr(bba.storage, "forecast_means_by_date",
-                        lambda icao: {date(2026, 8, 13): 30.0, date(2026, 8, 15): 32.0})
+    _stub_storage(monkeypatch,
+                  {date(2026, 8, 13): 30.0, date(2026, 8, 15): 32.0},
+                  {date(2026, 8, 13): (31, 27, 37), date(2026, 8, 15): (31, 27, 37)})
+    assert bba.derived_bias_stats("VHHH") == calibration.bias_stats([-1.5, 0.5])
+
+
+def test_derived_stats_on_nothing_is_unmeasured_not_zero(monkeypatch):
+    _stub_storage(monkeypatch, {}, {})
+    bias, n, stderr = bba.derived_bias_stats("VHHH")
+    assert (bias, n, stderr) == (None, 0, None)
+
+
+# --- the ingest -------------------------------------------------------------
+
+def test_ingest_records_settled_days_and_skips_unresolved(monkeypatch, tmp_path):
+    monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
+    bba._last_ingest_by_station.clear()
+
     conn = _token_db({d: {b: f"{d}-{b}" for b in range(27, 38)}
-                      for d in ("2026-08-13", "2026-08-15")})
+                      for d in ("2026-08-16", "2026-08-17")})
     prices = {}
-    for d in ("2026-08-13", "2026-08-15"):
-        for b in range(27, 38):
-            prices[f"{d}-{b}"] = 0.999 if b == 31 else 0.001
-    errors, _, _ = bba.bucket_bias_samples("VHHH", conn, _prices(prices))
-    assert calibration.bias_stats(errors) == calibration.bias_stats([-1.5, 0.5])
+    for b in range(27, 38):                       # 08-16 settled in 31
+        prices[f"2026-08-16-{b}"] = 0.999 if b == 31 else 0.001
+    for b in range(27, 38):                       # 08-17 still trading
+        prices[f"2026-08-17-{b}"] = 0.4 if b == 31 else 0.06
+
+    written = bba.ingest_settled_buckets(
+        ["VHHH"], market_conn=conn, price_fn=_prices(prices), max_lookback_days=3)
+    assert written == 1
+    assert bba.storage.load_settled_buckets("VHHH") == {date(2026, 8, 16): (31, 27, 37)}
+
+
+def test_ingest_caps_new_settlements_per_sweep_and_says_so(monkeypatch, tmp_path, capsys):
+    # The ingest runs inside a trading cycle. A cold start is ~2000 requests
+    # and nine minutes, measured 2026-08-20, on a cycle that runs every
+    # fifteen -- so it takes a bounded bite and reports what it left.
+    monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
+    bba._last_ingest_by_station.clear()
+
+    days = ["2026-08-13", "2026-08-14", "2026-08-15", "2026-08-16", "2026-08-17"]
+    conn = _token_db({d: {b: f"{d}-{b}" for b in range(27, 38)} for d in days})
+    prices = {f"{d}-{b}": (0.999 if b == 31 else 0.001) for d in days for b in range(27, 38)}
+
+    written = bba.ingest_settled_buckets(
+        ["VHHH"], market_conn=conn, price_fn=_prices(prices),
+        max_lookback_days=7, max_per_sweep=2)
+
+    assert written == 2
+    # Newest first: a bounded sweep spends its budget where it matters.
+    assert set(bba.storage.load_settled_buckets("VHHH")) == {
+        date(2026, 8, 17), date(2026, 8, 16)}
+    assert "capped at 2" in capsys.readouterr().out
+
+
+def test_ingest_never_reads_today(monkeypatch, tmp_path):
+    # The local day is not over, and a market that is merely CERTAIN late in
+    # the day looks exactly like a settled one. Today must not be fetched at
+    # all -- not fetched and rejected, not fetched.
+    monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
+    bba._last_ingest_by_station.clear()
+
+    asked = []
+
+    def price_fn(token_id, target_date):
+        asked.append(target_date)
+        return 0.001
+
+    conn = _token_db({"2026-08-18": {b: f"tok-{b}" for b in range(27, 38)}})
+    bba.ingest_settled_buckets(
+        ["VHHH"], market_conn=conn, price_fn=price_fn, max_lookback_days=3)
+    assert date(2026, 8, 18) not in asked
+
+
+def test_ingest_throttles_to_once_per_local_day(monkeypatch, tmp_path):
+    monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
+    bba._last_ingest_by_station.clear()
+
+    calls = []
+
+    def price_fn(token_id, target_date):
+        calls.append(token_id)
+        return 0.001
+
+    conn = _token_db({"2026-08-17": {b: f"tok-{b}" for b in range(27, 38)}})
+    bba.ingest_settled_buckets(["VHHH"], market_conn=conn, price_fn=price_fn,
+                               max_lookback_days=3)
+    first = len(calls)
+    bba.ingest_settled_buckets(["VHHH"], market_conn=conn, price_fn=price_fn,
+                               max_lookback_days=3)
+    assert len(calls) == first
+
+
+def test_one_stations_failure_does_not_stop_the_others(monkeypatch, tmp_path):
+    monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
+    bba._last_ingest_by_station.clear()
+
+    conn = _token_db({"2026-08-17": {b: f"tok-{b}" for b in range(27, 38)}})
+
+    def price_fn(token_id, target_date):
+        return 0.999 if token_id == "tok-31" else 0.001
+
+    # WSSS has no tokens in this store, so it raises inside the loop; VHHH
+    # must still be recorded. An ingest is auxiliary to trading and a single
+    # bad station must never take the sweep down with it.
+    written = bba.ingest_settled_buckets(
+        ["NOPE", "VHHH"], market_conn=conn, price_fn=price_fn, max_lookback_days=3)
+    assert written == 1
+    assert date(2026, 8, 17) in bba.storage.load_settled_buckets("VHHH")
 
 
 # --- the quantization claim -------------------------------------------------

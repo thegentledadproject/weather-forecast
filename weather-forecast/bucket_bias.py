@@ -1,5 +1,5 @@
 """
-bucket_bias_audit.py -- measure a station's forecast bias against the bucket
+bucket_bias.py -- measure a station's forecast bias against the bucket
 the MARKET settled into, when its settlement-grade temperature record is not
 available yet.
 
@@ -128,6 +128,40 @@ SETTLEMENT_LOOKAHEAD_DAYS = 3
 # from settlement onward, so coarse sampling loses nothing it needs.
 FETCH_FIDELITY_MIN = 60
 
+# Source string written into storage.settled_buckets.source. Names the
+# AUTHORITY, not the method: this is what the exchange paid out on, which
+# is a different claim from what the Observatory later publishes, and a
+# reader comparing the two must be able to tell which is which.
+SETTLEMENT_SOURCE = "market_settlement"
+
+# How far back an ingest sweep looks for station-days it has no settlement
+# for. Unlike HKO_INGEST_LOOKBACK_DAYS this does NOT have to outrun a
+# publication lag -- settlements are readable the day after -- so it only
+# has to cover a daemon outage. Two weeks is generous for that and keeps a
+# cold-start sweep to a few hundred requests.
+INGEST_LOOKBACK_DAYS = 14
+
+# Most settlements this sweep will fetch per station, per day.
+#
+# THIS EXISTS BECAUSE THE INGEST RUNS INSIDE A TRADING CYCLE. Establishing
+# one settlement costs 11 requests -- one per bucket -- at a 0.25s floor, so
+# roughly 3 seconds. Steady state that is one day per station and nobody
+# notices. A COLD START is the problem: 13 stations x 14 missing days is
+# ~2000 requests and about nine minutes of a cycle that runs every fifteen,
+# measured 2026-08-20. An auxiliary ingest that can stall exits for nine
+# minutes is not auxiliary.
+#
+# Capped, the backlog drains over several days instead of one, and the daily
+# throttle above means the drain costs one bounded pass per station per day.
+# What is skipped is LOGGED rather than silently dropped -- a coverage cap
+# nobody is told about reads as complete coverage.
+MAX_NEW_SETTLEMENTS_PER_SWEEP = 3
+
+# Per-station throttle, same shape and reasoning as clients/metar_client.py's
+# and hko.py's: one sweep per station per local day is enough, because a
+# settlement is immutable once written.
+_last_ingest_by_station = {}
+
 # sd of a uniform distribution over one bucket width, in bucket widths.
 # 1/sqrt(12). The quantization penalty reported below is this times the
 # bucket width, divided by sqrt(n).
@@ -248,54 +282,55 @@ def bucket_midpoint_c(
 
 def bucket_bias_samples(
     station_icao: str,
-    conn: sqlite3.Connection,
-    price_fn=terminal_price,
     dates: Optional[List[date]] = None,
 ) -> Tuple[List[float], List[Tuple[date, str]], List[Tuple[date, int, float, float]]]:
     """
-    (errors, skipped, detail) for one station.
+    (errors, skipped, detail) for one station, FROM STORAGE ONLY -- no
+    network, no market-data database, cheap enough to call every cycle.
 
-    errors are (forecast_mean - settled midpoint) in degrees C, the SAME
-    signed quantity and the same order of subtraction as
-    storage.forecast_error_samples(), so calibration.bias_stats() reduces
-    them without knowing which source they came from. Positive means the
-    forecasts ran WARM of what settled.
+    THE SPLIT IS THE POINT. ingest_settled_buckets() does the fetching and
+    the settlement judgement once per day and writes the bucket; everything
+    downstream reads that row. A bias measurement that had to make 165 HTTP
+    requests could not run on the live path at all, and a second
+    implementation computing it a slightly different way is exactly the
+    drift storage.forecast_means_by_date()' docstring argues against.
 
-    The forecast term comes from storage.forecast_means_by_date(), which is
-    forecast_error_samples()' own SQL with the observation join removed --
-    same blendable sources, same exclusion list, same
-    `date(fetched_at) <= target_date` lookahead rule.
+    errors are (forecast_mean - settled midpoint) in degrees C: the SAME
+    signed quantity, the same order of subtraction, and the same forecast
+    term as storage.forecast_error_samples(), so calibration.bias_stats()
+    reduces them without knowing which truth they were measured against.
+    Positive means the forecasts ran WARM of what settled.
 
     skipped carries (date, reason) for every date that produced no sample,
-    so the report can say what it did not measure instead of only what it
-    did.
+    so a report can say what it did not measure instead of only what it did.
     """
     station = config.get_station(station_icao)
     edge_mode = getattr(station, "bucket_edge_mode", "half_up")
     forecast_means = storage.forecast_means_by_date(station_icao)
+    settled = storage.load_settled_buckets(station_icao)
 
-    candidates = sorted(dates if dates is not None else forecast_means)
+    candidates = sorted(dates if dates is not None else set(forecast_means) | set(settled))
 
-    errors: List[float] = []
-    skipped: List[Tuple[date, str]] = []
-    detail: List[Tuple[date, int, float, float]] = []
+    errors = []
+    skipped = []
+    detail = []
 
     for target_date in candidates:
         forecast_mean = forecast_means.get(target_date)
         if forecast_mean is None:
             skipped.append((target_date, "no blendable forecast stored for this date"))
             continue
-        try:
-            bucket_c, bounds = settled_bucket(station_icao, target_date, conn, price_fn)
-        except UnresolvedDate as exc:
-            skipped.append((target_date, str(exc)))
+        record = settled.get(target_date)
+        if record is None:
+            skipped.append((target_date, "no settled bucket recorded yet"))
             continue
 
-        midpoint = bucket_midpoint_c(bucket_c, bounds, edge_mode)
+        bucket_c, bucket_min, bucket_max = record
+        midpoint = bucket_midpoint_c(bucket_c, (bucket_min, bucket_max), edge_mode)
         if midpoint is None:
             skipped.append((
                 target_date,
-                f"settled in edge bucket {bucket_c} of {bounds[0]}..{bounds[1]} "
+                f"settled in edge bucket {bucket_c} of {bucket_min}..{bucket_max} "
                 f"-- censored, no midpoint",
             ))
             continue
@@ -304,6 +339,114 @@ def bucket_bias_samples(
         detail.append((target_date, bucket_c, midpoint, forecast_mean))
 
     return errors, skipped, detail
+
+
+def derived_bias_stats(station_icao: str) -> tuple:
+    """
+    This station's forecast bias as (bias_c, n, stderr_c), measured against
+    recorded market settlements instead of against a settlement-grade
+    temperature record.
+
+    Returns (None, 0, None) when nothing has been recorded yet -- what
+    calibration.bias_stats() already produces for an empty sample, and what
+    every caller downstream reads as "unmeasured, therefore not graduated".
+
+    THE STATISTIC IS calibration.bias_stats(), NOT A LOCAL COPY. That
+    function is documented as shared on purpose so the live path and the
+    backtest cannot compute it differently; this is the third caller and
+    must not become the third implementation.
+    """
+    errors, _, _ = bucket_bias_samples(station_icao)
+    return calibration.bias_stats(errors)
+
+
+def ingest_settled_buckets(
+    station_icaos,
+    market_conn=None,
+    price_fn=None,
+    max_lookback_days: int = INGEST_LOOKBACK_DAYS,
+    max_per_sweep: int = MAX_NEW_SETTLEMENTS_PER_SWEEP,
+) -> int:
+    """
+    Record the settled bucket for any recent station-day that does not have
+    one yet. Returns how many rows were written.
+
+    Shaped like clients/official/hko.py's ingest_missing_recent() because it
+    has the same job and the same hazards: it self-throttles to once per
+    station per local day, it treats an unsettled day as an ordinary gap
+    rather than an error, and it never raises into a trading cycle. A market
+    that has not resolved yet is not a failure -- it is tomorrow's row.
+
+    TODAY IS NEVER INGESTED. The local day is not over, and a market that is
+    merely CERTAIN late in the day is indistinguishable from one that has
+    SETTLED, by price alone -- one bucket at 0.999 and the rest at 0.001
+    looks identical either way. Waiting a day costs nothing and removes the
+    only case where the settlement test can be fooled by a live book.
+    """
+    if price_fn is None:
+        price_fn = terminal_price
+
+    owns_conn = market_conn is None
+    saved = 0
+    try:
+        if owns_conn:
+            market_conn = _market_db()
+    except Exception as exc:  # noqa: BLE001 - the store may not exist yet
+        print(f"[bucket_bias] market-data store unavailable, no settlements ingested: {exc}")
+        return 0
+
+    try:
+        for icao in station_icaos:
+            try:
+                station = config.get_station(icao)
+                today = config.local_today(station)
+                if _last_ingest_by_station.get(icao) == today:
+                    continue
+                _last_ingest_by_station[icao] = today
+
+                have = storage.settled_bucket_dates(icao)
+                wanted = [today - timedelta(days=i) for i in range(1, max_lookback_days + 1)]
+                missing = [d for d in wanted if d not in have]
+
+                # Newest first: a bounded sweep should spend its budget on
+                # the days most likely to have settled and most likely to
+                # matter, not on the far end of the lookback.
+                unresolved = 0
+                recorded = 0
+                deferred = 0
+                for target_date in sorted(missing, reverse=True):
+                    if recorded >= max_per_sweep:
+                        deferred = len(missing) - unresolved - recorded
+                        break
+                    try:
+                        bucket_c, bounds = settled_bucket(
+                            icao, target_date, market_conn, price_fn)
+                    except UnresolvedDate:
+                        unresolved += 1
+                        continue
+                    storage.save_settled_bucket(
+                        icao, target_date, bucket_c, bounds[0], bounds[1],
+                        source=SETTLEMENT_SOURCE)
+                    recorded += 1
+                    saved += 1
+
+                if unresolved:
+                    print(
+                        f"[bucket_bias] {icao}: {unresolved} day(s) in the last "
+                        f"{max_lookback_days} have no readable settlement yet -- not saving."
+                    )
+                if deferred > 0:
+                    print(
+                        f"[bucket_bias] {icao}: capped at {max_per_sweep} settlement(s) this "
+                        f"sweep, {deferred} still missing -- they are NOT covered by the bias "
+                        f"below until a later sweep picks them up."
+                    )
+            except Exception as exc:  # noqa: BLE001 - one station must not stop the rest
+                print(f"[bucket_bias] settlement ingest failed for {icao} (continuing): {exc}")
+    finally:
+        if owns_conn and market_conn is not None:
+            market_conn.close()
+    return saved
 
 
 def quantization_stderr_c(n: int, bucket_width_c: float = 1.0) -> Optional[float]:
@@ -320,14 +463,12 @@ def quantization_stderr_c(n: int, bucket_width_c: float = 1.0) -> Optional[float
 
 def print_report(
     station_icao: str,
-    conn: sqlite3.Connection,
-    price_fn=terminal_price,
     detail: bool = True,
     compare: bool = False,
 ) -> None:
     station = config.get_station(station_icao)
     source = station.resolution_grade_source
-    errors, skipped, rows = bucket_bias_samples(station_icao, conn, price_fn)
+    errors, skipped, rows = bucket_bias_samples(station_icao)
     bias, n, stderr = calibration.bias_stats(errors)
 
     print(f"\n=== {station_icao} ({station.display_name}) forecast bias from SETTLED BUCKETS ===")
@@ -378,8 +519,9 @@ def print_report(
                 print("    These are different estimators over possibly different date sets. "
                       "Read the difference as a check on the approximation, not as an error bar.")
 
-    print("\n    NOTHING WAS WRITTEN. This is an estimate against the market's settlement,")
-    print("    not a settlement-grade observation, and it is not stored as one.\n")
+    print("\n    NO OBSERVATION WAS WRITTEN. --ingest records settled BUCKETS in their own")
+    print("    table; the midpoint above is derived at read time and is never stored as a")
+    print("    settlement-grade temperature.\n")
 
 
 if __name__ == "__main__":
@@ -388,6 +530,16 @@ if __name__ == "__main__":
                     "into, for stations whose settlement-grade temperature record lags.")
     parser.add_argument("--station", default="VHHH",
                         help="ICAO to measure (default: VHHH, the station this exists for).")
+    parser.add_argument("--ingest", action="store_true",
+                        help="Fetch and record any missing settlements first. Without this the "
+                             "report reads only what the daemon has already stored.")
+    parser.add_argument("--max-per-sweep", type=int, default=MAX_NEW_SETTLEMENTS_PER_SWEEP,
+                        help=f"Settlements to fetch per station with --ingest (default "
+                             f"{MAX_NEW_SETTLEMENTS_PER_SWEEP}, which is sized for running "
+                             f"inside a trading cycle). Raise it to drain a cold start by hand.")
+    parser.add_argument("--lookback", type=int, default=INGEST_LOOKBACK_DAYS,
+                        help=f"Days back to sweep with --ingest (default {INGEST_LOOKBACK_DAYS}). "
+                             f"Raise it once, for a cold start.")
     parser.add_argument("--no-detail", dest="detail", action="store_false",
                         help="Summary only -- skip the per-date table.")
     parser.add_argument("--compare", action="store_true",
@@ -396,8 +548,9 @@ if __name__ == "__main__":
                              "whose settlement-grade record is actually current.")
     args = parser.parse_args()
 
-    connection = _market_db()
-    try:
-        print_report(args.station, connection, detail=args.detail, compare=args.compare)
-    finally:
-        connection.close()
+    if args.ingest:
+        written = ingest_settled_buckets([args.station], max_lookback_days=args.lookback,
+                                         max_per_sweep=args.max_per_sweep)
+        print(f"[bucket_bias] recorded {written} new settlement(s) for {args.station}.")
+
+    print_report(args.station, detail=args.detail, compare=args.compare)

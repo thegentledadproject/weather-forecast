@@ -300,14 +300,63 @@ def forecast_bias_stats(station_icao: str) -> tuple:
     Returns (None, None, None) if it could not be read at all -- callers
     must treat that as "unknown, therefore not yet graduated", exactly as
     resolution_obs_count()'s None is treated, never as an unbiased zero.
+
+    THE SETTLEMENT-GRADE RECORD IS PREFERRED AND THE FALLBACK IS SECOND ON
+    PURPOSE. A temperature from the source the market settles on is a
+    strictly better measurement than a 1-degree bucket, so a station with
+    both keeps using the former and this fallback changes nothing for it.
+
+    The fallback exists for the case where the preferred record cannot
+    arrive in time to be useful. VHHH settles on HKO's CLMMAXT extract,
+    which publishes a whole month at a time weeks in arrears: its
+    observations stop at 2026-07-31 while its forecasts start 2026-08-06,
+    the ranges are disjoint, and forecast_error_samples() returns an EMPTY
+    list -- not a small sample, nothing. Before 2026-08-20 that left two
+    options, both bad: trade with the bias gate bypassed and the correction
+    silently applying 0.0 (which is what BIAS_GATE_OVERRIDE_STATIONS did),
+    or do not trade for six weeks.
+
+    bucket_bias.derived_bias_stats() measures the same signed quantity
+    against the bucket the market settled into. Validated 2026-08-20 on the
+    two stations whose settlement-grade record IS current: WMKK -1.469 vs
+    -1.442, WSSS -0.171 vs -0.147, both within 0.03C at opposite ends of
+    the bias range.
+
+    ONLY AN EMPTY PREFERRED SAMPLE TRIGGERS IT. A station with three
+    settlement-grade pairs keeps those three and stays gated on them,
+    rather than having them silently replaced by a larger, coarser sample
+    that would graduate it -- mixing the two estimators in one average
+    would produce a number that is neither, and switching on "whichever is
+    bigger" would let the coarse one quietly win everywhere.
     """
     try:
         station = config.get_station(station_icao)
         errors = storage.forecast_error_samples(station_icao, station.resolution_grade_source)
-        return calibration.bias_stats(errors)
+        if errors:
+            return calibration.bias_stats(errors)
     except Exception as exc:  # noqa: BLE001 - KeyError (unregistered) or any storage failure
         print(f"[entry_manager] could not measure forecast bias for {station_icao}: {exc}")
         return None, None, None
+
+    try:
+        import bucket_bias
+        bias, n, stderr = bucket_bias.derived_bias_stats(station_icao)
+    except Exception as exc:  # noqa: BLE001 - the fallback must never be the thing that breaks
+        print(f"[entry_manager] could not derive {station_icao}'s bias from settlements: {exc}")
+        return None, None, None
+
+    if n:
+        log_key = (station_icao, "derived_bias")
+        if log_key not in _collection_only_logged:
+            _collection_only_logged.add(log_key)
+            print(
+                f"[entry_manager] {station_icao} has no settlement-grade forecast/observation "
+                f"pairs, so its bias is measured against MARKET SETTLEMENT instead: "
+                f"{bias:+.3f}C over n={n} (stderr "
+                f"{'unknown' if stderr is None else f'{stderr:.3f}C'}). Bucket-quantized, "
+                f"~0.03C from the settlement-grade estimator where both exist."
+            )
+    return bias, n, stderr
 
 
 def collection_only_reason(

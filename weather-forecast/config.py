@@ -1523,33 +1523,33 @@ MAX_BIAS_STANDARD_ERROR_C = 0.5
 # MIN_RESOLUTION_OBS_BEFORE_ENTRY: a station with no settlement-grade
 # history at all stays blind, and this override cannot open it.
 #
-# VHHH, added 2026-08-20 at the operator's instruction, is the case this
-# exists for. Its bias is not merely noisy, it is UNMEASURABLE and will
-# stay that way for weeks: HKO's CLMMAXT climate dataset publishes a whole
-# month at a time, weeks in arrears, so VHHH's 60 settlement-grade
-# observations stop at 2026-07-31 while its stored forecasts start
-# 2026-08-06. storage.forecast_error_samples joins on target_date, so the
-# intersection is EXACTLY ZERO and no amount of waiting inside the current
-# month changes it (see HKO_INGEST_LOOKBACK_DAYS' note). Every other gated
-# station could earn its way out by collecting; VHHH cannot.
+# THE SET IS EMPTY, AND THAT IS THE OUTCOME WORTH KEEPING.
 #
-# WHAT THIS BUYS AND WHAT IT COSTS. It buys the forward record that the
-# batch backfill will not produce on its own: 243 cycles over 14
-# station-days were blocked with 1-4 candidates each, and none of them can
-# ever be scored because there is no settlement truth for them either.
-# It costs the protection the gate was written for on 2026-08-09, and the
-# blocked candidates carry that failure's exact signature -- NO on the hot
-# buckets (34/33/35/36/37), YES on the cool ones (29/30/31/32), i.e. "the
-# model runs cooler than the market" on every bucket in one direction,
-# which is what a cold forecast bias looks like and what every measured
-# neighbour has (RCSS -1.80, WMKK -1.76, RKPK -1.49, RKSI -1.48,
-# ZGGG -1.17). TREAT VHHH POSITIONS OPENED FROM 2026-08-20 AS TRADES ON AN
-# UNMEASURED BIAS, not as evidence of edge, until August CLMMAXT publishes
-# (~2026-09-16) and the bias can be measured for real.
+# It held VHHH for a few hours on 2026-08-20. VHHH settles on HKO's CLMMAXT
+# extract, which publishes a whole month at a time weeks in arrears, so its
+# observations stopped at 2026-07-31 while its forecasts started 2026-08-06
+# -- disjoint ranges, zero pairs, and no amount of waiting inside the month
+# would change it. Exempting it was the fastest way to let it trade and the
+# worst way: the gate asks "is this bias measured well enough to correct
+# for?", and skipping the question does not answer it. The station traded
+# with ENABLE_FORECAST_BIAS_CORRECTION subtracting 0.0 from forecasts that
+# were, when finally measured, a full degree cool -- about one bucket of
+# misplaced probability mass, every cycle, in one direction. Precisely the
+# 2026-08-09 failure the gate was built for, re-entered voluntarily.
 #
-# REMOVE THE STATION FROM THIS SET once its bias is measured -- leaving it
-# here permanently disables the check that would then have real data.
-BIAS_GATE_OVERRIDE_STATIONS = {"VHHH"}
+# What replaced it: entry_manager.forecast_bias_stats() falls back to
+# bucket_bias.derived_bias_stats(), which measures the same signed quantity
+# against the bucket the MARKET settled into -- available the day after,
+# rather than six weeks later. VHHH now measures -1.027C over n=15 with
+# stderr 0.232C and passes BOTH criteria on its own evidence. The gate is
+# satisfied, not bypassed, which is a different and much better sentence.
+#
+# So this stays as a mechanism and empty as a policy. Before adding a
+# station: the fallback already covers "the settlement-grade record is too
+# slow", which is the only case that has ever come up. An entry here means
+# "trade a bias nobody has measured by any method", and that has no
+# defensible case behind it yet.
+BIAS_GATE_OVERRIDE_STATIONS = set()
 
 
 def bias_gate_is_overridden(station_icao: str) -> bool:

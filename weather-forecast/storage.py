@@ -18,7 +18,7 @@ config.py, models.py (local)
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import config
 from models import PointForecast, ObservedReading, Position
@@ -245,6 +245,46 @@ def _connect() -> sqlite3.Connection:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_loa_ts ON live_order_attempts(kind, ts)")
 
+    # WHICH BUCKET THE MARKET SETTLED INTO, per station-day. DELIBERATELY
+    # NOT `observations`, and the distinction is the whole point.
+    #
+    # `observations` holds TEMPERATURES from a named meteorological source,
+    # and a station's resolution_grade_source rows there are what the bias
+    # gate, the backtest's Brier scoring and position_manager's dead-book
+    # fallback all treat as settlement truth. A bucket is not a temperature:
+    # it is a 1-degree interval, and turning it into a number requires
+    # taking a midpoint, which is an ESTIMATE. Writing that midpoint into
+    # `observations` would make an estimate indistinguishable from a
+    # reading, forever, in the one table where that distinction is load-
+    # bearing.
+    #
+    # So the raw fact is stored -- bucket, and the event bounds that say
+    # whether it is an interior bucket or a censored edge catch-all -- and
+    # the midpoint is derived at read time by whoever needs it, in the open.
+    # Storing the bucket rather than a computed bias also keeps the
+    # evidence: the estimator can change without a re-ingest, and a wrong
+    # number can be traced back to the day that produced it.
+    #
+    # bucket_min_c/bucket_max_c are the LIVE-DERIVED bounds from that day's
+    # discovered token map, never config.STATIONS' -- config's are a
+    # seasonal cross-check that drifts (ten of thirteen stations had by
+    # 2026-08-14, two by 5C), and the bounds are what decide whether a
+    # settlement is usable at all.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settled_buckets (
+            station_icao TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            bucket_c INTEGER NOT NULL,
+            bucket_min_c INTEGER NOT NULL,
+            bucket_max_c INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            recorded_at TEXT NOT NULL,
+            PRIMARY KEY (station_icao, target_date)
+        )
+        """
+    )
+
     # After the ALTER TABLE migration above, so the view is defined against
     # the migrated `positions` shape rather than a short one.
     _ensure_position_economics_view(conn)
@@ -464,6 +504,56 @@ def forecast_means_by_date(station_icao: str) -> Dict[date, float]:
             continue
         out[date.fromisoformat(str(target_date))] = float(forecast_mean)
     return out
+
+
+def save_settled_bucket(
+    station_icao: str,
+    target_date: date,
+    bucket_c: int,
+    bucket_min_c: int,
+    bucket_max_c: int,
+    source: str,
+) -> None:
+    """
+    Record which bucket one station-day's market settled into.
+
+    Idempotent per (station, date): a settlement is immutable history, and
+    re-running the ingest must not multiply rows. REPLACE rather than
+    IGNORE so a bounds correction can be re-recorded, since the bounds come
+    from a discovered token map that a later sweep may read more completely.
+    """
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO settled_buckets "
+            "(station_icao, target_date, bucket_c, bucket_min_c, bucket_max_c, source, recorded_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (station_icao, target_date.isoformat(), int(bucket_c), int(bucket_min_c),
+             int(bucket_max_c), source, datetime.now(timezone.utc).isoformat()),
+        )
+
+
+def load_settled_buckets(station_icao: str) -> Dict[date, Tuple[int, int, int]]:
+    """{target_date: (bucket_c, bucket_min_c, bucket_max_c)} for one station."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT target_date, bucket_c, bucket_min_c, bucket_max_c "
+            "FROM settled_buckets WHERE station_icao = ?",
+            (station_icao,),
+        ).fetchall()
+    return {
+        date.fromisoformat(str(r[0])): (int(r[1]), int(r[2]), int(r[3]))
+        for r in rows
+    }
+
+
+def settled_bucket_dates(station_icao: str) -> set:
+    """The target dates already recorded, so an ingest can skip them cheaply."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT target_date FROM settled_buckets WHERE station_icao = ?",
+            (station_icao,),
+        ).fetchall()
+    return {date.fromisoformat(str(r[0])) for r in rows}
 
 
 def load_forecast_history(station_icao: str, source: str, limit: int = 90) -> List[PointForecast]:

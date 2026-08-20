@@ -467,9 +467,63 @@ def test_override_does_not_leak_to_unlisted_stations(monkeypatch):
     assert reason is not None and "forecast/observation pair" in reason
 
 
-def test_vhhh_is_the_shipped_override_and_is_paper_only():
-    # The actual shipped configuration, not a monkeypatched one.
-    assert config.bias_gate_is_overridden("VHHH")
+def test_the_shipped_override_set_is_empty():
+    # It held VHHH for a few hours on 2026-08-20 and then stopped needing
+    # to: forecast_bias_stats() falls back to a bias measured against
+    # market settlement, so VHHH satisfies the gate instead of skipping it.
+    # A non-empty set here means somebody is trading a bias measured by no
+    # method at all, which is a different and much weaker claim.
+    assert config.BIAS_GATE_OVERRIDE_STATIONS == set()
+    assert not config.bias_gate_is_overridden("VHHH")
+
+
+def test_vhhh_is_paper_only():
     assert "VHHH" not in config.LIVE_TRADING_STATIONS
     assert not config.live_mode_is_permitted("VHHH", "live")
     assert not config.live_mode_is_permitted("VHHH", "simulation")
+
+
+# --- the settlement-derived fallback ---------------------------------------
+
+def test_settlement_grade_pairs_win_when_they_exist(monkeypatch):
+    # A temperature from the record the market settles on beats a
+    # 1-degree bucket, so a station with both must keep using the former.
+    monkeypatch.setattr(storage, "forecast_error_samples", lambda i, s: [-1.0, -1.4, -1.2])
+    import bucket_bias
+    monkeypatch.setattr(bucket_bias, "derived_bias_stats",
+                        lambda i: (99.0, 500, 0.001))
+    bias, n, stderr = entry_manager.forecast_bias_stats("WSSS")
+    assert n == 3 and bias == pytest.approx(-1.2)
+
+
+def test_an_empty_settlement_grade_sample_falls_back(monkeypatch):
+    # VHHH's real situation: forecast_error_samples returns [] because its
+    # observations and its forecasts cover disjoint date ranges.
+    monkeypatch.setattr(storage, "forecast_error_samples", lambda i, s: [])
+    import bucket_bias
+    monkeypatch.setattr(bucket_bias, "derived_bias_stats", lambda i: (-1.027, 15, 0.232))
+    assert entry_manager.forecast_bias_stats("VHHH") == (-1.027, 15, 0.232)
+
+
+def test_the_fallback_still_gates_when_it_measures_nothing(monkeypatch):
+    # No settlement-grade pairs AND no recorded settlements is "unmeasured",
+    # and must reach the gate as such rather than as an unbiased zero.
+    monkeypatch.setattr(storage, "forecast_error_samples", lambda i, s: [])
+    import bucket_bias
+    monkeypatch.setattr(bucket_bias, "derived_bias_stats", lambda i: (None, 0, None))
+    bias, n, stderr = entry_manager.forecast_bias_stats("VHHH")
+    assert n == 0
+    reason = entry_manager.collection_only_reason(
+        "VHHH", GRADUATED_OBS, bias_n=n, bias_stderr=stderr, enforce_bias_quality=True)
+    assert reason is not None and "forecast/observation pair" in reason
+
+
+def test_a_broken_fallback_reads_as_unknown_not_zero(monkeypatch):
+    monkeypatch.setattr(storage, "forecast_error_samples", lambda i, s: [])
+    import bucket_bias
+
+    def boom(icao):
+        raise RuntimeError("market data store is gone")
+
+    monkeypatch.setattr(bucket_bias, "derived_bias_stats", boom)
+    assert entry_manager.forecast_bias_stats("VHHH") == (None, None, None)

@@ -258,6 +258,18 @@ def _ingest_resolution_observations(station_icaos: list) -> None:
     except Exception as exc:  # noqa: BLE001 - ingest is auxiliary to trading
         print(f"[scheduler] HKO observation ingest skipped: {exc}")
 
+    # Which BUCKET each past station-day's market settled into. Not an
+    # observation and not stored as one (see storage.settled_buckets) --
+    # this is what the exchange paid out on, and it is the only measurement
+    # of VHHH's forecast bias available before HKO publishes the month.
+    # Guarded separately for the same reason HKO is: a settlement-fetch
+    # outage must not look like, or be caused by, an observation outage.
+    try:
+        import bucket_bias
+        bucket_bias.ingest_settled_buckets(station_icaos)
+    except Exception as exc:  # noqa: BLE001 - ingest is auxiliary to trading
+        print(f"[scheduler] market settlement ingest skipped: {exc}")
+
 
 def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
     """Forecast -> calibration -> EV -> surfaced opportunities -> exit checks, for one station."""
