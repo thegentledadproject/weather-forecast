@@ -509,6 +509,7 @@ def evaluate_entry(
             token_id=token_id,
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     # Veto 00: entry price ceiling. Above MAX_ENTRY_PRICE the instrument
@@ -659,6 +660,7 @@ def evaluate_entry(
             token_id=token_id,
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     kelly_applied = kelly_raw * config.KELLY_FRACTION
@@ -707,6 +709,7 @@ def evaluate_entry(
             token_id=token_id,
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     depth_capped_usd = min(size_usd, depth_usd * config.MAX_DEPTH_UTILIZATION_PCT)
@@ -724,6 +727,7 @@ def evaluate_entry(
             token_id=token_id,
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     # Re-check slippage and net EV at the ACTUAL recommended size, not the
@@ -745,6 +749,7 @@ def evaluate_entry(
             token_id=token_id,
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     if net_ev_at_size < min_net_ev:
@@ -761,6 +766,7 @@ def evaluate_entry(
             token_id=token_id,
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     return EntryDecision(
@@ -776,6 +782,7 @@ def evaluate_entry(
         token_id=token_id,
         model_prob=ev_result.model_prob,
         raw_edge=ev_result.raw_edge,
+        min_net_ev=min_net_ev,
     )
 
 

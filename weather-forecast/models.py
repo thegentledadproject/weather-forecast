@@ -324,6 +324,16 @@ class EntryDecision:
     # why. None on any decision built without a model behind it.
     model_prob: Optional[float] = None
     raw_edge: Optional[float] = None
+    # The net-EV bar this decision was evaluated against -- evaluate_entry's
+    # min_net_ev, which is a per-scan-window figure rather than a constant.
+    # Carried so that a re-check AFTER the order is resolved (executor's
+    # _resolved_size_ok, which runs at the notional the exchange minimum
+    # forces) can re-run the same test the entry passed instead of a weaker
+    # stand-in. None only on decisions not built by evaluate_entry or its
+    # backtest replica -- manual_trigger, which bypasses the model gates and
+    # so has no bar to carry (it also leaves net_ev_at_size None, which
+    # skips the re-check that reads this).
+    min_net_ev: Optional[float] = None
 
 
 @dataclass
