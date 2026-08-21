@@ -1144,6 +1144,108 @@ def test_an_upsize_that_still_clears_everything_is_allowed(monkeypatch):
     assert "exchange minimum" in note
 
 
+def test_the_approval_bar_is_carried_on_the_decision(monkeypatch, mode, captured):
+    """
+    The bar an entry was approved against is a per-window argument that used
+    to exist only inside evaluate_entry's frame. Nothing downstream could
+    re-run the test it had just performed.
+    """
+    mode("simulation")
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda token_id: 1000.0)
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda token_id, size_usd: 0.01)
+
+    decision = entry_manager.evaluate_entry(_ev(), "TOK", min_net_ev=0.22)
+
+    assert decision.min_net_ev == 0.22
+
+
+def test_a_rejected_decision_also_carries_the_bar_it_missed(monkeypatch, mode, captured):
+    """
+    The field must never mean "unknown" on this path -- if only approvals
+    carried it, a None would be ambiguous between "not set" and "no bar".
+    """
+    mode("simulation")
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda token_id: 1000.0)
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda token_id, size_usd: 0.01)
+
+    decision = entry_manager.evaluate_entry(_ev(), "TOK", min_net_ev=0.95)
+
+    assert not decision.approved
+    assert decision.min_net_ev == 0.95
+
+
+def test_upsized_order_is_rejected_when_net_ev_drops_below_the_approval_bar(monkeypatch):
+    """
+    THE GAP THIS CLOSES. The re-check tested net EV > 0, not net EV >= the
+    bar the entry cleared. A trade approved at a 15% threshold could be
+    resized by the exchange minimum and submitted at +8%, which is a trade
+    nothing ever approved.
+    """
+    decision = make_decision(size_usd=1.00)
+    decision.min_net_ev = 0.15
+    decision.net_ev_at_size = 0.16
+    decision.slippage_at_size_pct = 0.01
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.09)
+
+    ok, note = executor._resolved_size_ok(_spec(3.75), decision)
+
+    assert not ok
+    assert "15%" in note
+
+
+def test_an_upsize_that_still_clears_the_approval_bar_is_allowed(monkeypatch):
+    decision = make_decision(size_usd=1.00)
+    decision.min_net_ev = 0.15
+    decision.net_ev_at_size = 0.30
+    decision.slippage_at_size_pct = 0.01
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.02)
+
+    ok, note = executor._resolved_size_ok(_spec(3.75), decision)
+
+    assert ok
+    assert "exchange minimum" in note
+
+
+def test_a_resolved_net_ev_exactly_on_the_bar_is_allowed(monkeypatch):
+    """
+    entry_manager rejects on `net_ev_at_size < min_net_ev`, so a trade
+    sitting exactly ON the bar is approved. The re-check has to use the same
+    comparison or the two layers disagree about an entry that passed.
+
+    The arithmetic is deliberately in exact binary fractions -- 0.25 -
+    (0.0625 - 0.03125) is 0.21875 with no float slack, so the test is about
+    the comparison rather than about rounding.
+    """
+    decision = make_decision(size_usd=1.00)
+    decision.min_net_ev = 0.21875
+    decision.net_ev_at_size = 0.25
+    decision.slippage_at_size_pct = 0.03125
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.0625)
+
+    ok, note = executor._resolved_size_ok(_spec(3.75), decision)
+
+    assert ok, note
+
+
+def test_a_decision_without_a_carried_bar_says_which_test_it_passed(monkeypatch):
+    """
+    A decision built outside evaluate_entry and its backtest replica carries
+    no bar, so the weaker positive floor is all there is. It must be NAMED
+    rather than applied silently -- an unmarked fallback is the same defect
+    in a quieter form.
+    """
+    decision = make_decision(size_usd=1.00)
+    decision.min_net_ev = None
+    decision.net_ev_at_size = 0.16
+    decision.slippage_at_size_pct = 0.01
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.09)
+
+    ok, note = executor._resolved_size_ok(_spec(3.75), decision)
+
+    assert ok
+    assert "no approval bar" in note
+
+
 def test_a_failed_slippage_recheck_rejects_rather_than_passes(monkeypatch):
     """A re-check that cannot run must not count as a re-check that passed."""
     def boom(t, s):

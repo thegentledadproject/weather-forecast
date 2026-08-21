@@ -236,13 +236,22 @@ def _resolved_size_ok(spec, decision) -> tuple:
     every one of those gates cleared. _price_drift_ok() already re-validates
     PRICE after resolution; nothing re-validated SIZE.
 
-    Only the ABSOLUTE gates are re-run. The original min_net_ev threshold is
-    a per-window figure that does not reach this layer, so the net-EV test
-    here is the weaker "still positive" floor rather than the bar the entry
-    was approved against -- stated plainly because it is a real gap, not a
-    silently equivalent substitute. The two config-driven gates
-    (MAX_ACCEPTABLE_SLIPPAGE_PCT, MAX_DEPTH_UTILIZATION_PCT) are absolute and
-    are re-run exactly as entry_manager runs them.
+    Every gate is re-run at the bar it was originally cleared against. The
+    two config-driven ones (MAX_ACCEPTABLE_SLIPPAGE_PCT,
+    MAX_DEPTH_UTILIZATION_PCT) are absolute and are re-run exactly as
+    entry_manager runs them. The net-EV threshold is NOT absolute -- it is a
+    per-scan-window figure -- so EntryDecision.min_net_ev carries it down
+    from evaluate_entry and the test below uses it.
+
+    That field used to not exist, and this check tested net EV > 0 instead:
+    an entry approved against a 15% bar could be resized by the exchange
+    minimum and submitted at +8%, clearing a test nothing had approved it
+    under. A decision built outside evaluate_entry and its backtest replica
+    carries no bar, so the positive floor remains the fallback -- but the
+    note SAYS SO, because a weaker test applied silently is the same defect
+    in a quieter form. Today that is only manual_trigger, which leaves
+    net_ev_at_size None and skips this test entirely; the fallback exists so
+    a future caller cannot reintroduce the silent version by omission.
 
     Net EV is re-derived rather than recomputed: net_ev = edge/price -
     slippage - fee, and of those only slippage moves with size, so the
@@ -280,13 +289,29 @@ def _resolved_size_ok(spec, decision) -> tuple:
 
     if decision.net_ev_at_size is not None and decision.slippage_at_size_pct is not None:
         net_ev = decision.net_ev_at_size - (slippage - decision.slippage_at_size_pct)
-        if net_ev <= 0:
+        # `<` against the bar, `<=` against the floor -- deliberately not one
+        # expression. entry_manager rejects on `net_ev_at_size < min_net_ev`,
+        # so a trade exactly ON the bar is approved and re-testing it with
+        # `<=` would have this layer refuse an entry the sizing layer passed.
+        # The no-bar fallback keeps `<= 0`, where break-even is not a trade.
+        bar = decision.min_net_ev
+        too_low = net_ev < bar if bar is not None else net_ev <= 0.0
+        if too_low:
+            bar_text = (
+                f"the {bar:.0%} bar it was approved against" if bar is not None
+                else "the positive floor (no approval bar was carried on this decision)"
+            )
             return False, (
                 f"net EV falls to {net_ev:+.1%} at the resolved ${resolved:.2f} "
-                f"(was {decision.net_ev_at_size:+.1%} at ${requested:.2f}) -- the size the "
-                f"exchange forces is not the trade that was approved"
+                f"(was {decision.net_ev_at_size:+.1%} at ${requested:.2f}), under "
+                f"{bar_text} -- the size the exchange forces is not the trade "
+                f"that was approved"
             )
         note += f", slippage {slippage:.1%}, net EV {decision.net_ev_at_size:+.1%} -> {net_ev:+.1%}"
+        if bar is None:
+            note += " (positive floor only -- no approval bar carried)"
+        else:
+            note += f" against a {bar:.0%} bar"
 
     return True, note
 

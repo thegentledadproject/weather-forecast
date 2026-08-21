@@ -182,6 +182,7 @@ def evaluate_entry_sim(
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     # --- Gate 0: Veto 00, entry price ceiling ----------------------------
@@ -254,6 +255,7 @@ def evaluate_entry_sim(
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     kelly_applied = kelly_raw * config.KELLY_FRACTION
@@ -286,6 +288,7 @@ def evaluate_entry_sim(
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     # Cap 3: real order-book depth
@@ -305,6 +308,7 @@ def evaluate_entry_sim(
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     # Re-check slippage and net EV at the ACTUAL recommended size, not the
@@ -327,6 +331,7 @@ def evaluate_entry_sim(
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     # --- Gate 11: net EV at actual size -----------------------------------
@@ -344,6 +349,7 @@ def evaluate_entry_sim(
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
+            min_net_ev=min_net_ev,
         )
 
     # --- Gate 12: approve --------------------------------------------------
@@ -360,6 +366,7 @@ def evaluate_entry_sim(
         token_id=token_id,
         model_prob=ev.model_prob,
         raw_edge=ev.raw_edge,
+        min_net_ev=min_net_ev,
     )
 
 
