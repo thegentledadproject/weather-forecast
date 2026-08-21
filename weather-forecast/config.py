@@ -1062,6 +1062,56 @@ LIVE_TRADING_STATIONS = {"WSSS", "RCSS"}
 # gate results.
 LIVE_TRADE_SIZE_USD = 1.0
 
+# WHAT RAISING THIS CROSSES, IN ORDER. Probed 2026-08-21 against the real
+# book shape (tick 0.01, 5-share minimum) and the live sizing chain, because
+# the constants that bound this one were each derived for a $1 trade and do
+# not all move with it.
+#
+#     ~$3.86   the exchange minimum stops binding; the upsize path in
+#              wallet_client goes quiet and the resolved size is the
+#              requested size again.
+#     $4.00    LIVE_MAX_TOTAL_EXPOSURE_USD ($11.25) stops admitting three
+#              positions. Concurrency silently becomes 2, since the third
+#              entry is blocked rather than sized down.
+#     ~$4.67   Kelly starts binding before the clamp does at the weakest
+#              legal edge (MIN_ABS_RAW_EDGE at price 0.15). Above this the
+#              size is edge-dependent again -- which is the design, and see
+#              the bankroll problem below before deciding that is good news.
+#     $5.00    EVERY live and simulation order is REFUSED at build time.
+#
+# THE $5.00 CLIFF IS THE TRAP. LIVE_SIZE_OVERSHOOT_CEILING_USD is checked in
+# build_entry_order() against resolved notional AND padded worst-case cost,
+# unconditionally -- not only against orders the exchange minimum bumped. So
+# a one-line edit here does not trade bigger, it stops trading, one refused
+# order at a time:
+#
+#     price 0.50:  $4.90 -> builds     $5.00 -> refused (worst case $5.10)
+#     price 0.75:  $4.50 -> builds     $5.00 -> refused (notional $5.00)
+#
+# The pad makes the true cliff price-dependent rather than a single number,
+# so RAISE THE CEILING IN THE SAME CHANGE, and re-derive the ceiling x
+# LIVE_MAX_CONCURRENT_POSITIONS product the exposure note below relies on.
+#
+# THEN THE BANKROLL STOPS BEING AN ABSTRACTION. Past ~$4.67 the binding
+# constraint is Kelly, and Kelly sizes off BANKROLL_USD = $1000, which the
+# comment on that constant says outright is not a funded balance. Measured
+# asks at the weakest legal edge run $4.67-$19.57 across the legal price
+# range; at a 0.10 edge they run $16-$65, and MAX_POSITION_USD permits $150.
+# Live collateral on 2026-08-19 was $17.63. wallet_client's preflight only
+# warns when the balance is under LIVE_TRADE_SIZE_USD, so it stays quiet
+# while Kelly asks for eight times the wallet and lets the exchange issue
+# the refusal instead. BANKROLL_USD has to become the real number before the
+# trade size crosses into the range where Kelly governs.
+#
+# NONE OF THIS IS AN ARGUMENT FOR A PARTICULAR SIZE. It is the list of
+# things that stop being true at $1, kept here because each one fails
+# quietly: a refused order, a third position that never opens, a Kelly
+# fraction of a bankroll that does not exist. What the size should be is a
+# question about measured edge -- and as of 2026-08-21 neither live station
+# passes the beats_market criterion (see LIVE_TRADING_STATIONS above), so
+# the honest reading is that raising it scales a position whose edge over
+# the market is unmeasured rather than demonstrated.
+
 # THE MINIMUM ORDER SIZE IS DENOMINATED IN SHARES, NOT DOLLARS, AND IT
 # BINDS HARD AT $1.
 # --------------------------------------------------------------------------
