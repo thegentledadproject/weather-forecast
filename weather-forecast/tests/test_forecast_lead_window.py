@@ -143,6 +143,35 @@ def test_gather_forecasts_stores_the_day_ahead_rows_but_blends_only_today(
     assert {f.target_date for f in blended} == {date(2026, 8, 10)}
 
 
+def test_the_request_asks_for_four_days(monkeypatch, at_2026_08_10):
+    """
+    THE PARAMETER IS LOAD-BEARING AND NOTHING ELSE PINS IT. Fetches land in
+    UTC hours 21-23, which at UTC+8 is already the next local day, so
+    forecast_days:N reaches targets fetch_day+1..+N. At N=3 the furthest
+    lead to the end of that local day is 67h and spread_audit.py's 72h
+    cutoff can NEVER return a row -- a silent dead end that looks exactly
+    like "not enough data yet" and cannot be fixed by waiting. Raised to 4
+    on 2026-08-24 (~91h) for that reason alone.
+
+    Dropping this back to 3 must fail here rather than quietly re-opening
+    the dead end months later.
+    """
+    seen = {}
+
+    def _capture(*args, **kwargs):
+        seen.update(kwargs.get("params", {}))
+        return _Resp(PAYLOAD)
+
+    monkeypatch.setattr(openmeteo_client.requests, "get", _capture)
+
+    openmeteo_client.get_ecmwf_forecast_series(config.get_station("WSSS"))
+
+    assert seen.get("forecast_days") == 4, (
+        f"expected forecast_days=4, got {seen.get('forecast_days')} -- "
+        "at 3 the 72h lead row is structurally unreachable"
+    )
+
+
 # --- (2) the local-day window ----------------------------------------------
 
 def _db_with(tmp_path, monkeypatch, forecast_rows):

@@ -36,7 +36,7 @@ def _fetch_daily_max_series(
     PointForecast per forecast day the API returned, from local_today
     forward, in date order.
 
-    THE EXTRA DAYS WERE ALWAYS BEING PAID FOR. `forecast_days: 3` has
+    THE EXTRA DAYS WERE ALWAYS BEING PAID FOR. `forecast_days: 3` had
     been in this request from the start and the response was indexed for
     today alone, so tomorrow and the day after were fetched and thrown
     away on every cycle at every station. The cost of keeping them is one
@@ -45,6 +45,24 @@ def _fetch_daily_max_series(
     forecast lead time affect the error spread?" unanswerable from this
     database -- see spread_audit.py, which ran on 2026-08-21 and could
     only report that there was no lead to vary.
+
+    RAISED 3 -> 4 ON 2026-08-24, and the reason is arithmetic, not
+    appetite. Fetches land in UTC hours 21-23, which at UTC+8 is ALREADY
+    the next local day, so forecast_days:N covers local_today..+(N-1) =
+    fetch_day+1..+N. At N=3 the furthest target is fetch_day+3 and the
+    lead to the END of that station's local day is 67h -- so
+    spread_audit.py's 72h cutoff could NEVER return a row, however long
+    the data accrued. Waiting could not fix it; only this could. N=4
+    reaches ~91h, which clears 72h with room for the +9 stations whose
+    local day ends earlier in UTC. Verified 2026-08-24 that the 24/36/48h
+    rows were filling normally on their own at N=3 (n=1-2 and climbing);
+    it was only the 72h row that was structurally unreachable.
+
+    The cost is one more row per source per cycle (~470/day across 13
+    stations x 2 sources x ~18 cycles). Nothing downstream widens:
+    pipeline.gather_forecasts() filters to target_date == local_today
+    before returning, so the blend sees the same single day it always
+    did, whatever N is.
 
     PAST DATES ARE DROPPED, not stored. Open-Meteo's window is built from
     the coordinates' own timezone and can open a day before
@@ -62,7 +80,9 @@ def _fetch_daily_max_series(
         "longitude": station.lon,
         "daily": "temperature_2m_max",
         "timezone": "auto",
-        "forecast_days": 3,
+        # 4, not 3 -- see the docstring: at 3 the furthest reachable lead is
+        # 67h and spread_audit.py's 72h row can never populate.
+        "forecast_days": 4,
     }
     try:
         resp = requests.get(url, params=params, timeout=timeout)
