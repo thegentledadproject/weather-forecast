@@ -240,16 +240,38 @@ def test_the_allowlist_is_still_required_as_well():
 
 _UNSET = object()
 
+# How stale the default fixture window is. calibration_vs_market() rejects
+# any run whose end_date is more than MATURITY_BRIER_MAX_WINDOW_AGE_DAYS old
+# BEFORE it ever compares the two Brier scores, so a fixture that means to
+# reach the comparison has to stay inside that gate.
+#
+# THIS IS DELIBERATELY RELATIVE TO TODAY. It used to be the literal
+# "2026-08-09", which sat comfortably inside the 14-day gate when it was
+# written and then aged out of it: on 2026-08-24 the window turned 15 days
+# old and three tests here began failing -- and would have failed every day
+# after -- reporting `assert False` while the real message was
+# "window 2026-07-28..2026-08-09 ended 15 days ago, stale past 14". CI was
+# green three days earlier at 12 days old. A fixture date that is a constant
+# is a test that expires.
+_DEFAULT_WINDOW_END = date.today() - timedelta(days=2)
+_DEFAULT_WINDOW_START = _DEFAULT_WINDOW_END - timedelta(days=12)
+
 
 def _write_run(tmp_path, monkeypatch, station="WSSS", model=0.10, market=0.20,
-               n_entries=30, end="2026-08-09", sha=None, generated="2026-08-11T00:00:00+00:00",
-               brier_n=_UNSET, omit_brier_n=False):
+               n_entries=30, end=None, sha=None, generated="2026-08-11T00:00:00+00:00",
+               brier_n=_UNSET, omit_brier_n=False, start=None):
     """
     A persisted backtest artifact set, the way report.write_artifacts lays it out.
 
     brier_n defaults to n_entries -- the every-entry-was-scored case. Pass it
     explicitly to model a run whose last day has not been observed yet, or
     omit_brier_n=True to model a summary written before brier_n existed.
+
+    `end` defaults to a window that is always FRESH relative to today, so a
+    caller that wants to reach the Brier comparison reaches it whatever the
+    date. Pass an explicit `end` to model a stale window -- the staleness
+    gate has its own test and that one wants a date that never goes fresh
+    again. See _DEFAULT_WINDOW_END.
     """
     import json
 
@@ -257,6 +279,10 @@ def _write_run(tmp_path, monkeypatch, station="WSSS", model=0.10, market=0.20,
 
     if brier_n is _UNSET:
         brier_n = n_entries
+    if end is None:
+        end = _DEFAULT_WINDOW_END.isoformat()
+    if start is None:
+        start = _DEFAULT_WINDOW_START.isoformat()
 
     base = tmp_path / "backtests"
     run_dir = base / f"bt_{station}_{n_entries}_{model}"
@@ -266,7 +292,7 @@ def _write_run(tmp_path, monkeypatch, station="WSSS", model=0.10, market=0.20,
         extras["brier_n"] = brier_n
     (run_dir / "summary.json").write_text(json.dumps({
         "run_id": run_dir.name, "station_icao": station,
-        "start_date": "2026-07-28", "end_date": end,
+        "start_date": start, "end_date": end,
         "generated_at": generated,
         "counters": {"n_entries": n_entries},
         "extras": extras,
@@ -391,12 +417,48 @@ def test_a_run_from_superseded_code_fails(tmp_path, monkeypatch, real_market_cri
 
 
 def test_a_stale_window_fails(tmp_path, monkeypatch, real_market_criterion):
-    """A model certified on July's weather is not certified on today's."""
+    """
+    A model certified on July's weather is not certified on today's.
+
+    The explicit date here is the point: this is the one fixture that WANTS
+    to be permanently stale, so it must never come from the relative default.
+    """
     _write_run(tmp_path, monkeypatch, model=0.10, market=0.20, n_entries=30, end="2020-01-01")
     passed, detail = config.calibration_vs_market("WSSS")
 
     assert not passed
     assert "stale" in detail
+
+
+def test_the_default_fixture_window_is_inside_the_staleness_gate(tmp_path, monkeypatch):
+    """
+    The guard against this file expiring again.
+
+    Every test above that means to reach the Brier comparison first has to
+    survive the staleness gate, and nothing in those tests says so -- they
+    assert on "beats market" and get `assert False` when the window ages
+    out, which is what made the 2026-08-24 failure read as a logic bug
+    instead of an expired constant. This states the requirement directly,
+    so a reintroduced absolute date fails HERE, with a message that names
+    the cause.
+    """
+    import json
+
+    run_dir = _write_run(tmp_path, monkeypatch)
+    summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+
+    end = date.fromisoformat(summary["end_date"])
+    age = (date.today() - end).days
+
+    assert 0 <= age <= config.MATURITY_BRIER_MAX_WINDOW_AGE_DAYS, (
+        f"the default fixture window ends {age} days ago, and "
+        f"calibration_vs_market rejects anything past "
+        f"{config.MATURITY_BRIER_MAX_WINDOW_AGE_DAYS} days before it compares "
+        f"Brier at all. Make the date relative to today, not a literal."
+    )
+    assert date.fromisoformat(summary["start_date"]) < end, (
+        "a window must start before it ends"
+    )
 
 
 def test_no_backtest_at_all_fails_with_the_command_to_fix_it(tmp_path, monkeypatch,
