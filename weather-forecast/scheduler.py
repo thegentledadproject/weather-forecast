@@ -79,6 +79,7 @@ import pipeline
 import ev_engine
 import position_manager
 import executor
+import storage
 from clients import wallet_client
 from clients.official.registry import get_official_client
 
@@ -526,7 +527,27 @@ if __name__ == "__main__":
                 f"max {config.LIVE_MAX_CONCURRENT_POSITIONS} concurrent, "
                 f"${config.LIVE_MAX_TOTAL_EXPOSURE_USD:.2f} total exposure ceiling."
             )
-            for line in wallet_client.preflight():
+            # Reconcile once at boot so preflight can name any resolved
+            # position still sitting in the wallet. Winners there are
+            # UNCOLLECTED MONEY -- nothing in this system redeems -- and the
+            # exchange balance is the only thing that separates those from
+            # the ones already redeemed by hand. Affordable here in a way it
+            # is not inside preflight, which runs on every entry.
+            settled = []
+            try:
+                live_open = [
+                    p for p in storage.load_open_positions(is_paper=False)
+                    if getattr(p, "execution_mode", "paper") == "live"
+                ]
+                settled = wallet_client.reconcile_cached(
+                    live_open,
+                    settled_tokens=storage.load_settled_live_tokens(),
+                ).settled_unredeemed
+            except Exception as exc:  # noqa: BLE001
+                # Never let a reporting nicety stop the daemon booting. The
+                # entry path reconciles again and fails closed on its own.
+                print(f"[scheduler] preflight: settled-holdings scan skipped ({exc})")
+            for line in wallet_client.preflight(settled_unredeemed=settled):
                 print(f"[scheduler] preflight: {line}")
         else:
             print(

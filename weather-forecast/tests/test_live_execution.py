@@ -89,7 +89,7 @@ def reconciled(monkeypatch):
     """
     monkeypatch.setattr(
         wallet_client, "reconcile_cached",
-        lambda positions: wallet_client.Reconciliation(ok=True, checked=True, reason="stubbed"),
+        lambda positions, **_: wallet_client.Reconciliation(ok=True, checked=True, reason="stubbed"),
     )
     monkeypatch.setattr(market_client, "estimate_slippage", lambda token_id, size_usd: 0.01)
 
@@ -1429,7 +1429,7 @@ def test_a_divergent_exchange_blocks_new_live_entries(monkeypatch, mode, capture
     monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
     monkeypatch.setattr(
         wallet_client, "reconcile_cached",
-        lambda positions: wallet_client.Reconciliation(
+        lambda positions, **_: wallet_client.Reconciliation(
             ok=False, checked=True, exchange_only=[("GHOST", 12.0)], reason="divergence"),
     )
     monkeypatch.setattr(wallet_client, "submit_order", _explode)
@@ -1449,7 +1449,7 @@ def test_reconciliation_never_blocks_an_exit(monkeypatch, mode, captured):
     stub_book(monkeypatch, tick="0.01")
     monkeypatch.setattr(
         wallet_client, "reconcile_cached",
-        lambda positions: wallet_client.Reconciliation(
+        lambda positions, **_: wallet_client.Reconciliation(
             ok=False, checked=True, exchange_only=[("GHOST", 12.0)], reason="divergence"),
     )
     monkeypatch.setattr(
@@ -1616,7 +1616,7 @@ def live_db(tmp_path, monkeypatch):
     storage._connect().close()
     monkeypatch.setattr(
         wallet_client, "reconcile_cached",
-        lambda positions: wallet_client.Reconciliation(ok=True, checked=True, reason="stubbed"),
+        lambda positions, **_: wallet_client.Reconciliation(ok=True, checked=True, reason="stubbed"),
     )
 
 

@@ -1211,7 +1211,7 @@ def _interpret_collateral(resp, decimals: int) -> tuple:
                   f"spender(s) the exchange named")
 
 
-def preflight(token_id: Optional[str] = None) -> list:
+def preflight(token_id: Optional[str] = None, settled_unredeemed=None) -> list:
     """
     Checks to run BEFORE the first live order, returned as a list of
     human-readable "[ok]/[--]/[!!]" lines rather than raising. Called by
@@ -1225,6 +1225,20 @@ def preflight(token_id: Optional[str] = None) -> list:
     Deliberately does NOT attempt to set allowances: that is a real
     on-chain transaction and belongs to the operator, not to a trading
     loop.
+
+    `settled_unredeemed` is Reconciliation.settled_unredeemed -- resolved
+    positions the wallet DEMONSTRABLY still holds -- and each winner among
+    them gets a line, because nothing in this system redeems and that money
+    is otherwise invisible until someone reads the right journal line.
+
+    IT MUST BE THE EXCHANGE-VERIFIED LIST, not storage's raw map of
+    resolved positions. A redeemed winner's row still reads
+    closed_resolution / exit_price 1.0 for the rest of time -- that is
+    exactly what WSSS:2026-08-20:32:NO looks like, and it WAS collected --
+    so a line driven from the database alone would nag forever about money
+    already in the wallet. A zero balance is the only thing that
+    distinguishes collected from uncollected, which is why callers pass a
+    reconciliation result and preflight does not go looking itself.
     """
     lines = []
     lines.append(
@@ -1256,6 +1270,15 @@ def preflight(token_id: Optional[str] = None) -> list:
             "[--] allowances are an on-chain transaction and are NOT set from "
             "here -- approve the funding address once, via the Polymarket UI or "
             "directly against the spender contracts."
+        )
+
+    for token, shares, exit_price in settled_unredeemed or []:
+        if (exit_price or 0.0) <= 0:
+            continue
+        lines.append(
+            f"[!!] {token[:12]}... won at {exit_price:.2f} and is still held: "
+            f"{shares:.6f} shares, ${shares * exit_price:.2f} uncollected. "
+            f"REDEEM IT ON THE EXCHANGE -- nothing in this system does."
         )
     return lines
 
@@ -1297,17 +1320,21 @@ class Reconciliation:
     verified: list = None              # (token_id, shares) agreeing on both sides
     db_only: list = None               # DB says open, exchange shows no/too few shares
     exchange_only: list = None         # exchange holds shares, DB has no open row
+    settled_unredeemed: list = None    # (token_id, shares, exit_price) resolved, still held
 
     def __post_init__(self):
         self.verified = self.verified or []
         self.db_only = self.db_only or []
         self.exchange_only = self.exchange_only or []
+        self.settled_unredeemed = self.settled_unredeemed or []
 
     def describe(self) -> str:
         if not self.checked:
             return f"NOT CHECKED ({self.reason})"
         if self.ok:
-            return f"clean -- {len(self.verified)} position(s) agree with the exchange"
+            clean = f"clean -- {len(self.verified)} position(s) agree with the exchange"
+            settled = self.describe_settled()
+            return f"{clean}; {settled}" if settled else clean
         bits = []
         if self.db_only:
             bits.append(
@@ -1321,6 +1348,20 @@ class Reconciliation:
                 + ", ".join(f"{t[:10]}... ({s:.2f} sh)" for t, s in self.exchange_only)
             )
         return "; ".join(bits) or self.reason
+
+    def describe_settled(self) -> str:
+        """
+        The settled-but-still-held holdings, which do NOT affect `ok`. Kept
+        out of describe()'s divergence list on purpose -- these are expected
+        state, not a fault -- but never dropped silently, because a winner
+        among them is uncollected money. Empty string when there are none.
+        """
+        if not self.settled_unredeemed:
+            return ""
+        return f"{len(self.settled_unredeemed)} settled but unredeemed: " + ", ".join(
+            f"{t[:10]}... ({s:.2f} sh, worth ${s * x:.2f})"
+            for t, s, x in self.settled_unredeemed
+        )
 
 
 _reconcile_cache = {"at": 0.0, "result": None}
@@ -1376,7 +1417,7 @@ def _held_shares(client, token_id: str) -> Optional[float]:
         return None
 
 
-def reconcile_live_positions(open_live_positions) -> Reconciliation:
+def reconcile_live_positions(open_live_positions, settled_tokens=None) -> Reconciliation:
     """
     Compare the database's open LIVE positions against what the funding
     wallet actually holds, and hunt for holdings the database has never
@@ -1397,6 +1438,29 @@ def reconcile_live_positions(open_live_positions) -> Reconciliation:
       exchange_only  shares are held that the DB has no open row for. THIS
                      IS THE ONE THAT BREAKS THE CAPS -- unrecorded exposure
                      is exposure the backstops cannot see.
+
+    `settled_tokens` maps token_id -> (size_shares, exit_price) for live
+    positions this database closed as `closed_resolution`, and they are
+    EXCLUDED from exchange_only. The exclusion is sound rather than
+    convenient: exchange_only catches UNRECORDED EXPOSURE. A resolved
+    token is recorded -- there is a row -- and is not exposure, because
+    the market has settled and its value is fixed at 0 or $1/share with no
+    price risk left to cap. It is outside the question this asks.
+
+    THE EXCLUSION IS DELIBERATELY LIMITED TO RESOLUTION CLOSES. A
+    stop-loss, take-profit or trailing-stop close exited by SELLING, so a
+    residual balance above the dust tolerance there means the sell did not
+    happen -- a real divergence that must keep blocking. Only a resolution
+    close never involved a sell, because a resolved market has no book:
+    losers are worthless and unsellable, winners redeem for par. Passing a
+    wider set than `closed_resolution` would put a hole in this backstop.
+
+    Why such tokens are still held at all: nothing in this repo redeems.
+    See executor.close_position(), which prints "REDEEM IT ON THE
+    EXCHANGE" and leaves it to the operator. So a loser's tokens sit in
+    the wallet indefinitely -- which is what halted live trading from
+    2026-08-22T21:00Z until this argument existed -- and a WINNER's tokens
+    are uncollected money, which is why those get a warning below.
 
     Discovery of exchange_only goes through get_trades() rather than any
     "list my positions" call, because the CLOB has none: fills are
@@ -1450,6 +1514,8 @@ def reconcile_live_positions(open_live_positions) -> Reconciliation:
 
     # Holdings the database has never recorded.
     exchange_only = []
+    settled_unredeemed = []
+    settled = settled_tokens or {}
     try:
         cutoff = int(time.time()) - config.RECONCILE_TRADE_LOOKBACK_HOURS * 3600
         floor_iso = getattr(config, "RECONCILE_IGNORE_TRADES_BEFORE", None)
@@ -1488,19 +1554,40 @@ def reconcile_live_positions(open_live_positions) -> Reconciliation:
                 reason=(f"traded token {asset[:12]}... has an unreadable balance -- "
                         f"cannot rule out an unrecorded position"),
             )
-        if held > config.RECONCILE_SHARE_TOLERANCE:
-            exchange_only.append((asset, held))
+        if held <= config.RECONCILE_SHARE_TOLERANCE:
+            continue
+        if asset in settled:
+            # Recorded and resolved: real shares, but not exposure. Reported,
+            # never counted as divergence.
+            _, exit_price = settled[asset]
+            exit_price = exit_price or 0.0
+            settled_unredeemed.append((asset, held, exit_price))
+            if exit_price > 0:
+                # A WINNER nobody collected. Redemption is manual in this
+                # system, so this line is the only thing that will ever say
+                # so -- it must name the money, not just the token.
+                logger.warning(
+                    f"[wallet_client] UNREDEEMED WINNER: {asset[:12]}... holds "
+                    f"{held:.6f} shares of a position closed at {exit_price:.2f}, "
+                    f"worth ${held * exit_price:.2f}. Nothing in this system "
+                    f"redeems -- REDEEM IT ON THE EXCHANGE to collect it. Not "
+                    f"blocking entries: a resolved position carries no price "
+                    f"exposure, and the tokens stay redeemable indefinitely."
+                )
+            continue
+        exchange_only.append((asset, held))
 
     diverged = bool(db_only or exchange_only)
     return Reconciliation(
         ok=not diverged,
         checked=True,
         verified=verified, db_only=db_only, exchange_only=exchange_only,
+        settled_unredeemed=settled_unredeemed,
         reason="exchange and database agree" if not diverged else "divergence",
     )
 
 
-def reconcile_cached(open_live_positions) -> Reconciliation:
+def reconcile_cached(open_live_positions, settled_tokens=None) -> Reconciliation:
     """
     reconcile_live_positions() with a short TTL. _live_budget_breach() runs
     once per candidate entry and several candidates can clear the screen in
@@ -1513,6 +1600,6 @@ def reconcile_cached(open_live_positions) -> Reconciliation:
     cached = _reconcile_cache["result"]
     if cached is not None and now - _reconcile_cache["at"] < config.RECONCILE_CACHE_TTL_S:
         return cached
-    result = reconcile_live_positions(open_live_positions)
+    result = reconcile_live_positions(open_live_positions, settled_tokens=settled_tokens)
     _reconcile_cache.update({"at": now, "result": result})
     return result

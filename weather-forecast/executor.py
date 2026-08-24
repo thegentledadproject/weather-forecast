@@ -163,7 +163,16 @@ def _live_budget_breach(size_usd: float) -> Optional[str]:
     # question is whether to spend more money. This is also why it is here
     # and not in close_position(): an exit must never be blocked by a
     # bookkeeping doubt, only an entry.
-    recon = wallet_client.reconcile_cached(live_positions)
+    # Resolved positions are handed over separately. Their tokens outlive
+    # the position row -- nothing here redeems, and a settled market has no
+    # book -- so without this they read as unrecorded exposure and block
+    # every entry, which is what happened from 2026-08-22T21:00Z. They are
+    # recorded and carry no price risk, so they are not what the caps below
+    # are protecting. See storage.load_settled_live_tokens() for why the
+    # handover is limited to `closed_resolution` and nothing else.
+    recon = wallet_client.reconcile_cached(
+        live_positions, settled_tokens=storage.load_settled_live_tokens(),
+    )
     if not recon.ok:
         return (
             f"exchange reconciliation did not pass -- {recon.describe()}. "

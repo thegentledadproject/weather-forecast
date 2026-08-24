@@ -759,6 +759,40 @@ def load_open_positions(station_icao: Optional[str] = None, is_paper: Optional[b
     return [_row_to_position(r) for r in rows]
 
 
+def load_settled_live_tokens() -> Dict[str, Tuple[float, float]]:
+    """
+    token_id -> (size_shares, exit_price) for LIVE positions this database
+    closed as `closed_resolution`.
+
+    These are the holdings that legitimately outlive their position row.
+    Nothing in this repo redeems -- executor.close_position() prints
+    "REDEEM IT ON THE EXCHANGE" and leaves it to the operator -- and a
+    resolved market has no book to sell into either way, so the outcome
+    tokens stay in the funding wallet: worthless if the position lost,
+    worth par if it won. wallet_client.reconcile_live_positions() takes
+    this map so those holdings stop reading as unrecorded exposure, which
+    is what halted live trading on 2026-08-22.
+
+    ONLY `closed_resolution`, deliberately. Every other closed status
+    exited by SELLING, so shares still held there mean the sell did not
+    happen -- a real divergence that must keep blocking entries. Widening
+    this query is how the backstop gets a hole in it.
+
+    exit_price is COALESCEd to 0.0: a NULL would propagate into the
+    "uncollected money" arithmetic, and unknown is not the same as
+    valuable. A row with no token_id is skipped rather than keyed on
+    None -- paper rows and pre-token history both hit that case.
+    """
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT token_id, size_shares, COALESCE(exit_price, 0.0) "
+            "FROM positions "
+            "WHERE status = 'closed_resolution' AND execution_mode = 'live' "
+            "AND is_paper = 0 AND token_id IS NOT NULL"
+        ).fetchall()
+    return {r[0]: (r[1] or 0.0, r[2]) for r in rows}
+
+
 def load_position_history(station_icao: str, limit: int = 100, is_paper: Optional[bool] = None) -> List[Position]:
     """Load closed positions for a station, most recent exit first, optionally filtered to paper vs. real."""
     with _db() as conn:
