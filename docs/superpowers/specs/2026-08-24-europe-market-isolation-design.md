@@ -25,6 +25,13 @@ the trigger for this design, not an aside.
   (`BANKROLL_USD`) and per-region daily exposure cap
   (`MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD`), so Europe can never size a
   real order against Asia's capital or vice versa.
+- A region-scoped version of the LIVE-money blast radius
+  (`LIVE_MAX_CONCURRENT_POSITIONS`, `LIVE_MAX_TOTAL_EXPOSURE_USD`,
+  `LIVE_MAX_ORDERS_PER_DAY`), which today is a single process-global
+  backstop "across all live stations" -- without this, isolation holds
+  only until the first European station is ever promoted to real money,
+  at which point it would silently start competing with WSSS/RCSS for the
+  same 3 slots.
 - A DST-aware offset mechanism (`iana_timezone` on `StationConfig` +
   `config.current_utc_offset_hours()`), so `local_today()`,
   `local_day_bounds_utc()`, and scheduler grouping stay correct for
@@ -117,7 +124,57 @@ Per-station and per-bucket caps
 already station-scoped and need no change -- only the portfolio-wide cap
 was pooling across regions.
 
-### 4. Promotion gate
+### 4. Region-scoped live blast radius (`config.py`, `executor.py`, `storage.py`)
+
+This is a separate mechanism from section 3 -- `LIVE_MAX_CONCURRENT_POSITIONS`,
+`LIVE_MAX_TOTAL_EXPOSURE_USD`, and `LIVE_MAX_ORDERS_PER_DAY`
+(`config.py:1240-1242`) gate real-money order submission specifically, and
+are explicitly documented today as counting "across all live stations" --
+process-global, not per-station, not per-region. `entry_manager`'s
+Kelly-sizing budget being isolated by region does nothing to this path,
+because live orders don't go through Kelly sizing at all (`LIVE_TRADE_SIZE_USD`
+replaces it entirely, per `entry_manager.py`'s own comment on Cap 2b).
+
+```python
+REGION_LIVE_MAX_CONCURRENT_POSITIONS = {"asia": LIVE_MAX_CONCURRENT_POSITIONS, "europe": 0}
+REGION_LIVE_MAX_TOTAL_EXPOSURE_USD = {"asia": LIVE_MAX_TOTAL_EXPOSURE_USD, "europe": 0.0}
+REGION_LIVE_MAX_ORDERS_PER_DAY = {"asia": LIVE_MAX_ORDERS_PER_DAY, "europe": 0}
+```
+
+Same pattern as section 3: Asia's three constants stay the literal source
+of truth, referenced not duplicated. Europe is locked at 0/0/0 -- structurally
+unable to submit a single live order no matter what `LIVE_TRADING_STATIONS`
+or the `POLYMARKET_LIVE_TRADING` env flag say, until an operator explicitly
+raises all three.
+
+`executor._live_budget_breach()` (currently `_live_budget_breach(size_usd)`)
+gains a `station_icao` parameter -- its one caller, `_open_via_order_path`,
+already has `decision.station_icao` in scope. Inside, it:
+- resolves `region = config.get_station(station_icao).region`,
+- filters `live_positions` to `config.get_station(p.station_icao).region == region`
+  before computing the concurrent-position count and summed exposure,
+- checks those against `config.REGION_LIVE_MAX_CONCURRENT_POSITIONS[region]`
+  / `REGION_LIVE_MAX_TOTAL_EXPOSURE_USD[region]` instead of the flat constants.
+
+`storage.count_live_order_attempts()` gains an optional
+`station_icaos: Optional[list[str]] = None` filter (`AND station_icao IN
+(...)` alongside the existing `kind`/`ts` filter) so the daily order-rate
+cap can be counted per-region; `_live_budget_breach()` passes the region's
+station list and compares against `REGION_LIVE_MAX_ORDERS_PER_DAY[region]`.
+`None` (no filter) preserves today's global count for any caller that
+doesn't pass it, so this is additive, not a behavior change for existing
+callers.
+
+**Constraint to carry forward, not just copy a number:** `LIVE_MAX_TOTAL_EXPOSURE_USD`
+is not independently chosen -- `config.py`'s own comment derives it as
+`LIVE_MAX_CONCURRENT_POSITIONS x worst-case single-entry cost`. Whenever
+`REGION_LIVE_MAX_CONCURRENT_POSITIONS["europe"]` is ever raised above 0,
+`REGION_LIVE_MAX_TOTAL_EXPOSURE_USD["europe"]` must be re-derived from that
+same product for Europe's own worst-case entry cost (which will differ --
+different `MAX_ENTRY_PRICE`/bucket economics), not copied from Asia's
+$11.25 or guessed.
+
+### 5. Promotion gate
 
 No new code. `LIVE_TRADING_STATIONS` already gates real-money submission
 per station-ICAO, and simulation mode is already available to any
@@ -128,7 +185,7 @@ European stations are added to `config.STATIONS` and simply never added
 to `LIVE_TRADING_STATIONS` -- identical to how all 11 non-WSSS Asia
 stations started.
 
-### 5. Scheduling isolation (`scheduler.py`)
+### 6. Scheduling isolation (`scheduler.py`)
 
 `stations_by_utc_offset()` switches its lookup from
 `station.utc_offset_hours` to `config.current_utc_offset_hours(station)`.
@@ -152,7 +209,7 @@ year. The operational note: restart the daemon on or shortly after each
 BST/CEST transition date. Building automatic mid-run regrouping is
 explicitly deferred -- flag it if it ever causes a real missed window.
 
-### 6. Station registry entries
+### 7. Station registry entries
 
 Confirmed via the Gamma API (`https://gamma-api.polymarket.com/events?slug=...`,
 same lookup `market_discovery.py` uses at trade time) to have a live
@@ -207,12 +264,22 @@ needed, same as Asia.
 - Region-scoped portfolio exposure: `portfolio_day_exposure_usd(region=...)`
   sums only same-region stations; a large Asia-side exposure does not
   reduce Europe's remaining budget or vice versa.
+- Region-scoped live blast radius: with `REGION_LIVE_MAX_CONCURRENT_POSITIONS["europe"] == 0`,
+  `_live_budget_breach()` refuses every live entry for a `region="europe"`
+  station regardless of how empty the live book is. Separately, 3 open
+  Asia live positions at the (hypothetical, test-only) Asia cap do not
+  block a Europe entry once Europe has its own non-zero budget, and vice
+  versa -- the two regions' concurrent-position counts, exposure sums, and
+  daily order counts must be computed independently.
 - Regression: full existing suite green, plus an explicit check that
   `current_utc_offset_hours()` for all 13 existing stations returns
   exactly `station.utc_offset_hours` (i.e. the new helper is a true
-  superset, not a behavior change) and that `REGION_BANKROLL_USD["asia"]`
+  superset, not a behavior change), that `REGION_BANKROLL_USD["asia"]`
   /`REGION_MAX_DAILY_EXPOSURE_USD["asia"]` equal the pre-existing flat
-  constants.
+  constants, and that `_live_budget_breach()` for any existing Asia
+  station produces the identical accept/reject decision it did before
+  the region filter was added (Asia is the only region with real
+  positions today, so its filtered and unfiltered counts are identical).
 - `stations_by_utc_offset()` places the 7 European stations into groups
   distinct from every Asia station's group, and does not change any Asia
   station's group membership.
@@ -222,9 +289,14 @@ needed, same as Asia.
 - `models.py` -- `StationConfig.region`, `StationConfig.iana_timezone`
 - `config.py` -- `current_utc_offset_hours()`, `REGION_BANKROLL_USD`,
   `REGION_MAX_DAILY_EXPOSURE_USD`, `region_bankroll_usd()`,
-  `region_max_daily_exposure_usd()`, 7 new `STATIONS` entries, updated
-  `local_today()`/`local_day_bounds_utc()` to use the new helper
+  `region_max_daily_exposure_usd()`, `REGION_LIVE_MAX_CONCURRENT_POSITIONS`,
+  `REGION_LIVE_MAX_TOTAL_EXPOSURE_USD`, `REGION_LIVE_MAX_ORDERS_PER_DAY`,
+  7 new `STATIONS` entries, updated `local_today()`/`local_day_bounds_utc()`
+  to use the new helper
 - `entry_manager.py` -- region-scoped bankroll sizing,
   `portfolio_day_exposure_usd(region=...)`, `apply_portfolio_budget` caller
+- `executor.py` -- `_live_budget_breach(size_usd, station_icao)` filters
+  live positions and rate-limit counts to the station's own region
+- `storage.py` -- `count_live_order_attempts(kind, since_iso, station_icaos=None)`
 - `scheduler.py` -- `stations_by_utc_offset()` uses the new helper
 - `tests/` -- new test file(s) for the above, plus regression coverage
