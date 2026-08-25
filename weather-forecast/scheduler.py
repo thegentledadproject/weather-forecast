@@ -115,11 +115,16 @@ def stations_by_utc_offset(station_icaos: Optional[list] = None) -> Dict[int, Li
     unregistered ICAO is logged and skipped rather than raising: one bad
     name on the command line must not stop the other twelve stations from
     trading.
+
+    The offset is RESOLVED, not read: a station carrying an iana_timezone
+    (every European entry) reports its current DST offset, so it joins the
+    group whose local clock it actually shares right now. See the
+    known limitation in run_forever() -- grouping happens once at startup.
     """
     groups: Dict[int, List[str]] = {}
     for icao in (station_icaos or list(config.STATIONS.keys())):
         try:
-            offset = config.get_station(icao).utc_offset_hours
+            offset = config.current_utc_offset_hours(icao)
         except KeyError as exc:
             print(f"[scheduler] skipping unknown station: {exc}")
             continue
@@ -415,6 +420,16 @@ def run_forever(station_icaos: Optional[list] = None) -> None:
     groups -- waking for one group never re-runs the others, which is the
     whole point: a shared sleep with a shared dispatch would run every
     group at whatever the shortest interval in play happens to be.
+
+    GROUPS ARE COMPUTED ONCE, HERE, AND NEVER RECOMPUTED. For a station
+    with a static utc_offset_hours that is simply true. For a station
+    carrying an iana_timezone it is a known limitation: crossing a DST
+    transition while the daemon runs leaves that station on its
+    pre-transition offset -- every schedule window an hour off its real
+    local clock -- until the process restarts. Restart the daemon on each
+    BST/CEST transition date. Deliberately not solved with live
+    regrouping: it is a twice-a-year event, and the same operator-action
+    stance the bucket-bounds resweep takes.
     """
     groups = stations_by_utc_offset(station_icaos)
     if not groups:

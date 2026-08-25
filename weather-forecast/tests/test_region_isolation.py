@@ -175,3 +175,43 @@ class TestLocalTodayUsesTheHelper:
 
         assert start == datetime(2026, 12, 24, 0, 0, tzinfo=timezone.utc)
         assert end == datetime(2026, 12, 25, 0, 0, tzinfo=timezone.utc)
+
+
+import scheduler
+
+
+class TestSchedulerGroupsOnResolvedOffset:
+    def test_a_dst_station_groups_by_its_current_offset(self, monkeypatch):
+        """
+        In August a Europe/London station belongs in the +1 group, not the
+        +0 group its static utc_offset_hours names.
+        """
+        st = _station(icao="TEST", region="europe",
+                      iana_timezone="Europe/London", utc_offset_hours=0)
+        monkeypatch.setattr(config, "STATIONS", {"TEST": st})
+        monkeypatch.setattr(config, "_now_utc",
+                            lambda: datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc))
+
+        groups = scheduler.stations_by_utc_offset()
+
+        assert groups == {1: ["TEST"]}
+
+    def test_the_same_station_groups_at_zero_in_winter(self, monkeypatch):
+        st = _station(icao="TEST", region="europe",
+                      iana_timezone="Europe/London", utc_offset_hours=0)
+        monkeypatch.setattr(config, "STATIONS", {"TEST": st})
+        monkeypatch.setattr(config, "_now_utc",
+                            lambda: datetime(2026, 12, 24, 12, 0, tzinfo=timezone.utc))
+
+        groups = scheduler.stations_by_utc_offset()
+
+        assert groups == {0: ["TEST"]}
+
+    def test_asia_stations_group_exactly_as_before(self):
+        """The 13 registered stations set no iana_timezone, so nothing moves."""
+        groups = scheduler.stations_by_utc_offset()
+        for offset, icaos in groups.items():
+            for icao in icaos:
+                st = config.STATIONS[icao]
+                if st.iana_timezone is None:
+                    assert offset == st.utc_offset_hours, icao
