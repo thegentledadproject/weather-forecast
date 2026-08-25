@@ -668,7 +668,7 @@ class TestPooledSpreadIsRegionScoped:
                 return [-0.5, 0.5, -0.5, 0.5, -0.5, 0.5]
             return []
 
-        monkeypatch.setattr(calibration.storage, "forecast_error_samples", fake_samples)
+        monkeypatch.setattr(storage, "forecast_error_samples", fake_samples)
 
         asia_spread, asia_n = calibration.pooled_error_spread(region="asia")
         calibration._pooled_spread_cache.clear()
@@ -698,7 +698,7 @@ class TestPooledSpreadIsRegionScoped:
                 return [-0.5, 0.5, -0.5, 0.5, -0.5, 0.5]
             return []
 
-        monkeypatch.setattr(calibration.storage, "forecast_error_samples", fake_samples)
+        monkeypatch.setattr(storage, "forecast_error_samples", fake_samples)
 
         # No clear() between these two calls -- the cache must not confuse them.
         asia_spread, _ = calibration.pooled_error_spread(region="asia")
@@ -711,7 +711,7 @@ class TestPooledSpreadIsRegionScoped:
         monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
         calibration._pooled_spread_cache.clear()
 
-        monkeypatch.setattr(calibration.storage, "forecast_error_samples",
+        monkeypatch.setattr(storage, "forecast_error_samples",
                             lambda icao, source: [-1.0, 1.0])
 
         _, n = calibration.pooled_error_spread()
