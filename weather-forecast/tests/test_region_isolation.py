@@ -555,6 +555,64 @@ class TestRegionScopedLiveBlastRadius:
         assert "WSSS" in seen["station_icaos"]
         assert all(config.region_of(i) == "asia" for i in seen["station_icaos"])
 
+    def test_reconciliation_sees_the_WHOLE_live_book_not_just_this_region(
+        self, monkeypatch
+    ):
+        """
+        THE ORDERING CONSTRAINT, PINNED.
+
+        reconcile_cached() compares the database's ENTIRE live book against
+        the exchange's actual holdings. The region filter must therefore run
+        AFTER it: filtering first would hand reconciliation one region's
+        positions, so every OTHER region's real holdings would read as
+        unrecorded exposure and every entry would be refused.
+
+        This is inert while Europe is locked at 0 -- no live European
+        position can exist, so the whole book and the Asia book are the same
+        set. It stops being inert the day a second region is funded, and a
+        refactor that moves the filter one block up would pass every other
+        test in the suite. Hence a test that asserts on what reconciliation
+        was actually HANDED, rather than on the breach result.
+        """
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setattr(config, "STATIONS", {**config.STATIONS, "EUTEST": eu})
+
+        def _pos(position_id, station_icao):
+            return Position(
+                position_id=position_id, station_icao=station_icao,
+                target_date=date(2026, 8, 24), bucket_c=32, side="YES",
+                entry_price=0.30, size_usd=1.00,
+                entry_time="2026-08-24T00:00:00+00:00", status="open",
+                token_id=f"TOK-{position_id}", is_paper=False,
+                size_shares=5.0, execution_mode="live",
+            )
+
+        book = [_pos("asia1", "WSSS"), _pos("eu1", "EUTEST")]
+        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: book)
+        monkeypatch.setattr(storage, "load_settled_live_tokens", lambda: {})
+        monkeypatch.setattr(storage, "count_live_order_attempts",
+                            lambda kind, since, station_icaos=None: 0)
+
+        seen = {}
+
+        def _capturing_reconcile(positions, **_):
+            # RECORD what reconciliation was handed -- the whole point.
+            seen["positions"] = list(positions)
+            return executor.wallet_client.Reconciliation(
+                ok=True, checked=True, reason="stubbed")
+
+        monkeypatch.setattr(executor.wallet_client, "reconcile_cached",
+                            _capturing_reconcile)
+
+        executor._live_budget_breach(1.00, "WSSS")
+
+        handed = {p.station_icao for p in seen["positions"]}
+        assert handed == {"WSSS", "EUTEST"}, (
+            f"reconciliation was handed {handed} -- it must see the WHOLE live "
+            f"book. If this fails, the region filter has been moved above the "
+            f"reconcile_cached() call."
+        )
+
 
 class TestCountLiveOrderAttemptsFilter:
     def test_the_station_filter_narrows_the_count(self, tmp_path, monkeypatch):
