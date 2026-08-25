@@ -19,9 +19,10 @@ models.py (local)
 import math
 import statistics
 from datetime import date
-from typing import List
+from typing import List, Optional
 
 import config
+import storage
 from models import StationConfig, PointForecast, ObservedReading, CalibratedEstimate
 
 
@@ -142,7 +143,7 @@ def measured_error_spread(station_icao: str) -> tuple:
 _pooled_spread_cache = {}
 
 
-def pooled_error_spread() -> tuple:
+def pooled_error_spread(region: Optional[str] = None) -> tuple:
     """
     (std_dev_c, n_pairs) of forecast errors pooled across every registered
     station, each station's errors CENTRED on its own mean first.
@@ -160,19 +161,36 @@ def pooled_error_spread() -> tuple:
     Cached: it reads every station, and recomputing it per station per
     cycle would multiply the query count by the size of the registry for a
     figure that barely moves day to day.
+
+    `region` scopes the pool to one cohort of stations. This is not a
+    refinement, it is a correctness requirement once the registry spans
+    more than one climate: temperate and tropical stations have genuinely
+    different error distributions, and a pool spanning both describes
+    neither. It is also the path by which a newly registered region would
+    otherwise change an existing region's trading behaviour without
+    touching a single line of that region's code -- spread feeds
+    probability feeds EV feeds entries.
+
+    None pools every registered station, the original meaning, kept for
+    callers that predate regions.
     """
     import time
 
     import storage  # local, as above
 
     now = time.time()
-    key = str(config.DB_PATH)
+    # The region is part of the key, not just the db path. Without it the
+    # first region to compute would serve its spread to every other one --
+    # reintroducing the exact leak the filter below removes.
+    key = (str(config.DB_PATH), region)
     hit = _pooled_spread_cache.get(key)
     if hit is not None and now - hit[2] < config.POOLED_SPREAD_CACHE_TTL_S:
         return hit[0], hit[1]
 
     centred = []
     for icao in config.STATIONS:
+        if region is not None and config.region_of(icao) != region:
+            continue
         try:
             station = config.get_station(icao)
             errors = storage.forecast_error_samples(icao, station.resolution_grade_source)
@@ -261,7 +279,9 @@ def estimate_std_dev(
         if measured is not None:
             return _clamp_spread(measured), "measured_error"
 
-    pooled, _ = pooled_error_spread()
+    pooled, _ = pooled_error_spread(
+        region=config.region_of(station_icao) if station_icao else None,
+    )
     if pooled is not None:
         return _clamp_spread(pooled), "pooled_error"
 

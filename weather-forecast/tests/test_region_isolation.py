@@ -640,3 +640,80 @@ class TestCountLiveOrderAttemptsFilter:
 
         assert storage.count_live_order_attempts(
             "entry", "2000-01-01", station_icaos=[]) == 0
+
+
+import calibration
+
+
+class TestPooledSpreadIsRegionScoped:
+    def test_the_pool_excludes_other_regions(self, monkeypatch, tmp_path):
+        """
+        A European station's errors must not enter the pool an Asian
+        station falls back on. Spread feeds EV feeds entries, so this is
+        the path by which registering Europe could silently move Asian
+        trading behavior.
+        """
+        monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+        calibration._pooled_spread_cache.clear()
+
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setattr(config, "STATIONS", {**config.STATIONS, "EUTEST": eu})
+
+        # Asia errors are tight; the European station's are wild. If the
+        # European rows leak into Asia's pool, Asia's spread inflates.
+        def fake_samples(icao, source):
+            if icao == "EUTEST":
+                return [-8.0, 8.0, -8.0, 8.0, -8.0, 8.0]
+            if icao == "WSSS":
+                return [-0.5, 0.5, -0.5, 0.5, -0.5, 0.5]
+            return []
+
+        monkeypatch.setattr(calibration.storage, "forecast_error_samples", fake_samples)
+
+        asia_spread, asia_n = calibration.pooled_error_spread(region="asia")
+        calibration._pooled_spread_cache.clear()
+        eu_spread, eu_n = calibration.pooled_error_spread(region="europe")
+
+        assert asia_n == 6, "asia pool must contain only WSSS's six samples"
+        assert eu_n == 6, "europe pool must contain only EUTEST's six samples"
+        assert asia_spread < 1.0, f"asia spread {asia_spread} inflated by European errors"
+        assert eu_spread > 5.0, f"europe spread {eu_spread} diluted by Asian errors"
+
+    def test_the_cache_key_separates_regions(self, monkeypatch, tmp_path):
+        """
+        The cache is keyed on DB_PATH. Without the region in the key, the
+        first region to compute would serve its spread to the other -- the
+        leak this task exists to close, reintroduced by the cache.
+        """
+        monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+        calibration._pooled_spread_cache.clear()
+
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setattr(config, "STATIONS", {**config.STATIONS, "EUTEST": eu})
+
+        def fake_samples(icao, source):
+            if icao == "EUTEST":
+                return [-8.0, 8.0, -8.0, 8.0, -8.0, 8.0]
+            if icao == "WSSS":
+                return [-0.5, 0.5, -0.5, 0.5, -0.5, 0.5]
+            return []
+
+        monkeypatch.setattr(calibration.storage, "forecast_error_samples", fake_samples)
+
+        # No clear() between these two calls -- the cache must not confuse them.
+        asia_spread, _ = calibration.pooled_error_spread(region="asia")
+        eu_spread, _ = calibration.pooled_error_spread(region="europe")
+
+        assert asia_spread != eu_spread
+
+    def test_no_region_still_pools_everything(self, monkeypatch, tmp_path):
+        """Back-compat for callers that predate regions."""
+        monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+        calibration._pooled_spread_cache.clear()
+
+        monkeypatch.setattr(calibration.storage, "forecast_error_samples",
+                            lambda icao, source: [-1.0, 1.0])
+
+        _, n = calibration.pooled_error_spread()
+
+        assert n == 2 * len(config.STATIONS)
