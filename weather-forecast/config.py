@@ -67,9 +67,10 @@ def current_utc_offset_hours(
     without one keeps the static int, unchanged, forever.
 
     `at` defaults to now. Passing it is how the tests reach both DST
-    states, and how any caller reasoning about a PAST instant stays honest
-    -- but note that no trading-path caller does that today: they all mean
-    "right now".
+    states, and how any caller reasoning about a PAST instant stays honest.
+    local_day_bounds_utc() is exactly such a caller and MUST pass it: it is
+    handed historical target_dates, and an offset resolved from the wall
+    clock would bound a winter day with a summer offset.
 
     RAISES on an unknown timezone name rather than falling back to the
     static int. A typo would otherwise trade a DST station on a silently
@@ -124,10 +125,22 @@ def local_day_bounds_utc(
     forecast out of a sample the live blend never used: `end` cuts
     hindsight, `start` cuts lead the trading path did not have.
     """
-    offset = current_utc_offset_hours(station)
     midnight = datetime(
         target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc
     )
+    # AT THE DAY BEING BOUNDED, not at the instant this runs. This function
+    # is handed historical target_dates -- storage.forecast_means_by_date
+    # walks every stored forecast row -- so resolving the offset from the
+    # wall clock would bound a December day with August's summer-time
+    # offset, silently moving the boundary this docstring exists to keep
+    # honest.
+    #
+    # UTC midnight of target_date is the anchor rather than the true local
+    # midnight, which would be circular: the local instant depends on the
+    # offset being looked up. The two can disagree only on a DST transition
+    # DAY, where the anchor may pick the wrong side by an hour -- accepted,
+    # and far smaller than being wrong for half of every year.
+    offset = current_utc_offset_hours(station, at=midnight)
     start = midnight - timedelta(hours=offset)
     return start, start + timedelta(days=1)
 

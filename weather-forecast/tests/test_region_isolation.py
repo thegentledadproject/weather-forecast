@@ -139,16 +139,39 @@ class TestLocalTodayUsesTheHelper:
 
         assert config.local_today("TEST") == date(2026, 8, 25)
 
-    def test_local_day_bounds_respect_a_dst_offset(self, monkeypatch):
+    def test_local_day_bounds_use_the_offset_of_the_day_being_bounded(self, monkeypatch):
         """
         The BST local day for 2026-08-24 starts at 23:00Z on the 23rd.
+
+        _now_utc is frozen to DECEMBER on purpose while target_date is in
+        AUGUST. The two are in opposite DST states, so this test can only
+        pass if the offset is resolved from target_date. Resolving it from
+        the wall clock -- what a bare current_utc_offset_hours(station) call
+        does -- returns GMT here and moves both bounds by an hour.
+
         Getting this wrong is the lookahead bug local_day_bounds_utc's own
-        docstring was written about, one region over.
+        docstring was written about, one region over. Note also that a test
+        which did NOT freeze the clock would pass or fail depending on which
+        month it happened to run in.
         """
         st = _station(region="europe", iana_timezone="Europe/London", utc_offset_hours=0)
         monkeypatch.setitem(config.STATIONS, "TEST", st)
+        monkeypatch.setattr(config, "_now_utc",
+                            lambda: datetime(2026, 12, 24, 12, 0, tzinfo=timezone.utc))
 
         start, end = config.local_day_bounds_utc("TEST", date(2026, 8, 24))
 
         assert start == datetime(2026, 8, 23, 23, 0, tzinfo=timezone.utc)
         assert end == datetime(2026, 8, 24, 23, 0, tzinfo=timezone.utc)
+
+    def test_local_day_bounds_in_the_other_direction_too(self, monkeypatch):
+        """The mirror: a GMT target_date bounded while the wall clock says August."""
+        st = _station(region="europe", iana_timezone="Europe/London", utc_offset_hours=0)
+        monkeypatch.setitem(config.STATIONS, "TEST", st)
+        monkeypatch.setattr(config, "_now_utc",
+                            lambda: datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc))
+
+        start, end = config.local_day_bounds_utc("TEST", date(2026, 12, 24))
+
+        assert start == datetime(2026, 12, 24, 0, 0, tzinfo=timezone.utc)
+        assert end == datetime(2026, 12, 25, 0, 0, tzinfo=timezone.utc)
