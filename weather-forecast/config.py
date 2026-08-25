@@ -1042,7 +1042,7 @@ MAX_POSITION_USD = 150.0
 # Everything on the live track is bounded by ONE shared blast radius
 # (LIVE_MAX_CONCURRENT_POSITIONS / _TOTAL_EXPOSURE_USD / _ORDERS_PER_DAY),
 # so a second station does not enlarge the exposure -- it competes with
-# WSSS for the same 3 slots and the same $11.25. Adding a third would need
+# WSSS for the same 5 slots and the same $8.00. Adding a third would need
 # that trade-off re-read, not just another name here.
 #
 # NOTE this widens what the PROCESS-GLOBAL second gate authorises:
@@ -1189,26 +1189,73 @@ LIVE_ALLOW_EXCHANGE_MINIMUM_UPSIZE = True
 # shares costing $3.86, payable at up to $3.96 rather than $3.75. Three of
 # those want $11.87 against an $11.25 cap.
 #
-# LEFT AS IT IS, DELIBERATELY. The third entry gets blocked rather than
-# sized up, which is the same safe direction the 8-share case below relies
-# on, and $11.25 is a blast radius rather than a number the sizing needs to
-# be consistent with. Raising it to $11.87 would be a decision to carry more
-# real exposure, and is the operator's to make, not a bookkeeping tidy-up.
+# NO LONGER LEFT AS IT IS. The mismatch was harmless only because the COUNT
+# cap bound first, every time -- which is the measurement below, and the
+# reason both numbers moved on 2026-08-25.
 #
 # LIVE_SIZE_OVERSHOOT_CEILING_USD ($5.00) does NOT set the trade size -- it
 # is headroom above that worst case, and only becomes the binding number if
 # a bucket reports a minimum larger than 5 shares.
 #
 # That is the case to watch. A bucket demanding, say, 8 shares at 0.60
-# would cost $4.80: still under the ceiling, but three of them need $14.40
-# and the exposure cap would stop the third. That failure is the safe
+# would cost $4.80: still under the ceiling, but two of them need $9.60 and
+# the exposure cap would stop the second. That failure is the safe
 # direction (fewer positions, not larger ones), which is why the ceiling is
 # allowed to run ahead of the exposure cap rather than being pinned to it.
 # If you raise the ceiling further, re-derive this ceiling x
 # LIVE_MAX_CONCURRENT_POSITIONS product rather than assuming it still holds.
-LIVE_MAX_CONCURRENT_POSITIONS = 3        # across all live stations
-LIVE_MAX_TOTAL_EXPOSURE_USD = 11.25      # sum of open live size_usd
+#
+# MEASURED 2026-08-25 over 344 h of live operation (22 entries, 19 closed),
+# because both numbers were derived from order mechanics and neither had
+# ever been checked against what the book actually does.
+#
+# THE COUNT CAP WAS THE ONLY LIVE CONSTRAINT. 8 blocks across 3 nights
+# (Aug 20/21/24) and ALL EIGHT WERE RCSS: WSSS is earlier in STATIONS, fills
+# at 21:01, and RCSS's candidates arrived at 21:02-23:54 to find the book
+# full. So the cap was not bounding aggregate risk, it was implementing an
+# undeclared station priority -- and it fell entirely on the station with 3
+# closed live positions against WSSS's 16. 18% of entry-window hours
+# (21:00-24:00Z) were spent at the cap, 3.8% of all hours. One of the three
+# nights (Aug 21 21:02) was the cross-day case: the previous day's WSSS
+# position still held a slot 25 minutes short of its 21:27Z resolution.
+#
+# THE DOLLAR CAP HAD NEVER BEEN WITHIN $4.74 OF FIRING. Peak exposure ever
+# was $6.51, 58% of the cap. It could not realistically fire at 3 slots:
+# cost is ~5 shares x entry price, so $11.25 needs all three positions
+# within a tick or two of MAX_ENTRY_PRICE simultaneously. Realized notionals
+# are nothing like that worst case -- mean $1.75, median $1.50, max $3.70.
+#
+# AND IT WAS DENOMINATED AGAINST NOTHING. Collateral on 2026-08-25 was
+# $13.51 free, ~$17.02 including open positions, so $11.25 authorised 66% of
+# the funded balance. That number fell out of tick size x share minimum x 3,
+# not out of anything anyone decided -- the same fiction as BANKROLL_USD,
+# one order of magnitude down.
+#
+# SO THE ROLES GO BACK TO THE INTENT AT THE HEAD OF THIS SECTION: dollars
+# bind, count is a sanity bound. 5 slots would have admitted all four
+# distinct blocked candidates at a reconstructed peak of $7.86, so $8.00
+# sits above every observed and counterfactual peak, below the 5-slot worst
+# case, and at 47% of the wallet rather than 66%. A full book of
+# minimum-size entries is $5.00 and of median-size entries $7.50, so the
+# cap bites on expensive books only -- which is the point.
+#
+# WHAT THIS DOES NOT CLAIM. The live book is +$15.65 on $35.05 staked, but
+# that is two outliers; ex-outliers it is +$1.25 on $33.00, i.e. flat, and
+# beats_market FAILS for both live stations (they trade on MATURITY_OVERRIDE).
+# This buys EVIDENCE on the starved station, not size on a proven edge, for
+# at most ~$4 of additional peak exposure. If that trade is not wanted, put
+# the count back to 3 and KEEP $8.00 -- the old $11.25 is wrong either way.
+LIVE_MAX_CONCURRENT_POSITIONS = 5        # across all live stations
+LIVE_MAX_TOTAL_EXPOSURE_USD = 8.00       # sum of open live size_usd
 LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
+
+# The exchange minimum the two backstops above are DERIVED against, in
+# shares. Probed 2026-08-10 ("mos":5 on the WSSS buckets). NOT used to build
+# orders -- wallet_client reads the real per-book value and may find a larger
+# one (see the 8-share case above). This exists so the relationship between
+# the two caps is assertable in a test instead of being rediscovered by
+# measuring the live book months later.
+ASSUMED_EXCHANGE_MIN_SHARES = 5.0
 
 # Entries submit as FOK (fill-or-kill), not GTC. A GTC limit order returns
 # an order id and then RESTS -- it is not a fill. Recording that as an open

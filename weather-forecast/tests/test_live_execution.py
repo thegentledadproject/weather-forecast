@@ -667,6 +667,25 @@ def test_live_entry_blocked_by_exposure_backstop(monkeypatch, mode, captured):
     assert captured["opened"] == []
 
 
+def test_the_dollar_cap_binds_before_the_count_cap():
+    """
+    The two live backstops are meant to bind in one order: dollars first,
+    count as a sanity bound. On 2026-08-25 that had silently inverted --
+    the count cap had blocked 8 entries across 3 nights while peak exposure
+    never exceeded 58% of the dollar cap, which made the dollar cap
+    decoration. Stated here so an edit to either constant fails on the
+    RELATIONSHIP rather than on someone re-measuring the live book.
+    """
+    worst_case_order = config.ASSUMED_EXCHANGE_MIN_SHARES * config.MAX_ENTRY_PRICE
+    assert config.LIVE_MAX_TOTAL_EXPOSURE_USD < (
+        config.LIVE_MAX_CONCURRENT_POSITIONS * worst_case_order
+    ), "the count cap binds first -- the exposure ceiling cannot fire"
+
+    assert config.LIVE_MAX_TOTAL_EXPOSURE_USD >= (
+        config.LIVE_MAX_CONCURRENT_POSITIONS * config.LIVE_TRADE_SIZE_USD
+    ), "the exposure cap blocks even a full book of minimum-size entries"
+
+
 def test_unapproved_decision_never_reaches_the_order_path(monkeypatch, mode, captured):
     mode("live")
     monkeypatch.setattr(wallet_client, "build_entry_order", _explode)
