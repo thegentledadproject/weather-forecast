@@ -22,7 +22,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c '$VENV_PY /usr/local/bin/generate_dashboard.py && $VENV_PY /usr/local/bin/generate_backtest_dashboard.py'
+ExecStart=/bin/sh -c '$VENV_PY /usr/local/bin/generate_dashboard.py --region asia && $VENV_PY /usr/local/bin/generate_dashboard.py --region europe && $VENV_PY /usr/local/bin/generate_backtest_dashboard.py'
 UNIT
 
 sudo tee /etc/systemd/system/polyweather-dashboard.timer >/dev/null <<UNIT
