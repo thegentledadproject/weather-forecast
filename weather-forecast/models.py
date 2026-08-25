@@ -51,6 +51,26 @@ class StationConfig:
     # registering a station in a DST region.
     utc_offset_hours: int = 8
 
+    # Which capital pool and blast radius this station draws from. Every
+    # per-region limit in config.py (REGION_BANKROLL_USD,
+    # REGION_MAX_DAILY_EXPOSURE_USD, REGION_LIVE_MAX_*) is keyed off this
+    # string. Defaults to "asia" so the 13 stations registered before
+    # 2026-08-24 keep the single shared pool they already had, unedited.
+    region: str = "asia"
+
+    # IANA timezone name, e.g. "Europe/London". When set, it OVERRIDES
+    # utc_offset_hours on the live trading path via
+    # config.current_utc_offset_hours() -- the offset is resolved from the
+    # tz database at call time, so a DST-observing station is correct in
+    # both halves of the year. When None (every Asian station), the static
+    # utc_offset_hours above is used exactly as before.
+    #
+    # utc_offset_hours MUST STILL BE SET even when this is: the backtest
+    # engine reads station.utc_offset_hours directly (backtest/engine.py)
+    # and has no notion of a moving clock. Set it to the station's
+    # STANDARD-time (winter) offset.
+    iana_timezone: Optional[str] = None
+
     # Sanity CROSS-CHECK bounds for this station's Polymarket bucket range.
     # NOT the source of truth on the trading path: Polymarket shifts a city's
     # 11-bucket window seasonally (Singapore moved 25-35 -> 27-37 between July
