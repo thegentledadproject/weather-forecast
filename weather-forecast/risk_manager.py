@@ -8,10 +8,12 @@ live price movement -- independent of whether the underlying weather
 outcome has resolved yet.
 
 Two mechanisms, checked in priority order:
-  1. Hard stop-loss from entry. It does NOT always apply: two price
+  1. Hard stop-loss from entry. It does NOT always apply: two ENTRY-price
      bands are exempt from it, config.LOTTERY_PRICE_THRESHOLD below and
-     config.STOP_EXEMPT_ABOVE_PRICE above. Within the band it does cover,
-     no "let it run" logic overrides cutting a loss past this bar.
+     config.STOP_EXEMPT_ABOVE_PRICE above, and as of 2026-08-24 it is also
+     skipped whenever the CURRENT price has fallen to config.MIN_EXIT_PRICE
+     or below, where selling is weakly dominated by holding. Within what
+     remains, no "let it run" logic overrides cutting a loss past this bar.
   2. Fixed profit-take -- the only upside exit, and the one exit that
      applies at every entry price.
 
@@ -261,12 +263,58 @@ def evaluate_exit(
     # and MAX_ENTRY_PRICE still caps how much stake can be at risk.
     is_stop_exempt_high = position.entry_price >= config.STOP_EXEMPT_ABOVE_PRICE
 
+    # The third carve-out, and the ONLY one keyed on the CURRENT price rather
+    # than the entry price (2026-08-24). At or below config.MIN_EXIT_PRICE a
+    # sale raises almost nothing -- at a bid of exactly 0.0000 it raises
+    # NOTHING -- while forfeiting the whole remaining payout. Selling there is
+    # weakly dominated by holding: both pay 0 if the bucket loses, and only
+    # holding pays if it wins. (Strict dominance is the 0.0000 case; across the
+    # rest of the band the argument is that the stop exists to cut a loss that
+    # could still get WORSE, and at most MIN_EXIT_PRICE per share of loss
+    # remains to cut.)
+    #
+    # This is NOT the "is this price real?" question position_manager already
+    # answers by re-fetching and asking Gamma. It is what to DO once that
+    # answer comes back "yes -- the market is open and it really is bidding
+    # zero", which is the branch that used to fall straight through to here.
+    #
+    # MEASURED on the paper book 2026-08-24, and the honest headline is that
+    # this recovers NO money on the record so far. 4 of 131 closed stops match
+    # this condition, but 2 are WSSS 2026-08-03 rows at entry 0.04/0.05 that
+    # LOTTERY_PRICE_THRESHOLD already exempts today, so it bites on 2: ZBAA
+    # 2026-08-24 bkt32 @0.40 and ZBAA 2026-08-07 bkt35 @0.22, both sold at a
+    # gross bid of 0.0000 for -100%. BOTH settled to a loss, so selling at zero
+    # paid exactly what holding would have. Net P&L impact on history: $0.00.
+    #
+    # It is a correctness fix, not a P&L fix, and it is worth making anyway
+    # because the action is DOMINATED -- never better, sometimes worse, so
+    # removing it costs nothing. Two concrete harms it ends:
+    # "closed_stop_loss" is in config.COOLDOWN_COUNTED_EXIT_STATUSES, so such a
+    # row ALSO blocked re-entry on that bucket for the rest of the day as though
+    # the market had rejected the entry; and it books an exit reason and price
+    # that misdescribe what happened -- the exact double corruption
+    # config.MIN_EXIT_PRICE's own comment warns about, arrived at through the
+    # one path that comment did not anticipate. The zero-bid position that
+    # WOULD have won has not occurred yet in 131 stops; that is the case this
+    # exists to catch.
+    #
+    # DELIBERATELY NOT MIRRORED at the top of the book. Selling at or above
+    # 1 - MIN_EXIT_PRICE hands over very nearly the full payout with certainty
+    # and frees the position; that is a genuine trade-off, not a dominated one.
+    #
+    # Downside protection is unchanged in kind from the other two carve-outs:
+    # resolution detection in position_manager still closes these, and it is
+    # the only thing that ever could down here.
+    is_worthless_bid = current_price <= config.MIN_EXIT_PRICE
+
     # 1. Hard stop-loss -- always checked first, overrides everything else.
-    #    NOT "a safety net that always applies": there are now two price
-    #    bands where it does not apply at all. See the module docstring.
+    #    NOT "a safety net that always applies": there are now three bands
+    #    where it does not apply at all -- two keyed on entry price, one on
+    #    the current price. See the module docstring.
     if (
         not is_lottery
         and not is_stop_exempt_high
+        and not is_worthless_bid
         and (position.entry_price - current_price) >= thresholds["stop_loss_pct"] * unit
     ):
         return ExitDecision(
