@@ -34,11 +34,14 @@ class _FrozenDatetime:
 def test_stations_group_by_utc_offset_matching_the_registry():
     groups = scheduler.stations_by_utc_offset()
 
-    assert set(groups) == {5, 8, 9}
-
-    expected = {5: [], 8: [], 9: []}
+    expected = {}
     for icao, st in config.STATIONS.items():
-        expected[st.utc_offset_hours].append(icao)
+        # The RESOLVED offset, not the static field: a European station's
+        # group follows its current DST state (config.current_utc_offset_hours),
+        # not the static utc_offset_hours -- which is fixed at the
+        # standard-time value and would put a summer-DST station in the
+        # wrong group here.
+        expected.setdefault(config.current_utc_offset_hours(icao), []).append(icao)
 
     # Order within a group: scheduler iterates config.STATIONS in its own
     # insertion order, same as the expected dict built the same way here.

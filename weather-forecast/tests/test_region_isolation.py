@@ -717,3 +717,71 @@ class TestPooledSpreadIsRegionScoped:
         _, n = calibration.pooled_error_spread()
 
         assert n == 2 * len(config.STATIONS)
+
+
+class TestEuropeRegistry:
+    def test_every_europe_station_sets_an_iana_timezone(self):
+        """
+        A DST region without a tz name is the exact bug this framework
+        exists to prevent -- it would trade on a static offset that is
+        wrong for half the year.
+        """
+        for icao, st in config.STATIONS.items():
+            if st.region == "europe":
+                assert st.iana_timezone, f"{icao}: region=europe requires an iana_timezone"
+
+    def test_every_declared_timezone_actually_resolves(self):
+        """
+        A typo'd iana_timezone is a STATIC config error -- it needs no clock
+        to detect, so it should be caught here at collection time and not at
+        05:00 in the daemon.
+
+        scheduler.stations_by_utc_offset() skips such a station and logs it
+        loudly (Task 3), which keeps the other stations trading but means the
+        typo'd one silently does not trade at all. This assertion is what
+        stops that state from ever reaching a deployment.
+        """
+        for icao, st in config.STATIONS.items():
+            if not st.iana_timezone:
+                continue
+            # Raises ZoneInfoNotFoundError if the name is not in the tz db.
+            config.current_utc_offset_hours(st)
+
+    def test_every_europe_station_also_keeps_a_static_offset(self):
+        """
+        backtest/engine.py reads station.utc_offset_hours directly and has
+        no notion of a moving clock. The static field must stay set to the
+        standard-time value.
+        """
+        for icao, st in config.STATIONS.items():
+            if st.region == "europe":
+                assert st.utc_offset_hours in (0, 1), (
+                    f"{icao}: expected a European standard-time offset, "
+                    f"got {st.utc_offset_hours}"
+                )
+
+    def test_no_europe_station_is_allowlisted_for_real_money(self):
+        for icao in config.LIVE_TRADING_STATIONS:
+            assert config.region_of(icao) == "asia", (
+                f"{icao} is a non-Asian station on the real-money allowlist; "
+                f"its region is funded at zero and this is a contradiction"
+            )
+
+    def test_europe_stations_are_present_and_all_exploratory(self):
+        europe = config.stations_in_region("europe")
+        assert europe, "no European station registered"
+        for icao in europe:
+            assert config.MATURITY_SNAPSHOT[icao] == "exploratory", icao
+
+    def test_every_named_region_has_funding_entries(self):
+        """
+        Every region named by a station must have funding entries in all
+        five dicts, or a lookup raises at trade time.
+        """
+        regions = {st.region for st in config.STATIONS.values()}
+        for region in regions:
+            assert region in config.REGION_BANKROLL_USD, region
+            assert region in config.REGION_MAX_DAILY_EXPOSURE_USD, region
+            assert region in config.REGION_LIVE_MAX_CONCURRENT_POSITIONS, region
+            assert region in config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, region
+            assert region in config.REGION_LIVE_MAX_ORDERS_PER_DAY, region

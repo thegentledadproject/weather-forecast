@@ -534,6 +534,266 @@ STATIONS = {
         # instead of settling Karachi P&L on a maybe-wrong station.
         metar_ingest_mode="proxy",
     ),
+    # --- Europe --------------------------------------------------------------
+    # Registered 2026-08-25. Confirmed facts in
+    # docs/superpowers/research/2026-08-24-europe-station-facts.md.
+    #
+    # TWO THINGS EVERY ENTRY HERE MUST CARRY, neither of which any Asian
+    # entry needs:
+    #   region="europe"       -- draws on a pool funded at $0 (see
+    #                            REGION_BANKROLL_USD below). Collection and
+    #                            scoring only; it cannot size a live order.
+    #   iana_timezone=...     -- these cities observe DST. utc_offset_hours
+    #                            is ALSO set, to the STANDARD-time value,
+    #                            because backtest/engine.py reads it
+    #                            directly and has no moving clock.
+    # monsoon_phase_by_month deliberately omitted (defaults to {}) for every
+    # station below, same as the Asian entries: the field feeds no
+    # calculation, and the shared SE Asian monsoon lookup is meaningless in
+    # Europe. No seed_observations either -- these are brand-new stations.
+    #
+    # PROVENANCE (read before trusting anything below): gamma-api.polymarket.com
+    # and polymarket.com itself were network-blocked in the research
+    # environment (confirmed three independent ways -- curl, browser tool,
+    # WebFetch). Every Polymarket-sourced fact here (bucket windows, city
+    # slugs, resolution-source text) therefore comes from polym.trade, a
+    # third-party mirror, captured 2026-08-25 -- NOT the primary Gamma API the
+    # design doc names. Each fact that matters for registry correctness was
+    # cross-checked against a second, independent source: ICAO/lat/lon against
+    # Wikipedia airport infoboxes, station identity against Wunderground's own
+    # history page, METAR availability directly against aviationweather.gov,
+    # and WWIS city-list membership directly against worldweather.wmo.int (not
+    # via the mirror). See this file's own header for the standing reminder
+    # that bucket_min_c/bucket_max_c are CROSS-CHECKS ONLY and go stale within
+    # days regardless of source -- the live token map is authoritative at
+    # trade time.
+    #
+    # RESOLUTION SOURCE: every European market's rules text names NOAA
+    # (weather.gov/wrh/timeseries?site=<icao>), not Wunderground, as the cited
+    # resolution source -- a real difference from the Asian markets' text.
+    # But for all seven cities the NOAA site= station and the Wunderground
+    # history-page station are the SAME named airport (same ICAO, same
+    # station header on both pages), and aviationweather.gov -- the exact
+    # endpoint clients/metar_client.py already calls -- has live whole-
+    # degree-C METAR for all seven. This is a different DISPLAY SOURCE for
+    # the same station, not a different station: not the VHHH case (a
+    # genuinely different, systematically cooler station) and not the OPKC
+    # case (unconfirmed station identity). So every entry below keeps the
+    # defaults metar_ingest_mode="resolution" and
+    # resolution_grade_source="metar_daily_max" -- set explicitly here even
+    # though they match the dataclass defaults, so this reasoning is visible
+    # at the call site rather than only in this comment block.
+    #
+    # OPEN ITEM, NOT YET MEASURED: nobody has diffed a NOAA weather.gov
+    # daily-max reading against aviationweather.gov's METAR-derived daily max
+    # for the same station on the same settled day. Both draw on the global
+    # METAR network and both claim whole-degree-C precision, so the
+    # expectation is that they agree, but that is an expectation, not a
+    # measurement. This should be checked -- e.g. by comparing a handful of
+    # settled days once observations exist -- before any European station is
+    # considered for promotion past "exploratory".
+    #
+    # long_term_normal_max_c: no city's value below is sourced to an official
+    # 1991-2020 normal (see the research doc's per-city confidence table).
+    # Per an explicit controller ruling, every value here is instead the
+    # MIDPOINT of that city's live bucket window at registration time -- an
+    # arbitrary, honestly-labeled placeholder, not a claimed climatological
+    # figure. This is the same anticipated state config.py already documents
+    # near MIN_RESOLUTION_OBS_BEFORE_ENTRY: a brand-new station starts with a
+    # placeholder normal, and MIN_RESOLUTION_OBS_BEFORE_ENTRY=10 is the
+    # designed mitigation -- no station trades on this number until it has
+    # accumulated its own settlement-grade observation history.
+    "EGLC": StationConfig(
+        icao="EGLC",
+        display_name="London City Airport",
+        country="United Kingdom",
+        lat=51.50528,
+        lon=0.05528,
+        wunderground_slug="gb/london/EGLC",
+        long_term_normal_max_c=22.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (17-27), NOT a sourced normal. No
+                                       # EGLC-specific 1991-2020 Met Office
+                                       # normal was found; Heathrow's 23.4C
+                                       # is a DIFFERENT station and must not
+                                       # be substituted (different site,
+                                       # inland vs. riverside).
+        official_client_key="wwis",
+        # London is genuinely absent from the WWIS city list -- checked
+        # directly against worldweather.wmo.int's full city list, twice,
+        # targeted at the UK block. Same honest gap as RCSS/Taipei: the wwis
+        # client returns None rather than guessing.
+        wwis_city_name="",
+        polymarket_city_slug="london",
+        region="europe",
+        iana_timezone="Europe/London",
+        utc_offset_hours=0,
+        bucket_min_c=17,
+        bucket_max_c=27,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "LFPB": StationConfig(
+        icao="LFPB",
+        display_name="Paris-Le Bourget Airport",
+        country="France",
+        lat=48.96000,
+        lon=2.43500,
+        wunderground_slug="fr/paris/LFPB",
+        long_term_normal_max_c=27.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (22-32), NOT a sourced normal.
+                                       # Meteo-France's 1991-2020 normals
+                                       # publication was located but the
+                                       # Le Bourget August daily-max figure
+                                       # was not extracted from it.
+        official_client_key="wwis",
+        wwis_city_name="Paris",
+        polymarket_city_slug="paris",
+        region="europe",
+        iana_timezone="Europe/Paris",
+        utc_offset_hours=1,
+        bucket_min_c=22,
+        bucket_max_c=32,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "LEMD": StationConfig(
+        icao="LEMD",
+        display_name="Adolfo Suárez Madrid–Barajas Airport",
+        country="Spain",
+        lat=40.47222,
+        lon=-3.56083,
+        wunderground_slug="es/madrid/LEMD",
+        long_term_normal_max_c=29.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (24-34), NOT a sourced normal.
+                                       # AEMET's own "Madrid Aeropuerto"
+                                       # (Barajas) normals page gives 32.8C
+                                       # for August mean max, but for the
+                                       # 1981-2010 reference period, not the
+                                       # 1991-2020 period used elsewhere in
+                                       # this registry -- wrong period, so
+                                       # not adopted as-is.
+        official_client_key="wwis",
+        wwis_city_name="Madrid",
+        polymarket_city_slug="madrid",
+        region="europe",
+        iana_timezone="Europe/Madrid",
+        utc_offset_hours=1,
+        bucket_min_c=24,
+        bucket_max_c=34,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "EHAM": StationConfig(
+        icao="EHAM",
+        display_name="Amsterdam Airport Schiphol",
+        country="Netherlands",
+        lat=52.30000,
+        lon=4.76500,
+        wunderground_slug="nl/amsterdam/EHAM",
+        long_term_normal_max_c=25.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (20-30), NOT a sourced normal. KNMI's
+                                       # own Schiphol climate page was reached
+                                       # twice without surfacing a 1991-2020
+                                       # August daily-max figure; a
+                                       # third-party aggregator 403'd.
+        official_client_key="wwis",
+        # EXACT match string required -- wwis.py's lookup is .lower()-only
+        # with no other normalization, so the parenthetical below is part of
+        # the match, not decoration. A plain "Amsterdam" would NOT match.
+        wwis_city_name="Amsterdam (Schiphol)",
+        polymarket_city_slug="amsterdam",
+        region="europe",
+        iana_timezone="Europe/Amsterdam",
+        utc_offset_hours=1,
+        bucket_min_c=20,
+        bucket_max_c=30,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "LIMC": StationConfig(
+        icao="LIMC",
+        # Malpensa, NOT Linate (LIML) -- Milan has two major airports and
+        # NOAA/Wunderground both independently point at Malpensa as the
+        # settlement station, so this is confirmed, not a guess between them.
+        display_name="Milan Malpensa Airport",
+        country="Italy",
+        lat=45.63000,
+        lon=8.72306,
+        wunderground_slug="it/milan/LIMC",
+        long_term_normal_max_c=25.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (20-30), NOT a sourced normal.
+                                       # Sources disagree by several degrees
+                                       # (city-center ~29-30C vs. a
+                                       # Malpensa-airport aggregator's
+                                       # ~26-29C) with no official ARPA
+                                       # Lombardia figure located -- picking
+                                       # either would be arbitrary.
+        official_client_key="wwis",
+        # EXACT match string required, same reason as Amsterdam above --
+        # wwis.py lowercases but does not otherwise normalize.
+        wwis_city_name="Milan (MILANO)",
+        polymarket_city_slug="milan",
+        region="europe",
+        iana_timezone="Europe/Rome",
+        utc_offset_hours=1,
+        bucket_min_c=20,
+        bucket_max_c=30,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "EDDM": StationConfig(
+        icao="EDDM",
+        display_name="Munich Airport",
+        country="Germany",
+        lat=48.35389,
+        lon=11.78611,
+        wunderground_slug="de/munich/EDDM",
+        long_term_normal_max_c=18.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (13-23), NOT a sourced normal. DWD's
+                                       # own Munich Airport climate page was
+                                       # reached but did not yield an August
+                                       # figure in this pass (and states it
+                                       # generally uses an even older
+                                       # 1981-2010 reference period); the
+                                       # ~24C figure seen elsewhere is from an
+                                       # unverified secondary source and was
+                                       # not adopted.
+        official_client_key="wwis",
+        wwis_city_name="Munich",
+        polymarket_city_slug="munich",
+        region="europe",
+        iana_timezone="Europe/Berlin",
+        utc_offset_hours=1,
+        bucket_min_c=13,
+        bucket_max_c=23,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "EPWA": StationConfig(
+        icao="EPWA",
+        display_name="Warsaw Chopin Airport",
+        country="Poland",
+        lat=52.16583,
+        lon=20.96722,
+        wunderground_slug="pl/warsaw/EPWA",
+        long_term_normal_max_c=22.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (17-27), NOT a sourced normal. A
+                                       # ~24.7C figure from a secondary
+                                       # aggregator claims the 1991-2020
+                                       # period but is not sourced to IMGW
+                                       # (Poland's national met service)
+                                       # directly, so it was not adopted.
+        official_client_key="wwis",
+        wwis_city_name="Warsaw",
+        polymarket_city_slug="warsaw",
+        region="europe",
+        iana_timezone="Europe/Warsaw",
+        utc_offset_hours=1,
+        bucket_min_c=17,
+        bucket_max_c=27,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
 }
 
 
@@ -2318,6 +2578,13 @@ MATURITY_SNAPSHOT = {
     "ZGGG": "exploratory",
     "ZGSZ": "exploratory",
     "OPKC": "exploratory",
+    "EGLC": "exploratory",
+    "LFPB": "exploratory",
+    "LEMD": "exploratory",
+    "EHAM": "exploratory",
+    "LIMC": "exploratory",
+    "EDDM": "exploratory",
+    "EPWA": "exploratory",
 }
 
 _maturity_cache: dict = {}
