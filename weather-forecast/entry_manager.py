@@ -32,6 +32,11 @@ smaller:
       means this bet is on. Repeat entries across cycles are not extra
       opportunities, they are one bet accidentally sized up past every
       per-trade cap below.
+  0b2. Opposite-side lock -- an open position on the same (station, date,
+      bucket) with the OTHER side is the same bet with the sign flipped,
+      and 0b's side filter cannot see it. Buying both locks in the spread
+      on the overlap and leaves the remainder naked; RPLL held both sides
+      of bucket 32 on 2026-08-24 and paid for it.
 
 Then four checks, in order, for every surviving candidate EVResult:
   1. Kelly-fraction sizing off the real edge (raw_edge / (1 - price)),
@@ -90,6 +95,9 @@ from clients import market_client
 # every scan cycle all day. In-memory on purpose: keys embed the date, so
 # the set stays small and a restart merely re-logs each veto once.
 _bucket_cap_vetoes_logged = set()
+
+# Same dedup pattern for the opposite-side lock (0b2).
+_opposite_side_vetoes_logged = set()
 
 # Same dedup pattern for the daily stop-out cooldown veto (0c).
 _cooldown_vetoes_logged = set()
@@ -613,6 +621,58 @@ def evaluate_entry(
         return _rejected(
             f"Per-bucket cap: {open_count} position(s) already open on this bucket/side "
             f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET})."
+        )
+
+    # Veto 0b2: the OPPOSITE side of the same bucket is already open.
+    #
+    # Veto 0b above counts only the side being bought, so it cannot see the
+    # bet it is really guarding against: the same bucket with the sign
+    # flipped. RPLL's book on 2026-08-24 held both at once --
+    #
+    #     21:41Z  RPLL 32 YES @0.34  $4.54   model P(32) = 0.4234
+    #     22:20Z  RPLL 32 NO  @0.64  $14.04  model P(32) = 0.2215
+    #
+    # -- 39 minutes apart, with the model's P(32) halved in between. The
+    # overlapping 13.35 shares cost 0.34 + 0.64 = $0.98 for a guaranteed
+    # $1.00, which the taker fee then eats; the remainder is a naked NO
+    # opened against a YES the same book still held. RPLL settled 32, so
+    # the YES was right and closed early for +$1.44 while the NO rode to
+    # -$14.04.
+    #
+    # BLOCKING THE NEW ENTRY, not closing the old one, is deliberate. It is
+    # the conservative direction -- refusing an entry can only make trading
+    # less likely -- and a model that has changed its mind should be
+    # exiting the position it no longer believes in through the exit path,
+    # where the stop, the take and resolution detection all apply. Opening
+    # its own hedge through the entry path pays the spread twice to reach a
+    # position it could have reached by selling.
+    opposite_side = "NO" if ev_result.side.upper() == "YES" else "YES"
+    opposite_count = count_open_positions_for_bucket(
+        station_icao, ev_result.target_date, ev_result.bucket_c, opposite_side,
+        is_paper=candidate_is_paper,
+    )
+    if opposite_count is None:
+        print(
+            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: could not read "
+            f"open positions, so the opposite-side lock cannot be enforced -- refusing to open blind."
+        )
+        return _rejected(
+            "Open positions unreadable -- opposite-side lock unenforceable, refusing to open blind."
+        )
+
+    if opposite_count > 0:
+        veto_key = (station_icao, ev_result.target_date, ev_result.bucket_c, ev_result.side.upper())
+        if veto_key not in _opposite_side_vetoes_logged:
+            _opposite_side_vetoes_logged.add(veto_key)
+            print(
+                f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side} on "
+                f"{ev_result.target_date}: {opposite_count} {opposite_side} position(s) already open on this "
+                f"bucket. Buying both sides is not two bets -- it locks in the spread on the overlap and "
+                f"leaves the remainder naked. If the model has changed its mind, the old leg should be SOLD, "
+                f"not hedged. (Further opposite-side vetoes for this bucket today will not be logged.)"
+            )
+        return _rejected(
+            f"Opposite side already open: {opposite_count} {opposite_side} position(s) on this bucket."
         )
 
     # Veto 0c: stop-out cooldown. The open-position cap (0b) stops STACKING

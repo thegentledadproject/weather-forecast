@@ -40,34 +40,41 @@ def make_ev(model_prob, price, station="WSSS", bucket=32, side="YES", fee=0.0,
     )
 
 
-# (label, ev, open_count_for_bucket, stop_outs_for_bucket, depth_usd, slippage, min_net_ev)
+# (label, ev, open_count_for_bucket, opposite_count_for_bucket,
+#  stop_outs_for_bucket, depth_usd, slippage, min_net_ev)
 # open_count_for_bucket=None replicates "open positions unreadable" (gate 3);
+# opposite_count_for_bucket=None replicates the same read failing on the
+# OPPOSITE-side lookup (gate 4b), which live reaches only after gate 3 has
+# already seen a readable book;
 # stop_outs_for_bucket=None replicates "position history unreadable" (gate 5).
 CASES = [
-    ("gate1_raw_edge_veto",         make_ev(0.95, 0.30), 0,    0,    1000.0, 0.01, 0.15),
-    ("gate2_materiality_floor",     make_ev(0.37, 0.35), 0,    0,    1000.0, 0.01, 0.15),
+    ("gate1_raw_edge_veto",         make_ev(0.95, 0.30), 0,    0,    0,    1000.0, 0.01, 0.15),
+    ("gate2_materiality_floor",     make_ev(0.37, 0.35), 0,    0,    0,    1000.0, 0.01, 0.15),
     ("gate2_low_conf_doubled_bar",  make_ev(0.395, 0.35, spread_source="fallback_default"),
-                                                         0,    0,    1000.0, 0.01, 0.15),
-    ("gate3_unreadable_count",      make_ev(0.55, 0.35), None, 0,    1000.0, 0.01, 0.15),
-    ("gate4_per_bucket_cap",        make_ev(0.55, 0.35), 1,    0,    1000.0, 0.01, 0.15),
-    ("gate5_unreadable_history",    make_ev(0.55, 0.35), 0,    None, 1000.0, 0.01, 0.15),
-    ("gate6_stop_out_cooldown",     make_ev(0.55, 0.35), 0,    1,    1000.0, 0.01, 0.15),
-    ("gate7_kelly_le_zero",         make_ev(0.20, 0.35), 0,    0,    1000.0, 0.01, 0.15),
-    ("gate8_depth_unknown",         make_ev(0.55, 0.35), 0,    0,    None,   0.01, 0.15),
-    ("gate9_depth_too_thin",        make_ev(0.55, 0.35), 0,    0,    2.0,    0.01, 0.15),
-    ("gate10_slippage_gate",        make_ev(0.55, 0.35), 0,    0,    1000.0, 0.40, 0.15),
-    ("gate11_net_ev_at_size",       make_ev(0.55, 0.35), 0,    0,    1000.0, 0.01, 0.90),
-    ("gate12_approved",             make_ev(0.55, 0.35), 0,    0,    1000.0, 0.01, 0.15),
-    ("gate12_approved_exploratory", make_ev(0.55, 0.35, station="WMKK"), 0, 0, 1000.0, 0.01, 0.15),
+                                                         0,    0,    0,    1000.0, 0.01, 0.15),
+    ("gate3_unreadable_count",      make_ev(0.55, 0.35), None, 0,    0,    1000.0, 0.01, 0.15),
+    ("gate4_per_bucket_cap",        make_ev(0.55, 0.35), 1,    0,    0,    1000.0, 0.01, 0.15),
+    ("gate4b_unreadable_opposite",  make_ev(0.55, 0.35), 0,    None, 0,    1000.0, 0.01, 0.15),
+    ("gate4c_opposite_side_open",   make_ev(0.55, 0.35), 0,    1,    0,    1000.0, 0.01, 0.15),
+    ("gate5_unreadable_history",    make_ev(0.55, 0.35), 0,    0,    None, 1000.0, 0.01, 0.15),
+    ("gate6_stop_out_cooldown",     make_ev(0.55, 0.35), 0,    0,    1,    1000.0, 0.01, 0.15),
+    ("gate7_kelly_le_zero",         make_ev(0.20, 0.35), 0,    0,    0,    1000.0, 0.01, 0.15),
+    ("gate8_depth_unknown",         make_ev(0.55, 0.35), 0,    0,    0,    None,   0.01, 0.15),
+    ("gate9_depth_too_thin",        make_ev(0.55, 0.35), 0,    0,    0,    2.0,    0.01, 0.15),
+    ("gate10_slippage_gate",        make_ev(0.55, 0.35), 0,    0,    0,    1000.0, 0.40, 0.15),
+    ("gate11_net_ev_at_size",       make_ev(0.55, 0.35), 0,    0,    0,    1000.0, 0.01, 0.90),
+    ("gate12_approved",             make_ev(0.55, 0.35), 0,    0,    0,    1000.0, 0.01, 0.15),
+    ("gate12_approved_exploratory", make_ev(0.55, 0.35, station="WMKK"), 0, 0, 0, 1000.0, 0.01, 0.15),
 ]
 
 
 @pytest.mark.parametrize(
-    "ev,open_count,stop_outs,depth,slip,min_net_ev",
+    "ev,open_count,opposite_count,stop_outs,depth,slip,min_net_ev",
     [case[1:] for case in CASES],
     ids=[case[0] for case in CASES],
 )
-def test_entry_decision_field_parity(monkeypatch, ev, open_count, stop_outs, depth, slip, min_net_ev):
+def test_entry_decision_field_parity(monkeypatch, ev, open_count, opposite_count, stop_outs,
+                                     depth, slip, min_net_ev):
     # Pin every station to paper for the duration of this test.
     #
     # The parity contract is about the GATE CHAIN -- raw edge, materiality,
@@ -88,21 +95,36 @@ def test_entry_decision_field_parity(monkeypatch, ev, open_count, stop_outs, dep
     )
 
     # Stub live I/O so evaluate_entry sees exactly what the sim is handed.
-    if open_count is None:
-        def _unreadable(**kw):
+    # Live reads the open book TWICE -- once for the same-side cap (gate 4)
+    # and once for the opposite-side lock (gate 4c) -- filtering by side in
+    # Python both times. So one list carrying both sides drives both counts,
+    # and "unreadable" is modelled per-call: open_count=None fails the first
+    # read, opposite_count=None fails only the second.
+    _paper = executor.EXECUTION_MODE.get(ev.station_icao, "manual_review") == "paper"
+    _flipped = "NO" if ev.side.upper() == "YES" else "YES"
+
+    def _pos(i, side):
+        return Position(
+            position_id=f"x{side}{i}", station_icao=ev.station_icao, target_date=ev.target_date,
+            bucket_c=ev.bucket_c, side=side, entry_price=0.3, size_usd=10.0,
+            entry_time="2026-08-10T00:00:00+00:00", is_paper=_paper,
+        )
+
+    fake_positions = (
+        [_pos(i, ev.side) for i in range(open_count or 0)]
+        + [_pos(i, _flipped) for i in range(opposite_count or 0)]
+    )
+    reads = []
+
+    def _load(**kw):
+        reads.append(kw)
+        if open_count is None:
             raise RuntimeError("db down")
-        monkeypatch.setattr(storage, "load_open_positions", _unreadable)
-    else:
-        fake_positions = [
-            Position(
-                position_id=f"x{i}", station_icao=ev.station_icao, target_date=ev.target_date,
-                bucket_c=ev.bucket_c, side=ev.side, entry_price=0.3, size_usd=10.0,
-                entry_time="2026-08-10T00:00:00+00:00",
-                is_paper=(executor.EXECUTION_MODE.get(ev.station_icao, "manual_review") == "paper"),
-            )
-            for i in range(open_count)
-        ]
-        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: list(fake_positions))
+        if opposite_count is None and len(reads) >= 2:
+            raise RuntimeError("db down")
+        return list(fake_positions)
+
+    monkeypatch.setattr(storage, "load_open_positions", _load)
 
     if stop_outs is None:
         def _history_unreadable(*a, **kw):
@@ -127,6 +149,7 @@ def test_entry_decision_field_parity(monkeypatch, ev, open_count, stop_outs, dep
     live = entry_manager.evaluate_entry(ev, "TOKEN-1", min_net_ev=min_net_ev)
     sim = entry_sim.evaluate_entry_sim(
         ev=ev, token_id="TOKEN-1", open_count_for_bucket=open_count,
+        opposite_count_for_bucket=opposite_count,
         stop_outs_for_bucket=stop_outs, depth_usd=depth,
         slippage_fn=lambda size_usd: slip, min_net_ev=min_net_ev,
         sizing_bankroll=config.BANKROLL_USD,

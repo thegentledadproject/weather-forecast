@@ -170,6 +170,7 @@ _REASON_PREFIXES: Tuple[Tuple[str, str], ...] = (
     ("Absolute edge", "edge_immaterial"),
     ("Open positions unreadable", "open_positions_unreadable"),
     ("Per-bucket cap", "per_bucket_cap"),
+    ("Opposite side already open", "opposite_side_open"),
     ("Position history unreadable", "position_history_unreadable"),
     ("Stop-out cooldown", "stop_out_cooldown"),
     ("No positive edge", "no_positive_edge"),
