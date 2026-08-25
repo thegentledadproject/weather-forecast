@@ -785,3 +785,215 @@ class TestEuropeRegistry:
             assert region in config.REGION_LIVE_MAX_CONCURRENT_POSITIONS, region
             assert region in config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, region
             assert region in config.REGION_LIVE_MAX_ORDERS_PER_DAY, region
+
+
+import backtest.engine as engine
+from backtest import entry_sim as entry_sim_module
+from backtest.portfolio import PortfolioState
+from backtest.simclock import SimClock, Tick
+
+
+class _StopAfterPortfolioConstruction(Exception):
+    """Sentinel raised the instant PortfolioState's args are captured, so the
+    test never reaches engine.run()'s storage/price_store I/O below it."""
+
+
+class TestBacktestEngineIsRegionAware:
+    """
+    Regression coverage for the fix to Finding 2 of the final whole-branch
+    review: backtest/engine.py used to size and cap EVERY replay off Asia's
+    flat config.BANKROLL_USD / config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD
+    constants, regardless of the station's region. A European replay
+    therefore ran on Asia's $1,000 Kelly bankroll and $400 daily cap instead
+    of the region's $0.00/$0.00, and could report sized entries and a P&L
+    number the live path structurally cannot produce -- exactly the number
+    someone would read when deciding whether to fund Europe.
+
+    tests/test_parity_entry.py runs on WSSS, where
+    config.region_bankroll_usd("WSSS") == config.BANKROLL_USD makes
+    region-aware and region-blind code indistinguishable. These tests use a
+    region whose numbers differ from the global defaults, which is the only
+    way to tell "the region's own value was used" from "the global default
+    was used instead."
+
+    Two call sites are covered, matching the two lines named in the review:
+      * engine.run() constructing PortfolioState (backtest/engine.py, was
+        line 498).
+      * engine._entry_pass() calling entry_sim.decide_portfolio_entries_sim()
+        (backtest/engine.py, was line 523/1118) -- specifically, that it now
+        passes max_portfolio_usd rather than leaving it at the function's
+        None default, which silently falls back to Asia's global
+        MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD inside
+        entry_manager.apply_portfolio_budget().
+
+    Both are asserted at the narrowest honest level -- the value actually
+    threaded into the PortfolioState constructor / the
+    decide_portfolio_entries_sim() call -- rather than by running a full
+    replay to completion. A full replay would need its own seeded
+    forecast/observation/market-data scenario (see tests/conftest.py's
+    build_scenario(), which is hardcoded to WSSS and to Asia-shaped data)
+    and would exercise far more machinery than this fix touches. Both tests
+    below short-circuit immediately after the call site of interest, via a
+    capturing stand-in that raises a sentinel exception the instant it has
+    recorded its arguments -- so neither test needs a database, a market
+    data file, or any forecast/observation history at all.
+    """
+
+    def test_run_constructs_portfolio_state_with_the_region_bankroll(self, monkeypatch):
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setitem(config.STATIONS, "EUTEST", eu)
+
+        captured = {}
+
+        def _capturing_portfolio_state(bankroll_usd, bankroll_mode="static"):
+            captured["bankroll_usd"] = bankroll_usd
+            raise _StopAfterPortfolioConstruction
+
+        monkeypatch.setattr(engine, "PortfolioState", _capturing_portfolio_state)
+
+        d = _date(2026, 8, 24)
+        with pytest.raises(_StopAfterPortfolioConstruction):
+            engine.run(station_icao="EUTEST", start_date=d, end_date=d)
+
+        assert captured["bankroll_usd"] == 0.0
+        assert captured["bankroll_usd"] == config.region_bankroll_usd("EUTEST")
+        assert captured["bankroll_usd"] != config.BANKROLL_USD, (
+            "a European replay must not size off Asia's bankroll"
+        )
+
+    def test_run_constructs_portfolio_state_with_asias_bankroll_for_an_asia_station(
+        self, monkeypatch
+    ):
+        """Back-compat: an Asia station's replay is unchanged by the fix."""
+        captured = {}
+
+        def _capturing_portfolio_state(bankroll_usd, bankroll_mode="static"):
+            captured["bankroll_usd"] = bankroll_usd
+            raise _StopAfterPortfolioConstruction
+
+        monkeypatch.setattr(engine, "PortfolioState", _capturing_portfolio_state)
+
+        d = _date(2026, 8, 24)
+        with pytest.raises(_StopAfterPortfolioConstruction):
+            engine.run(station_icao="WSSS", start_date=d, end_date=d)
+
+        assert captured["bankroll_usd"] == config.BANKROLL_USD
+
+    def test_entry_pass_caps_a_europe_cycle_at_the_region_daily_exposure(self, monkeypatch):
+        """
+        Drives the real engine._entry_pass() end to end (no DB, no market
+        data -- an empty token_map means the per-candidate loop never runs,
+        so decide_portfolio_entries_sim() is reached with zero candidates,
+        exactly like an ordinary cycle that screened nothing in). Spies on
+        entry_sim.decide_portfolio_entries_sim() to capture the
+        max_portfolio_usd it was actually called with.
+        """
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London",
+                      utc_offset_hours=0)
+        monkeypatch.setitem(config.STATIONS, "EUTEST", eu)
+
+        captured = {}
+        real_decide = entry_sim_module.decide_portfolio_entries_sim
+
+        def _capturing_decide(*args, **kwargs):
+            captured["max_portfolio_usd"] = kwargs.get("max_portfolio_usd")
+            return real_decide(*args, **kwargs)
+
+        monkeypatch.setattr(entry_sim_module, "decide_portfolio_entries_sim", _capturing_decide)
+
+        day = _date(2026, 8, 24)
+        clock = SimClock(0, utc_offset_hours=0)
+        tick = Tick(ts=clock.ts, mode="primary", min_net_ev=0.15, interval_min=10)
+        portfolio = PortfolioState(bankroll_usd=config.region_bankroll_usd("EUTEST"))
+
+        engine._entry_pass(
+            station=eu,
+            day=day,
+            clock=clock,
+            tick=tick,
+            token_map={},
+            portfolio=portfolio,
+            fill_model=None,
+            prices=None,
+            forecast_history={},
+            all_observations=[],
+            fee_rate_pct=0.02,
+            counters={
+                "n_candidates_screened": 0,
+                "n_decisions": 0,
+                "n_entries": 0,
+                "n_entries_missing_token": 0,
+                "n_ev_rows_no_price": 0,
+            },
+            rejections={},
+            entry_records={},
+            decisions_log=[],
+            last_observed={},
+        )
+
+        assert "max_portfolio_usd" in captured, "decide_portfolio_entries_sim was never called"
+        assert captured["max_portfolio_usd"] == 0.0
+        assert captured["max_portfolio_usd"] == config.region_max_daily_exposure_usd("EUTEST")
+        assert captured["max_portfolio_usd"] != config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD
+
+
+class TestEntrySimThreadsMaxPortfolioUsd:
+    """
+    Narrower unit-level counterpart to TestBacktestEngineIsRegionAware: pins
+    the plumbing inside entry_sim.decide_portfolio_entries_sim() itself --
+    that its max_portfolio_usd parameter reaches
+    entry_manager.apply_portfolio_budget() unchanged. Without this parameter
+    (added by the same fix), apply_portfolio_budget() falls back to its own
+    default, config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD -- Asia's
+    number, wrong for any other region.
+    """
+
+    def test_max_portfolio_usd_reaches_apply_portfolio_budget(self, monkeypatch):
+        captured = {}
+
+        def _capturing_apply_portfolio_budget(decisions, **kwargs):
+            captured.update(kwargs)
+            return decisions
+
+        monkeypatch.setattr(
+            entry_sim_module, "apply_portfolio_budget", _capturing_apply_portfolio_budget
+        )
+
+        entry_sim_module.decide_portfolio_entries_sim(
+            candidates=[],
+            portfolio=None,
+            fill_model=None,
+            price_lookup=lambda token_id: None,
+            min_net_ev=0.15,
+            sizing_bankroll=0.0,
+            max_portfolio_usd=0.0,
+        )
+
+        assert captured.get("max_portfolio_usd") == 0.0
+
+    def test_max_portfolio_usd_left_at_default_is_forwarded_as_none(self, monkeypatch):
+        """
+        Back-compat: a caller that does not pass max_portfolio_usd (every
+        existing call site before this fix) must still get apply_portfolio_
+        budget()'s own global-default behaviour, not an accidental 0.0.
+        """
+        captured = {}
+
+        def _capturing_apply_portfolio_budget(decisions, **kwargs):
+            captured.update(kwargs)
+            return decisions
+
+        monkeypatch.setattr(
+            entry_sim_module, "apply_portfolio_budget", _capturing_apply_portfolio_budget
+        )
+
+        entry_sim_module.decide_portfolio_entries_sim(
+            candidates=[],
+            portfolio=None,
+            fill_model=None,
+            price_lookup=lambda token_id: None,
+            min_net_ev=0.15,
+            sizing_bankroll=0.0,
+        )
+
+        assert captured.get("max_portfolio_usd") is None

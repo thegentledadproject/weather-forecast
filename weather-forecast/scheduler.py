@@ -456,6 +456,24 @@ def run_forever(station_icaos: Optional[list] = None) -> None:
     BST/CEST transition date. Deliberately not solved with live
     regrouping: it is a twice-a-year event, and the same operator-action
     stance the bucket-bounds resweep takes.
+
+    GROUPS ARE ISOLATED IN CADENCE, NOT IN CONCURRENCY. The `for offset in
+    due:` loop below dispatches each due group's run_cycle() synchronously
+    and waits for it to return before considering the next due group -- there
+    is no threading or async here. A slow or hanging cycle in one group (for
+    example a 7-station European group running the full pipeline over the
+    network) delays every OTHER group that comes due while it is still
+    running, even though each group's own next_run_ts is computed
+    independently. This coupling is pre-existing -- it already applied
+    between the Japan and Singapore groups before Europe was added -- and is
+    not introduced by adding more groups; adding a 7-station group simply
+    raises how long one group's cycle can take, and hence how long the
+    delay to others can be. In practice the more exposed side is a delayed
+    EXIT check (monitor_only/risk_only groups run all day, and stops are
+    roughly half of this book's closed trades) rather than a delayed entry,
+    since entries only matter inside a narrow primary window. Fixing this
+    would mean dispatching groups concurrently, which is a separate design
+    decision with its own risks and is deliberately not made here.
     """
     groups = stations_by_utc_offset(station_icaos)
     if not groups:

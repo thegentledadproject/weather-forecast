@@ -44,11 +44,20 @@ class StationConfig:
     monsoon_phase_by_month: Dict[int, str] = field(default_factory=dict)
     seed_observations: list = field(default_factory=list)  # list of (date, temp_c) tuples
 
-    # Fixed UTC offset of the station's market-local calendar day. A plain
-    # integer, not a tz database entry, because NONE of the registered cities
-    # observes DST -- that is an assumption that happens to hold for every
-    # Asian market listed so far, not a general truth; re-check before
-    # registering a station in a DST region.
+    # The station's STANDARD-time (winter) UTC offset -- a plain integer, not
+    # a tz database entry. This is the value the backtest engine reads
+    # directly (backtest/engine.py): the backtest has no moving clock, so it
+    # always trades on this static number. A DST-observing station
+    # additionally sets iana_timezone below, which
+    # config.current_utc_offset_hours() resolves at call time for the LIVE
+    # path -- but utc_offset_hours here must still be set, and must still be
+    # the winter value, even then.
+    #
+    # Historical note: this field was originally a plain int because NONE of
+    # the registered cities observed DST. That was an assumption that
+    # happened to hold for every Asian market listed at the time, not a
+    # general truth -- it no longer holds now that European stations are
+    # registered, which is why iana_timezone exists.
     utc_offset_hours: int = 8
 
     # Which capital pool and blast radius this station draws from. Every

@@ -425,6 +425,7 @@ def decide_portfolio_entries_sim(
     station_maturity: Optional[str] = None,
     existing_exposure_usd: float = 0.0,
     portfolio_exposure_usd: float = 0.0,
+    max_portfolio_usd: Optional[float] = None,
     resolution_obs_count: Optional[int] = None,
     enforce_collection_gate: bool = False,
     bias_n: Optional[int] = None,
@@ -445,7 +446,13 @@ def decide_portfolio_entries_sim(
          entry_manager.station_day_exposure_usd() -- plus, through
          portfolio_exposure_usd, the dollars spent across ALL stations
          that day, which live reads via
-         entry_manager.portfolio_day_exposure_usd())
+         entry_manager.portfolio_day_exposure_usd(). max_portfolio_usd is
+         the region's own daily cap, exactly as live's
+         decide_portfolio_entries() passes
+         config.region_max_daily_exposure_usd(station_icao) -- leaving it
+         at the None default falls back to apply_portfolio_budget()'s own
+         global default, config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD,
+         which is Asia's number and wrong for any other region)
 
     enforce_collection_gate is OFF by default, and deliberately explicit
     rather than inferred from resolution_obs_count being None. Live reads
@@ -524,5 +531,6 @@ def decide_portfolio_entries_sim(
         decisions,
         existing_exposure_usd=existing_exposure_usd,
         portfolio_exposure_usd=portfolio_exposure_usd,
+        max_portfolio_usd=max_portfolio_usd,
     )
     return decisions

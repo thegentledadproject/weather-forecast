@@ -16,7 +16,7 @@ from clients.official.registry import _CLIENTS
 EXPECTED_STATION_COUNT = 20
 
 
-def test_thirteen_stations_registered():
+def test_station_count_matches_expected():
     assert len(config.STATIONS) == EXPECTED_STATION_COUNT
 
 

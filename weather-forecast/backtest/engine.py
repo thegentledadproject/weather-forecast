@@ -495,7 +495,13 @@ def run(
         "trade_size_screen_usd": ev_engine.DEFAULT_TRADE_SIZE_USD,
     }
 
-    portfolio = PortfolioState(bankroll_usd=config.BANKROLL_USD, bankroll_mode=bankroll_mode)
+    # Region-scoped, not config.BANKROLL_USD: a European replay must size
+    # off Europe's own (zero) Kelly bankroll, not Asia's, or it reports a
+    # P&L number the live path structurally cannot produce. See
+    # config.region_bankroll_usd() and REGION_BANKROLL_USD.
+    portfolio = PortfolioState(
+        bankroll_usd=config.region_bankroll_usd(station_icao), bankroll_mode=bankroll_mode
+    )
     fill_model = fill_model_mod.FillModel(
         depth_regime=depth_regime,
         fee_rate_pct=fee_rate_pct,
@@ -1118,6 +1124,11 @@ def _entry_pass(
         sizing_bankroll=portfolio.sizing_bankroll(),
         existing_exposure_usd=existing_exposure_usd,
         portfolio_exposure_usd=portfolio_exposure_usd,
+        # Region-scoped, mirroring entry_manager.decide_portfolio_entries():
+        # without this, apply_portfolio_budget() falls back to its own
+        # global default (Asia's MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD),
+        # which is wrong for any station outside Asia.
+        max_portfolio_usd=config.region_max_daily_exposure_usd(station.icao),
         resolution_obs_count=resolution_obs_count,
         enforce_collection_gate=True,
         # Off until point-in-time bias reconstruction exists (see the

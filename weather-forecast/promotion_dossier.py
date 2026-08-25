@@ -520,20 +520,38 @@ def _print_what_promotion_buys(station_icao: str) -> None:
     _rule("WHAT PROMOTION WOULD AUTHORISE")
 
     already = station_icao in config.LIVE_TRADING_STATIONS
-    others = sorted(config.LIVE_TRADING_STATIONS - {station_icao})
+    region = config.region_of(station_icao)
+    region_others = sorted(
+        icao for icao in config.stations_in_region(region)
+        if icao != station_icao and icao in config.LIVE_TRADING_STATIONS
+    )
+
+    max_concurrent = config.REGION_LIVE_MAX_CONCURRENT_POSITIONS[region]
+    max_exposure = config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD[region]
+    max_orders = config.REGION_LIVE_MAX_ORDERS_PER_DAY[region]
 
     print("  Into the allowlist -> `--mode simulation`: submits nothing, spends "
           "nothing,\n  and is what produces order-path evidence.")
     print(f"\n  Into real money -> ${config.LIVE_TRADE_SIZE_USD:.2f} nominal per order, "
           f"upsized to the exchange\n  minimum where a bucket demands one "
           f"(ceiling ${config.LIVE_SIZE_OVERSHOOT_CEILING_USD:.2f}).")
-    print(f"\n  The blast radius is SHARED, not per-station:")
-    print(f"    max concurrent positions: {config.LIVE_MAX_CONCURRENT_POSITIONS}")
-    print(f"    max total exposure:       ${config.LIVE_MAX_TOTAL_EXPOSURE_USD:.2f}")
-    print(f"    max orders per day:       {config.LIVE_MAX_ORDERS_PER_DAY}")
-    if others and not already:
-        print(f"\n  So this station would COMPETE with {', '.join(others)} for those same "
-              f"slots\n  and that same cap rather than adding to them. config's own note: "
+    print(f"\n  The blast radius is SHARED WITHIN THE REGION ({region}), not per-station "
+          f"and not\n  across regions:")
+    print(f"    max concurrent positions: {max_concurrent}")
+    print(f"    max total exposure:       ${max_exposure:.2f}")
+    print(f"    max orders per day:       {max_orders}")
+    if max_concurrent == 0 and max_exposure == 0.0 and max_orders == 0:
+        print(f"\n  Promotion alone buys NOTHING here: region {region!r} is funded at zero "
+              f"on every\n  live axis, so this station cannot submit a real order regardless "
+              f"of allowlist\n  membership. Raising it requires raising "
+              f"REGION_LIVE_MAX_CONCURRENT_POSITIONS,\n  REGION_LIVE_MAX_TOTAL_EXPOSURE_USD and "
+              f"REGION_LIVE_MAX_ORDERS_PER_DAY for {region!r}\n  in config.py -- and the exposure "
+              f"ceiling must be RE-DERIVED from concurrent-\n  positions x worst-case-entry-cost "
+              f"for this region's own bucket economics, not\n  copied from Asia's number (see "
+              f"config.py, 'RE-DERIVE, DO NOT COPY').")
+    elif region_others and not already:
+        print(f"\n  So this station would COMPETE with {', '.join(region_others)} for those "
+              f"same slots\n  and that same cap rather than adding to them. config's own note: "
               f"adding\n  a further station 'would need that trade-off re-read, not just "
               f"another\n  name here'.")
     print("\n  POLYMARKET_LIVE_TRADING is process-global and not per-station, so the\n"
