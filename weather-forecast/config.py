@@ -1792,6 +1792,67 @@ MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD = 250.0
 # room for a couple of real multi-leg baskets, never most of the roll.
 MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD = 400.0
 
+# --- Per-region capital pools ---------------------------------------------
+# The portfolio caps above are ONE pool shared by every registered station.
+# That was right while the registry was one region with correlated errors
+# and one shared thesis. It stops being right the moment a second region is
+# registered: a European cohort's drawdown would eat the Asian book's
+# sizing budget, and neither cohort's numbers would mean anything about the
+# other.
+#
+# Asia's entries REFERENCE the constants above rather than restating them,
+# so retuning BANKROLL_USD still moves the Asian pool and there is exactly
+# one number to change.
+#
+# EUROPE IS FUNDED AT ZERO ON PURPOSE. A station registered into a
+# zero-funded region collects data, produces decisions and is scored, but
+# Kelly sizing multiplies by 0.0 and every candidate resolves to a $0
+# order. Raising these is a deliberate, auditable, one-line operator
+# decision -- not a side effect of adding a station to the registry.
+REGION_BANKROLL_USD = {
+    "asia": BANKROLL_USD,
+    "europe": 0.0,
+}
+
+REGION_MAX_DAILY_EXPOSURE_USD = {
+    "asia": MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD,
+    "europe": 0.0,
+}
+
+
+def region_of(station_icao: str) -> str:
+    """The capital pool a station draws from. See StationConfig.region."""
+    return get_station(station_icao).region
+
+
+def region_bankroll_usd(station_icao: str) -> float:
+    """
+    Kelly's bankroll for THIS station's region.
+
+    Raises KeyError on a region with no funding entry rather than falling
+    back to a default. A station whose region was typo'd must not quietly
+    size against another region's money.
+    """
+    region = region_of(station_icao)
+    if region not in REGION_BANKROLL_USD:
+        raise KeyError(
+            f"{station_icao} names region {region!r}, which has no entry in "
+            f"config.REGION_BANKROLL_USD (known: {list(REGION_BANKROLL_USD)})."
+        )
+    return REGION_BANKROLL_USD[region]
+
+
+def region_max_daily_exposure_usd(station_icao: str) -> float:
+    """This station's region's portfolio-wide daily exposure cap."""
+    region = region_of(station_icao)
+    if region not in REGION_MAX_DAILY_EXPOSURE_USD:
+        raise KeyError(
+            f"{station_icao} names region {region!r}, which has no entry in "
+            f"config.REGION_MAX_DAILY_EXPOSURE_USD "
+            f"(known: {list(REGION_MAX_DAILY_EXPOSURE_USD)})."
+        )
+    return REGION_MAX_DAILY_EXPOSURE_USD[region]
+
 
 def live_size_cap_usd(station_icao: str, execution_mode: str) -> Optional[float]:
     """

@@ -239,3 +239,79 @@ class TestSchedulerGroupsOnResolvedOffset:
         assert "REGISTERED" in out
         assert "iana_timezone" in out
         assert "unknown station" not in out
+
+
+import entry_manager
+
+
+class TestRegionScopedCapital:
+    def test_asia_values_equal_the_pre_existing_flat_constants(self):
+        """
+        The region dicts must REFERENCE the old constants, not restate
+        them. If someone retunes BANKROLL_USD and Asia's pool does not
+        move, this catches it.
+        """
+        assert config.REGION_BANKROLL_USD["asia"] == config.BANKROLL_USD
+        assert (config.REGION_MAX_DAILY_EXPOSURE_USD["asia"]
+                == config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD)
+
+    def test_europe_starts_at_zero(self):
+        assert config.REGION_BANKROLL_USD["europe"] == 0.0
+        assert config.REGION_MAX_DAILY_EXPOSURE_USD["europe"] == 0.0
+
+    def test_region_lookup_helpers_resolve_through_the_station(self, monkeypatch):
+        st = _station(icao="TEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setitem(config.STATIONS, "TEST", st)
+
+        assert config.region_of("TEST") == "europe"
+        assert config.region_bankroll_usd("TEST") == 0.0
+        assert config.region_max_daily_exposure_usd("TEST") == 0.0
+
+    def test_an_asia_station_reads_the_asia_pool(self):
+        assert config.region_bankroll_usd("WSSS") == config.BANKROLL_USD
+        assert (config.region_max_daily_exposure_usd("WSSS")
+                == config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD)
+
+    def test_an_unknown_region_fails_loudly(self, monkeypatch):
+        """
+        A station naming a region with no funding entry must raise, not
+        default to Asia's money.
+        """
+        st = _station(icao="TEST", region="atlantis")
+        monkeypatch.setitem(config.STATIONS, "TEST", st)
+
+        with pytest.raises(KeyError):
+            config.region_bankroll_usd("TEST")
+
+
+class TestRegionScopedPortfolioExposure:
+    def test_exposure_sums_only_the_named_region(self, monkeypatch):
+        """
+        An Asia station's spend must not consume Europe's remaining budget.
+        """
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setattr(config, "STATIONS", {**config.STATIONS, "EUTEST": eu})
+
+        def fake_station_exposure(icao, target_date, is_paper=None):
+            return 100.0 if icao == "WSSS" else 0.0
+
+        monkeypatch.setattr(entry_manager, "station_day_exposure_usd", fake_station_exposure)
+
+        assert entry_manager.portfolio_day_exposure_usd(region="europe") == 0.0
+        assert entry_manager.portfolio_day_exposure_usd(region="asia") == 100.0
+
+    def test_no_region_still_sums_everything(self, monkeypatch):
+        """Back-compat: the parameterless call keeps its old meaning."""
+        def fake_station_exposure(icao, target_date, is_paper=None):
+            return 1.0
+
+        monkeypatch.setattr(entry_manager, "station_day_exposure_usd", fake_station_exposure)
+
+        assert entry_manager.portfolio_day_exposure_usd() == float(len(config.STATIONS))
+
+    def test_an_unreadable_station_still_fails_closed(self, monkeypatch):
+        """The fail-closed rule must survive the region filter."""
+        monkeypatch.setattr(entry_manager, "station_day_exposure_usd",
+                            lambda icao, target_date, is_paper=None: None)
+
+        assert entry_manager.portfolio_day_exposure_usd(region="asia") is None
