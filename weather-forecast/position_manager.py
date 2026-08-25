@@ -668,15 +668,20 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
     record this station already ingests, the same one the backtest settles
     on, and the same one Polymarket resolves against.
 
-    "NEVER GUESS" IS PRESERVED, and narrowed rather than weakened: this
-    returns None -- leaving the position open and loud -- whenever the
-    settlement-grade observation for that date is missing. A daily maximum
-    only exists once the day is over and the source published it, so the
-    observation's existence is itself the evidence that the day is done.
+    "NEVER GUESS" IS PRESERVED, and narrowed rather than weakened: nothing
+    here settles on anything but a published record. When the
+    settlement-grade observation for the date is missing this hands off to
+    _close_from_market_settlement(), which applies the same rule to the
+    market's own settlement record and returns None -- leaving the position
+    open and loud -- if that is missing too. A daily maximum only exists
+    once the day is over and the source published it, so the observation's
+    existence is itself the evidence that the day is done.
     """
     obs = _settlement_grade_reading(position)
     if obs is None:
-        return None
+        # Not every station's settlement source publishes daily. Fall
+        # through to the market's own record before giving up.
+        return _close_from_market_settlement(position, gamma_closed)
 
     station = _station_for(position)
 
@@ -729,6 +734,77 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
         f"no book left to read; settled from {obs.source} {obs.max_temp_c:.1f}C "
         f"-> winning bucket {winning_bucket}C, so {position.bucket_c}C "
         f"{position.side} pays {exit_price:.1f}"
+    )
+    return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)
+
+
+def _close_from_market_settlement(position: Position, gamma_closed: Optional[bool]) -> Optional[ExitDecision]:
+    """
+    Close a resolved position from the MARKET's own settlement record, for
+    stations whose settlement-grade thermometer has not published yet.
+
+    WHY THIS EXISTS. _settlement_grade_reading() insists on the station's
+    resolution_grade_source and is right to: a proxy reading is a good
+    forecast input and a bad settlement authority. But VHHH's source is
+    HKO's CLMMAXT, which publishes MONTHLY, so its observation record lags
+    the market by up to six weeks. Its positions could not reach the
+    observation fallback at all -- not for want of data quality but for
+    want of a row that does not exist yet. Two sat `open` for 93h and 69h
+    in August 2026, logging the refusal every cycle with no stop-loss
+    behind them, and would have waited until ~2026-09-16.
+
+    `settled_buckets` is the authority Polymarket actually pays on: which
+    bucket the event settled into, read off the settled token prices by
+    bucket_bias once the day is done. That makes it a stronger claim than
+    the thermometer, not a weaker one -- but it is consulted only AFTER the
+    observation record all the same, because the METAR stations' behaviour
+    is measured and this path adds nothing for them.
+
+    NO CLAMPING HAPPENS HERE, which is why this needs no _event_bounds
+    lookup. The observation path must quantize a temperature, so the bounds
+    it quantizes against decide the answer (see the ZBAA case above). A
+    settled bucket is already a LABEL in absolute degrees; it is compared,
+    not binned.
+
+    "NEVER GUESS" IS PRESERVED: returns None -- leaving the position open
+    and loud -- whenever no row exists for the date, and refuses any
+    position whose bucket the recorded event never listed, since such a row
+    describes a different token map than the one this position trades.
+    """
+    try:
+        settled = storage.load_settled_buckets(position.station_icao)
+    except Exception as exc:  # noqa: BLE001
+        # Same rule as the observation read: storage trouble must not
+        # close a position on a partial answer.
+        print(
+            f"[position_manager] {position.position_id}: could not read the settled-bucket "
+            f"record ({type(exc).__name__}) -- not settling from the market record this cycle."
+        )
+        return None
+
+    row = settled.get(position.target_date)
+    if row is None:
+        return None
+
+    winning_bucket, bucket_min, bucket_max = row
+    if not bucket_min <= position.bucket_c <= bucket_max:
+        print(
+            f"[position_manager] WARNING: {position.position_id} holds bucket {position.bucket_c}C "
+            f"but the settled event recorded for {position.target_date} ran {bucket_min}-{bucket_max}C, "
+            f"so that record describes a different token map. Refusing to settle this position "
+            f"against it -- leaving it OPEN (${position.size_usd:.2f} at stake)."
+        )
+        return None
+
+    exit_price = settlement.resolution_exit_price(
+        position.side, position.bucket_c, winning_bucket,
+    )
+
+    basis = (
+        f"no book left to read and no settlement-grade observation published yet; settled "
+        f"from the market's own settled_buckets record ({bucket_min}-{bucket_max}C event) "
+        f"-> winning bucket {winning_bucket}C, so {position.bucket_c}C {position.side} "
+        f"pays {exit_price:.1f}"
     )
     return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)
 
