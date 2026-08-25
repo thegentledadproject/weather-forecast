@@ -1304,6 +1304,54 @@ LIVE_MAX_CONCURRENT_POSITIONS = 5        # across all live stations
 LIVE_MAX_TOTAL_EXPOSURE_USD = 8.00       # sum of open live size_usd
 LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
 
+# --- Per-region LIVE blast radius -----------------------------------------
+# A SEPARATE MECHANISM from REGION_BANKROLL_USD, and the distinction is the
+# whole reason this block exists. Live orders never pass through Kelly
+# sizing at all -- LIVE_TRADE_SIZE_USD replaces it outright -- so scoping
+# the Kelly bankroll by region does precisely nothing to the real-money
+# path. The three caps above are the real-money path, and they were
+# documented as "across all live stations": process-global.
+#
+# Left that way, isolation would hold only until the first European station
+# were ever promoted, at which point it would silently begin competing with
+# WSSS and RCSS for the same slots and the same dollar ceiling -- discovered
+# under promotion pressure, which is the worst moment to discover it.
+#
+# EUROPE IS 0/0.0/0. Not "small": zero. A European station cannot submit a
+# live order regardless of LIVE_TRADING_STATIONS membership or the
+# POLYMARKET_LIVE_TRADING process flag, because its region authorises no
+# concurrent positions at all.
+#
+# RE-DERIVE, DO NOT COPY, IF EUROPE IS EVER FUNDED.
+# Asia's pair is not two independently chosen numbers: they encode an
+# intended BINDING ORDER -- dollars bind first, count is a sanity bound --
+# and test_live_execution.py::test_the_dollar_cap_binds_before_the_count_cap
+# asserts that relationship against ASSUMED_EXCHANGE_MIN_SHARES,
+# MAX_ENTRY_PRICE and LIVE_TRADE_SIZE_USD. Europe's worst case will differ
+# (different bucket economics, possibly a different MAX_ENTRY_PRICE
+# regime), so if it is ever funded its ceiling must be re-derived to
+# satisfy that same relationship -- not copied from Asia's number.
+REGION_LIVE_MAX_CONCURRENT_POSITIONS = {
+    "asia": LIVE_MAX_CONCURRENT_POSITIONS,
+    "europe": 0,
+}
+
+REGION_LIVE_MAX_TOTAL_EXPOSURE_USD = {
+    "asia": LIVE_MAX_TOTAL_EXPOSURE_USD,
+    "europe": 0.0,
+}
+
+REGION_LIVE_MAX_ORDERS_PER_DAY = {
+    "asia": LIVE_MAX_ORDERS_PER_DAY,
+    "europe": 0,
+}
+
+
+def stations_in_region(region: str) -> list:
+    """Every registered ICAO drawing on one region's pools."""
+    return [icao for icao, st in STATIONS.items() if st.region == region]
+
+
 # The exchange minimum the two backstops above are DERIVED against, in
 # shares. Probed 2026-08-10 ("mos":5 on the WSSS buckets). NOT used to build
 # orders -- wallet_client reads the real per-book value and may find a larger

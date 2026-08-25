@@ -444,3 +444,141 @@ class TestPortfolioCapArgumentIsActuallyApplied:
         assert decisions[0].recommended_size_usd == 0.0
         assert "portfolio/day" in decisions[0].reason
         assert "budget exhausted" in decisions[0].reason
+
+
+import executor
+import storage
+from models import Position
+
+
+class TestRegionScopedLiveBlastRadius:
+    def test_asia_values_equal_the_pre_existing_flat_constants(self):
+        assert (config.REGION_LIVE_MAX_CONCURRENT_POSITIONS["asia"]
+                == config.LIVE_MAX_CONCURRENT_POSITIONS)
+        assert (config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD["asia"]
+                == config.LIVE_MAX_TOTAL_EXPOSURE_USD)
+        assert (config.REGION_LIVE_MAX_ORDERS_PER_DAY["asia"]
+                == config.LIVE_MAX_ORDERS_PER_DAY)
+
+    def test_europe_is_locked_at_zero(self):
+        assert config.REGION_LIVE_MAX_CONCURRENT_POSITIONS["europe"] == 0
+        assert config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD["europe"] == 0.0
+        assert config.REGION_LIVE_MAX_ORDERS_PER_DAY["europe"] == 0
+
+    def test_a_europe_station_is_refused_even_on_an_empty_live_book(
+        self, monkeypatch
+    ):
+        """
+        THE POINT OF THIS TASK. Zero open positions, zero orders today, and
+        the entry is still refused -- because the region's concurrent cap
+        is 0. Kelly-side isolation (Task 4) does nothing here: live orders
+        never pass through Kelly sizing at all.
+        """
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setattr(config, "STATIONS", {**config.STATIONS, "EUTEST": eu})
+        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [])
+        monkeypatch.setattr(storage, "load_settled_live_tokens", lambda: {})
+        monkeypatch.setattr(storage, "count_live_order_attempts",
+                            lambda kind, since, station_icaos=None: 0)
+        monkeypatch.setattr(
+            executor.wallet_client, "reconcile_cached",
+            lambda positions, **_: executor.wallet_client.Reconciliation(
+                ok=True, checked=True, reason="stubbed"),
+        )
+
+        breach = executor._live_budget_breach(1.00, "EUTEST")
+
+        assert breach is not None
+        assert "europe" in breach
+
+    def test_asia_positions_do_not_consume_a_europe_budget(self, monkeypatch):
+        """
+        Once Europe IS funded, the two regions count independently. Three
+        open Asia positions fill Asia's cap of 3 and leave Europe's own
+        budget untouched.
+        """
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setattr(config, "STATIONS", {**config.STATIONS, "EUTEST": eu})
+        monkeypatch.setitem(config.REGION_LIVE_MAX_CONCURRENT_POSITIONS, "europe", 3)
+        monkeypatch.setitem(config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, "europe", 8.00)
+        monkeypatch.setitem(config.REGION_LIVE_MAX_ORDERS_PER_DAY, "europe", 10)
+
+        asia_positions = [
+            Position(
+                position_id=f"p{i}", station_icao="WSSS", target_date=date(2026, 8, 24),
+                bucket_c=32, side="YES", entry_price=0.30, size_usd=3.75,
+                entry_time="2026-08-24T00:00:00+00:00", status="open",
+                token_id=f"TOK{i}", is_paper=False, size_shares=5.0,
+                execution_mode="live",
+            )
+            for i in range(3)
+        ]
+        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: asia_positions)
+        monkeypatch.setattr(storage, "load_settled_live_tokens", lambda: {})
+        monkeypatch.setattr(storage, "count_live_order_attempts",
+                            lambda kind, since, station_icaos=None: 0)
+        monkeypatch.setattr(
+            executor.wallet_client, "reconcile_cached",
+            lambda positions, **_: executor.wallet_client.Reconciliation(
+                ok=True, checked=True, reason="stubbed"),
+        )
+
+        # Asia is full at 3 concurrent...
+        assert executor._live_budget_breach(1.00, "WSSS") is not None
+        # ...and Europe, now funded, is unaffected by them.
+        assert executor._live_budget_breach(1.00, "EUTEST") is None
+
+    def test_the_order_rate_limit_counts_only_the_region(self, monkeypatch):
+        """
+        The daily order cap is counted from an audit table keyed by
+        station_icao. It must be filtered to the region too, or Asia's ten
+        orders would exhaust Europe's separate allowance.
+        """
+        seen = {}
+
+        def fake_count(kind, since, station_icaos=None):
+            seen["station_icaos"] = station_icaos
+            return 0
+
+        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [])
+        monkeypatch.setattr(storage, "load_settled_live_tokens", lambda: {})
+        monkeypatch.setattr(storage, "count_live_order_attempts", fake_count)
+        monkeypatch.setattr(
+            executor.wallet_client, "reconcile_cached",
+            lambda positions, **_: executor.wallet_client.Reconciliation(
+                ok=True, checked=True, reason="stubbed"),
+        )
+
+        executor._live_budget_breach(1.00, "WSSS")
+
+        assert seen["station_icaos"] is not None
+        assert "WSSS" in seen["station_icaos"]
+        assert all(config.region_of(i) == "asia" for i in seen["station_icaos"])
+
+
+class TestCountLiveOrderAttemptsFilter:
+    def test_the_station_filter_narrows_the_count(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+
+        storage.record_live_order_attempt(
+            kind="entry", station_icao="WSSS", outcome="filled", notional_usd=1.0)
+        storage.record_live_order_attempt(
+            kind="entry", station_icao="RCSS", outcome="filled", notional_usd=1.0)
+
+        assert storage.count_live_order_attempts("entry", "2000-01-01") == 2
+        assert storage.count_live_order_attempts(
+            "entry", "2000-01-01", station_icaos=["WSSS"]) == 1
+        assert storage.count_live_order_attempts(
+            "entry", "2000-01-01", station_icaos=["WSSS", "RCSS"]) == 2
+
+    def test_an_empty_station_list_counts_nothing(self, tmp_path, monkeypatch):
+        """
+        A region with no registered stations has no orders, and must read 0
+        rather than degrading to the unfiltered total.
+        """
+        monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+        storage.record_live_order_attempt(
+            kind="entry", station_icao="WSSS", outcome="filled", notional_usd=1.0)
+
+        assert storage.count_live_order_attempts(
+            "entry", "2000-01-01", station_icaos=[]) == 0

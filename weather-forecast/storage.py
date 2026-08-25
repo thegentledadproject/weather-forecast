@@ -868,9 +868,20 @@ def record_live_order_attempt(
         )
 
 
-def count_live_order_attempts(kind: str, since_iso: str) -> Optional[int]:
+def count_live_order_attempts(
+    kind: str,
+    since_iso: str,
+    station_icaos: Optional[list] = None,
+) -> Optional[int]:
     """
     How many live orders of one kind were SUBMITTED at or after `since_iso`.
+
+    `station_icaos` narrows the count to a set of stations -- how the
+    per-region daily order cap is enforced. None means every station, the
+    original meaning, kept for callers that predate regions. An EMPTY list
+    means no stations and correctly counts 0; it must not be conflated with
+    None, or a region with no registered stations would read the global
+    total.
 
     Returns None if the count could not be read. None is not zero: callers
     gating on this must treat an unreadable count as "cannot authorise",
@@ -879,10 +890,20 @@ def count_live_order_attempts(kind: str, since_iso: str) -> Optional[int]:
     """
     try:
         with _db() as conn:
-            row = conn.execute(
-                "SELECT COUNT(*) FROM live_order_attempts WHERE kind = ? AND ts >= ?",
-                (kind, since_iso),
-            ).fetchone()
+            if station_icaos is None:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM live_order_attempts WHERE kind = ? AND ts >= ?",
+                    (kind, since_iso),
+                ).fetchone()
+            elif not station_icaos:
+                return 0
+            else:
+                placeholders = ",".join("?" for _ in station_icaos)
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM live_order_attempts "
+                    f"WHERE kind = ? AND ts >= ? AND station_icao IN ({placeholders})",
+                    (kind, since_iso, *station_icaos),
+                ).fetchone()
         return int(row[0]) if row else 0
     except Exception as exc:  # noqa: BLE001
         print(f"[storage] could not count live order attempts: {exc}")
