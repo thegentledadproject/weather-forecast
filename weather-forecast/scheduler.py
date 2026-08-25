@@ -73,6 +73,7 @@ import argparse
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfoNotFoundError
 
 import config
 import pipeline
@@ -120,11 +121,36 @@ def stations_by_utc_offset(station_icaos: Optional[list] = None) -> Dict[int, Li
     (every European entry) reports its current DST offset, so it joins the
     group whose local clock it actually shares right now. See the
     known limitation in run_forever() -- grouping happens once at startup.
+
+    Two failure modes are skipped rather than raised, and they are NOT the
+    same: an ICAO that is not in the registry at all, and a registered
+    station whose iana_timezone the tz database does not know. Both let the
+    other stations keep trading; only the second means a station you believe
+    is live is silently absent from every cycle.
     """
     groups: Dict[int, List[str]] = {}
     for icao in (station_icaos or list(config.STATIONS.keys())):
         try:
             offset = config.current_utc_offset_hours(icao)
+        except ZoneInfoNotFoundError as exc:
+            # REGISTERED, but its iana_timezone is not in the tz database --
+            # a typo, or a zone name that has been retired. config.current_utc_
+            # offset_hours raises rather than falling back to the static int
+            # precisely so this cannot trade on a silently wrong clock; the
+            # generic handler below would undo that by reporting it as an
+            # unknown station and moving on.
+            #
+            # Still skip rather than raise: this function's existing stance is
+            # that one bad name must not stop the other stations from trading,
+            # and that is right. But the message has to say what actually
+            # happened, because the consequence is that this station does not
+            # trade AT ALL until someone fixes the config.
+            print(
+                f"[scheduler] {icao} is REGISTERED but its UTC offset could not be "
+                f"resolved ({exc}) -- check StationConfig.iana_timezone. It will NOT "
+                f"be scheduled and will not trade until this is corrected."
+            )
+            continue
         except KeyError as exc:
             print(f"[scheduler] skipping unknown station: {exc}")
             continue

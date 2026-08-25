@@ -23,6 +23,7 @@ whose clock moves twice a year.
 import pytest
 
 import config
+import scheduler
 from models import StationConfig
 
 
@@ -177,9 +178,6 @@ class TestLocalTodayUsesTheHelper:
         assert end == datetime(2026, 12, 25, 0, 0, tzinfo=timezone.utc)
 
 
-import scheduler
-
-
 class TestSchedulerGroupsOnResolvedOffset:
     def test_a_dst_station_groups_by_its_current_offset(self, monkeypatch):
         """
@@ -215,3 +213,29 @@ class TestSchedulerGroupsOnResolvedOffset:
                 st = config.STATIONS[icao]
                 if st.iana_timezone is None:
                     assert offset == st.utc_offset_hours, icao
+
+    def test_a_registered_station_with_a_bad_timezone_is_skipped_loudly(
+        self, monkeypatch, capsys
+    ):
+        """
+        A typo'd iana_timezone must not be reported as an "unknown station".
+        The station IS registered; it simply cannot be scheduled, and the
+        log has to say so or it silently stops trading with a message that
+        sends the operator looking in the wrong place.
+        """
+        bad = _station(icao="BADTZ", region="europe", iana_timezone="Europe/Nowhere")
+        good = _station(icao="OKTZ", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setattr(config, "STATIONS", {"BADTZ": bad, "OKTZ": good})
+        monkeypatch.setattr(config, "_now_utc",
+                            lambda: datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc))
+
+        groups = scheduler.stations_by_utc_offset()
+
+        # The healthy station still trades -- one bad config must not stop it.
+        assert groups == {1: ["OKTZ"]}
+
+        out = capsys.readouterr().out
+        assert "BADTZ" in out
+        assert "REGISTERED" in out
+        assert "iana_timezone" in out
+        assert "unknown station" not in out
