@@ -283,21 +283,45 @@ class TestRegionScopedCapital:
         with pytest.raises(KeyError):
             config.region_bankroll_usd("TEST")
 
+    def test_an_unknown_region_fails_loudly_for_the_exposure_cap_too(self, monkeypatch):
+        """
+        Same fail-closed rule as region_bankroll_usd, for the OTHER
+        helper. Not exercising this one separately would leave a typo'd
+        region free to fall back to Asia's exposure cap even after this
+        exact failure mode was closed for the bankroll helper.
+        """
+        st = _station(icao="TEST", region="atlantis")
+        monkeypatch.setitem(config.STATIONS, "TEST", st)
+
+        with pytest.raises(KeyError):
+            config.region_max_daily_exposure_usd("TEST")
+
 
 class TestRegionScopedPortfolioExposure:
     def test_exposure_sums_only_the_named_region(self, monkeypatch):
         """
-        An Asia station's spend must not consume Europe's remaining budget.
+        Both directions must hold: an Asia station's spend must not
+        consume Europe's remaining budget, AND a Europe station's spend
+        must not inflate Asia's sum. Giving EUTEST a zero faked exposure
+        (the original version of this test) only proves the first
+        direction -- a filter that let European stations leak into the
+        Asia sum would still produce exactly 100.0 and this test would
+        not have noticed. EUTEST is given a nonzero exposure so leakage
+        in either direction changes an assertion.
         """
         eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
         monkeypatch.setattr(config, "STATIONS", {**config.STATIONS, "EUTEST": eu})
 
         def fake_station_exposure(icao, target_date, is_paper=None):
-            return 100.0 if icao == "WSSS" else 0.0
+            if icao == "WSSS":
+                return 100.0
+            if icao == "EUTEST":
+                return 50.0
+            return 0.0
 
         monkeypatch.setattr(entry_manager, "station_day_exposure_usd", fake_station_exposure)
 
-        assert entry_manager.portfolio_day_exposure_usd(region="europe") == 0.0
+        assert entry_manager.portfolio_day_exposure_usd(region="europe") == 50.0
         assert entry_manager.portfolio_day_exposure_usd(region="asia") == 100.0
 
     def test_no_region_still_sums_everything(self, monkeypatch):
@@ -315,3 +339,108 @@ class TestRegionScopedPortfolioExposure:
                             lambda icao, target_date, is_paper=None: None)
 
         assert entry_manager.portfolio_day_exposure_usd(region="asia") is None
+
+
+import storage
+from datetime import date as _date
+from models import EntryDecision, EVResult
+
+
+def _eu_ev(station="EUTEST", bucket=32, side="YES") -> EVResult:
+    return EVResult(
+        station_icao=station, target_date=_date(2026, 8, 6), bucket_c=bucket, side=side,
+        model_prob=0.55, market_price=0.35, raw_edge=0.20,
+        estimated_slippage_pct=0.01, fee_rate_pct=0.02,
+        net_ev_per_dollar=0.30, spread_source="ensemble",
+    )
+
+
+def _canned_decision(station="EUTEST", size=50.0) -> EntryDecision:
+    """
+    A pre-sized, pre-approved decision, standing in for whatever
+    decide_entries() would have produced. Used to bypass Kelly sizing
+    entirely -- a Europe-region station already sizes to $0 there (region
+    bankroll is 0.0), which would zero recommended_size_usd for a reason
+    that has nothing to do with the portfolio budget call site this test
+    is about.
+    """
+    return EntryDecision(
+        station_icao=station,
+        target_date=_date(2026, 8, 6),
+        bucket_c=32,
+        side="YES",
+        kelly_fraction_raw=0.1,
+        kelly_fraction_applied=0.025,
+        recommended_size_usd=size,
+        available_depth_usd=1000.0,
+        slippage_at_size_pct=0.01,
+        net_ev_at_size=0.2,
+        approved=True,
+        reason="approved",
+        station_maturity="mature",
+        entry_price=0.30,
+        token_id="tok",
+    )
+
+
+class TestPortfolioCapArgumentIsActuallyApplied:
+    """
+    entry_manager.decide_portfolio_entries() passes
+    max_portfolio_usd=config.region_max_daily_exposure_usd(station_icao)
+    into apply_portfolio_budget(). THAT argument is the capital isolation
+    -- without it, apply_portfolio_budget falls back to its own default,
+    config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD (400.0).
+
+    No test above catches that argument being dropped: Asia's region cap
+    IS that same 400.0 default, so an Asia-scoped test cannot tell the
+    two apart. Only a region whose cap differs from the global default --
+    Europe's 0.0 -- distinguishes "the region's own cap was applied" from
+    "the global default was applied instead." This test drives the real
+    call site (decide_portfolio_entries) with a Europe station and a
+    nonzero, pre-approved candidate, and asserts the candidate is
+    rejected for exhausting the *portfolio/day* budget -- the observable
+    consequence of a $0.00 cap actually binding, not $400.
+    """
+
+    def test_a_europe_candidate_is_rejected_by_its_own_zero_cap_not_the_global_default(
+        self, monkeypatch
+    ):
+        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        monkeypatch.setitem(config.STATIONS, "EUTEST", eu)
+
+        # Nothing deployed yet today, for the one station this cycle
+        # actually looks at (EUTEST) -- the loop skips every other
+        # station once scoped to region="europe".
+        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [])
+        monkeypatch.setattr(storage, "load_position_history", lambda *a, **kw: [])
+
+        # Graduate EUTEST past the collection-first gate so this test
+        # reaches the budget stage at all -- same stubs
+        # test_portfolio_caps.py uses to graduate a station.
+        monkeypatch.setattr(storage, "count_observations_from_source",
+                            lambda icao, source: config.MIN_RESOLUTION_OBS_BEFORE_ENTRY)
+        monkeypatch.setattr(storage, "forecast_error_samples",
+                            lambda icao, source: [0.2] * config.MIN_BIAS_PAIRS_BEFORE_ENTRY)
+
+        # Bypass decide_entries()/Kelly sizing: a Europe station's $0
+        # bankroll would already zero recommended_size_usd on its own,
+        # which would make this test pass for the wrong reason. Feed a
+        # canned, already-approved, nonzero-sized decision straight into
+        # the budget stage instead, exactly as decide_entries() would
+        # have handed it to decide_portfolio_entries().
+        canned = _canned_decision(station="EUTEST", size=50.0)
+        monkeypatch.setattr(
+            entry_manager, "decide_entries",
+            lambda ev_results, token_map, min_net_ev=0.15: [canned],
+        )
+
+        ev_results = [_eu_ev(station="EUTEST")]
+        token_map = {32: {"yes_token_id": "y32", "no_token_id": "n32"}}
+
+        decisions = entry_manager.decide_portfolio_entries(ev_results, token_map, min_net_ev=0.15)
+
+        assert len(decisions) == 1
+        assert decisions[0].approved is False
+        assert decisions[0].recommended_size_usd == 0.0
+        assert "portfolio/day" in decisions[0].reason
+        assert "budget exhausted" in decisions[0].reason
