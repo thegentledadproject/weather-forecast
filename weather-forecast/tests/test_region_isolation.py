@@ -62,3 +62,93 @@ class TestStationConfigRegionFields:
         for icao, st in config.STATIONS.items():
             if st.iana_timezone is None:
                 assert st.region == "asia", f"{icao}: non-Asia station must set iana_timezone"
+
+
+from datetime import date, datetime, timezone
+
+
+class TestCurrentUtcOffsetHours:
+    def test_station_without_iana_timezone_returns_the_static_int(self):
+        st = _station(utc_offset_hours=9)
+        assert config.current_utc_offset_hours(st) == 9
+
+    def test_none_returns_the_legacy_default(self):
+        assert config.current_utc_offset_hours(None) == config.LOCAL_UTC_OFFSET_HOURS
+
+    def test_icao_string_is_accepted(self):
+        # WSSS is UTC+8 and sets no iana_timezone.
+        assert config.current_utc_offset_hours("WSSS") == 8
+
+    def test_every_existing_station_is_unchanged_by_the_new_helper(self):
+        """
+        The helper must be a strict superset of the old field read. If this
+        ever fails, an Asia station's trading day just moved.
+        """
+        for icao, st in config.STATIONS.items():
+            if st.iana_timezone is None:
+                assert config.current_utc_offset_hours(st) == st.utc_offset_hours, icao
+
+    def test_london_is_plus_one_in_summer_and_zero_in_winter(self):
+        """
+        The whole reason this design exists. Europe/London is BST (+1) in
+        August and GMT (+0) in December; a static int is wrong for one of
+        them no matter which value is chosen.
+        """
+        st = _station(region="europe", iana_timezone="Europe/London", utc_offset_hours=0)
+
+        summer = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+        winter = datetime(2026, 12, 24, 12, 0, tzinfo=timezone.utc)
+
+        assert config.current_utc_offset_hours(st, at=summer) == 1
+        assert config.current_utc_offset_hours(st, at=winter) == 0
+
+    def test_warsaw_is_plus_two_in_summer_and_plus_one_in_winter(self):
+        st = _station(region="europe", iana_timezone="Europe/Warsaw", utc_offset_hours=1)
+
+        summer = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
+        winter = datetime(2026, 12, 24, 12, 0, tzinfo=timezone.utc)
+
+        assert config.current_utc_offset_hours(st, at=summer) == 2
+        assert config.current_utc_offset_hours(st, at=winter) == 1
+
+    def test_an_unknown_timezone_name_fails_loudly(self):
+        """
+        A typo'd tz name must not silently fall back to the static int --
+        that would trade a DST-observing station on a wrong clock while
+        looking fine.
+        """
+        st = _station(region="europe", iana_timezone="Europe/Nowhere", utc_offset_hours=1)
+        # ZoneInfoNotFoundError subclasses KeyError -- assert the specific
+        # type, so this cannot pass because of some unrelated failure.
+        with pytest.raises(KeyError):
+            config.current_utc_offset_hours(st)
+
+
+class TestLocalTodayUsesTheHelper:
+    def test_local_today_respects_a_dst_offset(self, monkeypatch):
+        """
+        local_today() must route through current_utc_offset_hours(), not
+        read the field. At 23:30 UTC on 2026-08-24, a BST (+1) station is
+        already on 2026-08-25.
+        """
+        st = _station(region="europe", iana_timezone="Europe/London", utc_offset_hours=0)
+        monkeypatch.setitem(config.STATIONS, "TEST", st)
+
+        frozen = datetime(2026, 8, 24, 23, 30, tzinfo=timezone.utc)
+        monkeypatch.setattr(config, "_now_utc", lambda: frozen)
+
+        assert config.local_today("TEST") == date(2026, 8, 25)
+
+    def test_local_day_bounds_respect_a_dst_offset(self, monkeypatch):
+        """
+        The BST local day for 2026-08-24 starts at 23:00Z on the 23rd.
+        Getting this wrong is the lookahead bug local_day_bounds_utc's own
+        docstring was written about, one region over.
+        """
+        st = _station(region="europe", iana_timezone="Europe/London", utc_offset_hours=0)
+        monkeypatch.setitem(config.STATIONS, "TEST", st)
+
+        start, end = config.local_day_bounds_utc("TEST", date(2026, 8, 24))
+
+        assert start == datetime(2026, 8, 23, 23, 0, tzinfo=timezone.utc)
+        assert end == datetime(2026, 8, 24, 23, 0, tzinfo=timezone.utc)

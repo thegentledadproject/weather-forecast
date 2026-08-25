@@ -23,6 +23,7 @@ None besides models.py (standard library otherwise).
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Union
+from zoneinfo import ZoneInfo
 
 from models import StationConfig
 
@@ -41,19 +42,64 @@ from models import StationConfig
 LOCAL_UTC_OFFSET_HOURS = 8
 
 
+def _now_utc() -> datetime:
+    """
+    The current instant, as one seam. Exists so tests can freeze the clock
+    without monkeypatching the datetime module itself -- the DST helpers
+    below are entirely about what time it is, and cannot be tested against
+    a real clock that is only in one DST state at a time.
+    """
+    return datetime.now(timezone.utc)
+
+
+def current_utc_offset_hours(
+    station: Optional[Union[str, StationConfig]] = None,
+    at: Optional[datetime] = None,
+) -> int:
+    """
+    A station's UTC offset AT A GIVEN INSTANT, in whole hours.
+
+    WHY THIS IS NOT JUST station.utc_offset_hours. That field is a static
+    int, and its own docstring records why that was acceptable: "NONE of
+    the registered cities observes DST". Every European city does. A
+    station carrying an iana_timezone is resolved against the tz database
+    at call time, so it is correct in both halves of the year; a station
+    without one keeps the static int, unchanged, forever.
+
+    `at` defaults to now. Passing it is how the tests reach both DST
+    states, and how any caller reasoning about a PAST instant stays honest
+    -- but note that no trading-path caller does that today: they all mean
+    "right now".
+
+    RAISES on an unknown timezone name rather than falling back to the
+    static int. A typo would otherwise trade a DST station on a silently
+    wrong clock, which is the exact failure this function exists to
+    prevent.
+    """
+    if station is None:
+        return LOCAL_UTC_OFFSET_HOURS
+
+    st = get_station(station) if isinstance(station, str) else station
+
+    if not st.iana_timezone:
+        return st.utc_offset_hours
+
+    instant = at if at is not None else _now_utc()
+    offset = instant.astimezone(ZoneInfo(st.iana_timezone)).utcoffset()
+    return int(offset.total_seconds() // 3600)
+
+
 def local_today(station: Optional[Union[str, StationConfig]] = None) -> date:
     """
     The current calendar date in a station's market timezone. Accepts a
     StationConfig, an ICAO string, or None (legacy UTC+8 default -- only
     for genuinely station-agnostic contexts).
+
+    Delegates offset resolution to current_utc_offset_hours(), so a
+    DST-observing station is correct in both halves of the year.
     """
-    if station is None:
-        offset = LOCAL_UTC_OFFSET_HOURS
-    elif isinstance(station, str):
-        offset = get_station(station).utc_offset_hours
-    else:
-        offset = station.utc_offset_hours
-    return (datetime.now(timezone.utc) + timedelta(hours=offset)).date()
+    offset = current_utc_offset_hours(station)
+    return (_now_utc() + timedelta(hours=offset)).date()
 
 
 def local_day_bounds_utc(
@@ -78,11 +124,7 @@ def local_day_bounds_utc(
     forecast out of a sample the live blend never used: `end` cuts
     hindsight, `start` cuts lead the trading path did not have.
     """
-    offset = (
-        get_station(station).utc_offset_hours
-        if isinstance(station, str)
-        else station.utc_offset_hours
-    )
+    offset = current_utc_offset_hours(station)
     midnight = datetime(
         target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc
     )
