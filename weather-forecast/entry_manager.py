@@ -664,7 +664,10 @@ def evaluate_entry(
         )
 
     kelly_applied = kelly_raw * config.KELLY_FRACTION
-    bankroll_sized_usd = kelly_applied * config.BANKROLL_USD
+    # THIS STATION'S REGION'S bankroll, not one global number. A station in
+    # a zero-funded region sizes to $0 here and every cap below is a no-op
+    # -- which is the intended state for a newly registered region.
+    bankroll_sized_usd = kelly_applied * config.region_bankroll_usd(station_icao)
 
     # Cap 1: hard per-trade ceiling
     size_usd = min(bankroll_sized_usd, config.MAX_POSITION_USD)
@@ -899,7 +902,10 @@ def station_day_exposure_usd(
     return sum(p.size_usd for p in positions if p.target_date == target_date)
 
 
-def portfolio_day_exposure_usd(is_paper: Optional[bool] = None) -> Optional[float]:
+def portfolio_day_exposure_usd(
+    is_paper: Optional[bool] = None,
+    region: Optional[str] = None,
+) -> Optional[float]:
     """
     Dollars deployed across EVERY registered station for its own current
     local trading day -- the figure the portfolio-wide cap is measured
@@ -918,9 +924,17 @@ def portfolio_day_exposure_usd(is_paper: Optional[bool] = None) -> Optional[floa
     Cost note: this is 2 storage reads per registered station, but it
     only runs on cycles that actually produced candidates clearing the EV
     screen -- not on every scan.
+
+    `region` scopes the sum to one capital pool. None keeps the original
+    all-stations meaning for callers that predate regions. Passing it is
+    what stops an Asian drawdown from consuming a European station's
+    budget, and vice versa -- the two cohorts share no thesis, so they
+    must not share a denominator.
     """
     total = 0.0
     for icao in config.STATIONS:
+        if region is not None and config.region_of(icao) != region:
+            continue
         station_total = station_day_exposure_usd(
             icao, config.local_today(icao), is_paper=is_paper,
         )
@@ -1120,14 +1134,21 @@ def decide_portfolio_entries(
         # rather than as a fresh budget.
         existing_usd = config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD
 
-    portfolio_usd = portfolio_day_exposure_usd(is_paper=candidate_is_paper)
+    station_region = config.region_of(station_icao)
+    portfolio_usd = portfolio_day_exposure_usd(
+        is_paper=candidate_is_paper, region=station_region,
+    )
     if portfolio_usd is None:
-        portfolio_usd = config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD
+        # Fail closed, same rule as the station cap above: an unknown
+        # portion of the region's spend means the total is unknown, and an
+        # unknown total must not be treated as a small one.
+        portfolio_usd = config.region_max_daily_exposure_usd(station_icao)
 
     decisions = apply_portfolio_budget(
         decisions,
         existing_exposure_usd=existing_usd,
         portfolio_exposure_usd=portfolio_usd,
+        max_portfolio_usd=config.region_max_daily_exposure_usd(station_icao),
     )
     return decisions
 

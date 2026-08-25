@@ -72,7 +72,8 @@ def captured(monkeypatch):
     # Tests that mean to exercise the audit trail use the live_db fixture,
     # which points DB_PATH at a tmp_path instead.
     monkeypatch.setattr(storage, "record_live_order_attempt", lambda **kw: None)
-    monkeypatch.setattr(storage, "count_live_order_attempts", lambda kind, since: 0)
+    monkeypatch.setattr(storage, "count_live_order_attempts",
+                        lambda kind, since, station_icaos=None: 0)
     return {"opened": opened, "closed": closed}
 
 
@@ -1655,7 +1656,7 @@ def test_killed_orders_consume_the_daily_budget(live_db):
     for _ in range(config.LIVE_MAX_ORDERS_PER_DAY):
         _attempt(outcome="killed")
 
-    breach = executor._live_budget_breach(1.95)
+    breach = executor._live_budget_breach(1.95, "WSSS")
 
     assert breach is not None
     assert "SUBMITTED today" in breach
@@ -1663,7 +1664,7 @@ def test_killed_orders_consume_the_daily_budget(live_db):
 
 
 def test_a_fresh_day_starts_with_a_full_budget(live_db):
-    assert executor._live_budget_breach(1.95) is None
+    assert executor._live_budget_breach(1.95, "WSSS") is None
 
 
 def test_exits_do_not_consume_the_entry_budget(live_db):
@@ -1671,15 +1672,16 @@ def test_exits_do_not_consume_the_entry_budget(live_db):
     for _ in range(config.LIVE_MAX_ORDERS_PER_DAY * 2):
         _attempt(kind="exit", outcome="filled")
 
-    assert executor._live_budget_breach(1.95) is None
+    assert executor._live_budget_breach(1.95, "WSSS") is None
     assert storage.count_live_order_attempts("exit", "2000-01-01") == config.LIVE_MAX_ORDERS_PER_DAY * 2
 
 
 def test_an_unreadable_count_fails_closed(live_db, monkeypatch):
     """A rate limit that fails open is not a rate limit."""
-    monkeypatch.setattr(storage, "count_live_order_attempts", lambda kind, since: None)
+    monkeypatch.setattr(storage, "count_live_order_attempts",
+                        lambda kind, since, station_icaos=None: None)
 
-    breach = executor._live_budget_breach(1.95)
+    breach = executor._live_budget_breach(1.95, "WSSS")
 
     assert breach is not None
     assert "unenforceable rate limit" in breach
@@ -1691,7 +1693,7 @@ def test_yesterdays_orders_do_not_count_against_today(live_db):
             "INSERT INTO live_order_attempts (ts, kind, station_icao, outcome) VALUES (?,?,?,?)",
             ("2020-01-01T00:00:00+00:00", "entry", "WSSS", "filled"),
         )
-    assert executor._live_budget_breach(1.95) is None
+    assert executor._live_budget_breach(1.95, "WSSS") is None
 
 
 # --- the audit trail -------------------------------------------------------

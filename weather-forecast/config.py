@@ -8,11 +8,20 @@ add a new station/market. Everything else in the codebase looks up
 a StationConfig by ICAO code and stays generic from there.
 
 To add a new station (e.g. WMKK):
-  1. Add a STATIONS["WMKK"] = StationConfig(...) entry below.
+  1. Add a STATIONS["WMKK"] = StationConfig(...) entry below. Set `region`
+     explicitly for anything outside the existing Asia pool, and set
+     `iana_timezone` for any station in a DST-observing region -- see
+     StationConfig's field comments in models.py for what each drives.
   2. If its official forecast source doesn't have an adapter yet,
      add one in clients/official/ (see clients/official/base.py for
      the interface) and register it in clients/official/registry.py.
-  3. Nothing else needs to change -- pipeline.py, calibration.py,
+  3. If this is the first station naming a given `region`, add an entry
+     for that region to all five REGION_* dicts below (REGION_BANKROLL_USD,
+     REGION_MAX_DAILY_EXPOSURE_USD, REGION_LIVE_MAX_CONCURRENT_POSITIONS,
+     REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, REGION_LIVE_MAX_ORDERS_PER_DAY) --
+     a region missing from any of them raises at trade time rather than
+     silently borrowing another region's money.
+  4. Otherwise nothing else needs to change -- pipeline.py, calibration.py,
      probability.py, storage.py are all station-parameterized already.
 
 DEPENDENCIES
@@ -23,6 +32,7 @@ None besides models.py (standard library otherwise).
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Union
+from zoneinfo import ZoneInfo
 
 from models import StationConfig
 
@@ -41,19 +51,65 @@ from models import StationConfig
 LOCAL_UTC_OFFSET_HOURS = 8
 
 
+def _now_utc() -> datetime:
+    """
+    The current instant, as one seam. Exists so tests can freeze the clock
+    without monkeypatching the datetime module itself -- the DST helpers
+    below are entirely about what time it is, and cannot be tested against
+    a real clock that is only in one DST state at a time.
+    """
+    return datetime.now(timezone.utc)
+
+
+def current_utc_offset_hours(
+    station: Optional[Union[str, StationConfig]] = None,
+    at: Optional[datetime] = None,
+) -> int:
+    """
+    A station's UTC offset AT A GIVEN INSTANT, in whole hours.
+
+    WHY THIS IS NOT JUST station.utc_offset_hours. That field is a static
+    int, and its own docstring records why that was acceptable: "NONE of
+    the registered cities observes DST". Every European city does. A
+    station carrying an iana_timezone is resolved against the tz database
+    at call time, so it is correct in both halves of the year; a station
+    without one keeps the static int, unchanged, forever.
+
+    `at` defaults to now. Passing it is how the tests reach both DST
+    states, and how any caller reasoning about a PAST instant stays honest.
+    local_day_bounds_utc() is exactly such a caller and MUST pass it: it is
+    handed historical target_dates, and an offset resolved from the wall
+    clock would bound a winter day with a summer offset.
+
+    RAISES on an unknown timezone name rather than falling back to the
+    static int. A typo would otherwise trade a DST station on a silently
+    wrong clock, which is the exact failure this function exists to
+    prevent.
+    """
+    if station is None:
+        return LOCAL_UTC_OFFSET_HOURS
+
+    st = get_station(station) if isinstance(station, str) else station
+
+    if not st.iana_timezone:
+        return st.utc_offset_hours
+
+    instant = at if at is not None else _now_utc()
+    offset = instant.astimezone(ZoneInfo(st.iana_timezone)).utcoffset()
+    return int(offset.total_seconds() // 3600)
+
+
 def local_today(station: Optional[Union[str, StationConfig]] = None) -> date:
     """
     The current calendar date in a station's market timezone. Accepts a
     StationConfig, an ICAO string, or None (legacy UTC+8 default -- only
     for genuinely station-agnostic contexts).
+
+    Delegates offset resolution to current_utc_offset_hours(), so a
+    DST-observing station is correct in both halves of the year.
     """
-    if station is None:
-        offset = LOCAL_UTC_OFFSET_HOURS
-    elif isinstance(station, str):
-        offset = get_station(station).utc_offset_hours
-    else:
-        offset = station.utc_offset_hours
-    return (datetime.now(timezone.utc) + timedelta(hours=offset)).date()
+    offset = current_utc_offset_hours(station)
+    return (_now_utc() + timedelta(hours=offset)).date()
 
 
 def local_day_bounds_utc(
@@ -78,14 +134,22 @@ def local_day_bounds_utc(
     forecast out of a sample the live blend never used: `end` cuts
     hindsight, `start` cuts lead the trading path did not have.
     """
-    offset = (
-        get_station(station).utc_offset_hours
-        if isinstance(station, str)
-        else station.utc_offset_hours
-    )
     midnight = datetime(
         target_date.year, target_date.month, target_date.day, tzinfo=timezone.utc
     )
+    # AT THE DAY BEING BOUNDED, not at the instant this runs. This function
+    # is handed historical target_dates -- storage.forecast_means_by_date
+    # walks every stored forecast row -- so resolving the offset from the
+    # wall clock would bound a December day with August's summer-time
+    # offset, silently moving the boundary this docstring exists to keep
+    # honest.
+    #
+    # UTC midnight of target_date is the anchor rather than the true local
+    # midnight, which would be circular: the local instant depends on the
+    # offset being looked up. The two can disagree only on a DST transition
+    # DAY, where the anchor may pick the wrong side by an hour -- accepted,
+    # and far smaller than being wrong for half of every year.
+    offset = current_utc_offset_hours(station, at=midnight)
     start = midnight - timedelta(hours=offset)
     return start, start + timedelta(days=1)
 
@@ -478,6 +542,266 @@ STATIONS = {
         # settlement truth -- so the backtest reports resolution-pending
         # instead of settling Karachi P&L on a maybe-wrong station.
         metar_ingest_mode="proxy",
+    ),
+    # --- Europe --------------------------------------------------------------
+    # Registered 2026-08-25. Confirmed facts in
+    # docs/superpowers/research/2026-08-24-europe-station-facts.md.
+    #
+    # TWO THINGS EVERY ENTRY HERE MUST CARRY, neither of which any Asian
+    # entry needs:
+    #   region="europe"       -- draws on a pool funded at $0 (see
+    #                            REGION_BANKROLL_USD below). Collection and
+    #                            scoring only; it cannot size a live order.
+    #   iana_timezone=...     -- these cities observe DST. utc_offset_hours
+    #                            is ALSO set, to the STANDARD-time value,
+    #                            because backtest/engine.py reads it
+    #                            directly and has no moving clock.
+    # monsoon_phase_by_month deliberately omitted (defaults to {}) for every
+    # station below, same as the Asian entries: the field feeds no
+    # calculation, and the shared SE Asian monsoon lookup is meaningless in
+    # Europe. No seed_observations either -- these are brand-new stations.
+    #
+    # PROVENANCE (read before trusting anything below): gamma-api.polymarket.com
+    # and polymarket.com itself were network-blocked in the research
+    # environment (confirmed three independent ways -- curl, browser tool,
+    # WebFetch). Every Polymarket-sourced fact here (bucket windows, city
+    # slugs, resolution-source text) therefore comes from polym.trade, a
+    # third-party mirror, captured 2026-08-25 -- NOT the primary Gamma API the
+    # design doc names. Each fact that matters for registry correctness was
+    # cross-checked against a second, independent source: ICAO/lat/lon against
+    # Wikipedia airport infoboxes, station identity against Wunderground's own
+    # history page, METAR availability directly against aviationweather.gov,
+    # and WWIS city-list membership directly against worldweather.wmo.int (not
+    # via the mirror). See this file's own header for the standing reminder
+    # that bucket_min_c/bucket_max_c are CROSS-CHECKS ONLY and go stale within
+    # days regardless of source -- the live token map is authoritative at
+    # trade time.
+    #
+    # RESOLUTION SOURCE: every European market's rules text names NOAA
+    # (weather.gov/wrh/timeseries?site=<icao>), not Wunderground, as the cited
+    # resolution source -- a real difference from the Asian markets' text.
+    # But for all seven cities the NOAA site= station and the Wunderground
+    # history-page station are the SAME named airport (same ICAO, same
+    # station header on both pages), and aviationweather.gov -- the exact
+    # endpoint clients/metar_client.py already calls -- has live whole-
+    # degree-C METAR for all seven. This is a different DISPLAY SOURCE for
+    # the same station, not a different station: not the VHHH case (a
+    # genuinely different, systematically cooler station) and not the OPKC
+    # case (unconfirmed station identity). So every entry below keeps the
+    # defaults metar_ingest_mode="resolution" and
+    # resolution_grade_source="metar_daily_max" -- set explicitly here even
+    # though they match the dataclass defaults, so this reasoning is visible
+    # at the call site rather than only in this comment block.
+    #
+    # OPEN ITEM, NOT YET MEASURED: nobody has diffed a NOAA weather.gov
+    # daily-max reading against aviationweather.gov's METAR-derived daily max
+    # for the same station on the same settled day. Both draw on the global
+    # METAR network and both claim whole-degree-C precision, so the
+    # expectation is that they agree, but that is an expectation, not a
+    # measurement. This should be checked -- e.g. by comparing a handful of
+    # settled days once observations exist -- before any European station is
+    # considered for promotion past "exploratory".
+    #
+    # long_term_normal_max_c: no city's value below is sourced to an official
+    # 1991-2020 normal (see the research doc's per-city confidence table).
+    # Per an explicit controller ruling, every value here is instead the
+    # MIDPOINT of that city's live bucket window at registration time -- an
+    # arbitrary, honestly-labeled placeholder, not a claimed climatological
+    # figure. This is the same anticipated state config.py already documents
+    # near MIN_RESOLUTION_OBS_BEFORE_ENTRY: a brand-new station starts with a
+    # placeholder normal, and MIN_RESOLUTION_OBS_BEFORE_ENTRY=10 is the
+    # designed mitigation -- no station trades on this number until it has
+    # accumulated its own settlement-grade observation history.
+    "EGLC": StationConfig(
+        icao="EGLC",
+        display_name="London City Airport",
+        country="United Kingdom",
+        lat=51.50528,
+        lon=0.05528,
+        wunderground_slug="gb/london/EGLC",
+        long_term_normal_max_c=22.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (17-27), NOT a sourced normal. No
+                                       # EGLC-specific 1991-2020 Met Office
+                                       # normal was found; Heathrow's 23.4C
+                                       # is a DIFFERENT station and must not
+                                       # be substituted (different site,
+                                       # inland vs. riverside).
+        official_client_key="wwis",
+        # London is genuinely absent from the WWIS city list -- checked
+        # directly against worldweather.wmo.int's full city list, twice,
+        # targeted at the UK block. Same honest gap as RCSS/Taipei: the wwis
+        # client returns None rather than guessing.
+        wwis_city_name="",
+        polymarket_city_slug="london",
+        region="europe",
+        iana_timezone="Europe/London",
+        utc_offset_hours=0,
+        bucket_min_c=17,
+        bucket_max_c=27,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "LFPB": StationConfig(
+        icao="LFPB",
+        display_name="Paris-Le Bourget Airport",
+        country="France",
+        lat=48.96000,
+        lon=2.43500,
+        wunderground_slug="fr/paris/LFPB",
+        long_term_normal_max_c=27.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (22-32), NOT a sourced normal.
+                                       # Meteo-France's 1991-2020 normals
+                                       # publication was located but the
+                                       # Le Bourget August daily-max figure
+                                       # was not extracted from it.
+        official_client_key="wwis",
+        wwis_city_name="Paris",
+        polymarket_city_slug="paris",
+        region="europe",
+        iana_timezone="Europe/Paris",
+        utc_offset_hours=1,
+        bucket_min_c=22,
+        bucket_max_c=32,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "LEMD": StationConfig(
+        icao="LEMD",
+        display_name="Adolfo Suárez Madrid–Barajas Airport",
+        country="Spain",
+        lat=40.47222,
+        lon=-3.56083,
+        wunderground_slug="es/madrid/LEMD",
+        long_term_normal_max_c=29.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (24-34), NOT a sourced normal.
+                                       # AEMET's own "Madrid Aeropuerto"
+                                       # (Barajas) normals page gives 32.8C
+                                       # for August mean max, but for the
+                                       # 1981-2010 reference period, not the
+                                       # 1991-2020 period used elsewhere in
+                                       # this registry -- wrong period, so
+                                       # not adopted as-is.
+        official_client_key="wwis",
+        wwis_city_name="Madrid",
+        polymarket_city_slug="madrid",
+        region="europe",
+        iana_timezone="Europe/Madrid",
+        utc_offset_hours=1,
+        bucket_min_c=24,
+        bucket_max_c=34,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "EHAM": StationConfig(
+        icao="EHAM",
+        display_name="Amsterdam Airport Schiphol",
+        country="Netherlands",
+        lat=52.30000,
+        lon=4.76500,
+        wunderground_slug="nl/amsterdam/EHAM",
+        long_term_normal_max_c=25.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (20-30), NOT a sourced normal. KNMI's
+                                       # own Schiphol climate page was reached
+                                       # twice without surfacing a 1991-2020
+                                       # August daily-max figure; a
+                                       # third-party aggregator 403'd.
+        official_client_key="wwis",
+        # EXACT match string required -- wwis.py's lookup is .lower()-only
+        # with no other normalization, so the parenthetical below is part of
+        # the match, not decoration. A plain "Amsterdam" would NOT match.
+        wwis_city_name="Amsterdam (Schiphol)",
+        polymarket_city_slug="amsterdam",
+        region="europe",
+        iana_timezone="Europe/Amsterdam",
+        utc_offset_hours=1,
+        bucket_min_c=20,
+        bucket_max_c=30,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "LIMC": StationConfig(
+        icao="LIMC",
+        # Malpensa, NOT Linate (LIML) -- Milan has two major airports and
+        # NOAA/Wunderground both independently point at Malpensa as the
+        # settlement station, so this is confirmed, not a guess between them.
+        display_name="Milan Malpensa Airport",
+        country="Italy",
+        lat=45.63000,
+        lon=8.72306,
+        wunderground_slug="it/milan/LIMC",
+        long_term_normal_max_c=25.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (20-30), NOT a sourced normal.
+                                       # Sources disagree by several degrees
+                                       # (city-center ~29-30C vs. a
+                                       # Malpensa-airport aggregator's
+                                       # ~26-29C) with no official ARPA
+                                       # Lombardia figure located -- picking
+                                       # either would be arbitrary.
+        official_client_key="wwis",
+        # EXACT match string required, same reason as Amsterdam above --
+        # wwis.py lowercases but does not otherwise normalize.
+        wwis_city_name="Milan (MILANO)",
+        polymarket_city_slug="milan",
+        region="europe",
+        iana_timezone="Europe/Rome",
+        utc_offset_hours=1,
+        bucket_min_c=20,
+        bucket_max_c=30,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "EDDM": StationConfig(
+        icao="EDDM",
+        display_name="Munich Airport",
+        country="Germany",
+        lat=48.35389,
+        lon=11.78611,
+        wunderground_slug="de/munich/EDDM",
+        long_term_normal_max_c=18.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (13-23), NOT a sourced normal. DWD's
+                                       # own Munich Airport climate page was
+                                       # reached but did not yield an August
+                                       # figure in this pass (and states it
+                                       # generally uses an even older
+                                       # 1981-2010 reference period); the
+                                       # ~24C figure seen elsewhere is from an
+                                       # unverified secondary source and was
+                                       # not adopted.
+        official_client_key="wwis",
+        wwis_city_name="Munich",
+        polymarket_city_slug="munich",
+        region="europe",
+        iana_timezone="Europe/Berlin",
+        utc_offset_hours=1,
+        bucket_min_c=13,
+        bucket_max_c=23,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "EPWA": StationConfig(
+        icao="EPWA",
+        display_name="Warsaw Chopin Airport",
+        country="Poland",
+        lat=52.16583,
+        lon=20.96722,
+        wunderground_slug="pl/warsaw/EPWA",
+        long_term_normal_max_c=22.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (17-27), NOT a sourced normal. A
+                                       # ~24.7C figure from a secondary
+                                       # aggregator claims the 1991-2020
+                                       # period but is not sourced to IMGW
+                                       # (Poland's national met service)
+                                       # directly, so it was not adopted.
+        official_client_key="wwis",
+        wwis_city_name="Warsaw",
+        polymarket_city_slug="warsaw",
+        region="europe",
+        iana_timezone="Europe/Warsaw",
+        utc_offset_hours=1,
+        bucket_min_c=17,
+        bucket_max_c=27,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
     ),
 }
 
@@ -1249,6 +1573,54 @@ LIVE_MAX_CONCURRENT_POSITIONS = 5        # across all live stations
 LIVE_MAX_TOTAL_EXPOSURE_USD = 8.00       # sum of open live size_usd
 LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
 
+# --- Per-region LIVE blast radius -----------------------------------------
+# A SEPARATE MECHANISM from REGION_BANKROLL_USD, and the distinction is the
+# whole reason this block exists. Live orders never pass through Kelly
+# sizing at all -- LIVE_TRADE_SIZE_USD replaces it outright -- so scoping
+# the Kelly bankroll by region does precisely nothing to the real-money
+# path. The three caps above are the real-money path, and they were
+# documented as "across all live stations": process-global.
+#
+# Left that way, isolation would hold only until the first European station
+# were ever promoted, at which point it would silently begin competing with
+# WSSS and RCSS for the same slots and the same dollar ceiling -- discovered
+# under promotion pressure, which is the worst moment to discover it.
+#
+# EUROPE IS 0/0.0/0. Not "small": zero. A European station cannot submit a
+# live order regardless of LIVE_TRADING_STATIONS membership or the
+# POLYMARKET_LIVE_TRADING process flag, because its region authorises no
+# concurrent positions at all.
+#
+# RE-DERIVE, DO NOT COPY, IF EUROPE IS EVER FUNDED.
+# Asia's pair is not two independently chosen numbers: they encode an
+# intended BINDING ORDER -- dollars bind first, count is a sanity bound --
+# and test_live_execution.py::test_the_dollar_cap_binds_before_the_count_cap
+# asserts that relationship against ASSUMED_EXCHANGE_MIN_SHARES,
+# MAX_ENTRY_PRICE and LIVE_TRADE_SIZE_USD. Europe's worst case will differ
+# (different bucket economics, possibly a different MAX_ENTRY_PRICE
+# regime), so if it is ever funded its ceiling must be re-derived to
+# satisfy that same relationship -- not copied from Asia's number.
+REGION_LIVE_MAX_CONCURRENT_POSITIONS = {
+    "asia": LIVE_MAX_CONCURRENT_POSITIONS,
+    "europe": 0,
+}
+
+REGION_LIVE_MAX_TOTAL_EXPOSURE_USD = {
+    "asia": LIVE_MAX_TOTAL_EXPOSURE_USD,
+    "europe": 0.0,
+}
+
+REGION_LIVE_MAX_ORDERS_PER_DAY = {
+    "asia": LIVE_MAX_ORDERS_PER_DAY,
+    "europe": 0,
+}
+
+
+def stations_in_region(region: str) -> list:
+    """Every registered ICAO drawing on one region's pools."""
+    return [icao for icao, st in STATIONS.items() if st.region == region]
+
+
 # The exchange minimum the two backstops above are DERIVED against, in
 # shares. Probed 2026-08-10 ("mos":5 on the WSSS buckets). NOT used to build
 # orders -- wallet_client reads the real per-book value and may find a larger
@@ -1737,6 +2109,67 @@ MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD = 250.0
 # room for a couple of real multi-leg baskets, never most of the roll.
 MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD = 400.0
 
+# --- Per-region capital pools ---------------------------------------------
+# The portfolio caps above are ONE pool shared by every registered station.
+# That was right while the registry was one region with correlated errors
+# and one shared thesis. It stops being right the moment a second region is
+# registered: a European cohort's drawdown would eat the Asian book's
+# sizing budget, and neither cohort's numbers would mean anything about the
+# other.
+#
+# Asia's entries REFERENCE the constants above rather than restating them,
+# so retuning BANKROLL_USD still moves the Asian pool and there is exactly
+# one number to change.
+#
+# EUROPE IS FUNDED AT ZERO ON PURPOSE. A station registered into a
+# zero-funded region collects data, produces decisions and is scored, but
+# Kelly sizing multiplies by 0.0 and every candidate resolves to a $0
+# order. Raising these is a deliberate, auditable, one-line operator
+# decision -- not a side effect of adding a station to the registry.
+REGION_BANKROLL_USD = {
+    "asia": BANKROLL_USD,
+    "europe": 0.0,
+}
+
+REGION_MAX_DAILY_EXPOSURE_USD = {
+    "asia": MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD,
+    "europe": 0.0,
+}
+
+
+def region_of(station_icao: str) -> str:
+    """The capital pool a station draws from. See StationConfig.region."""
+    return get_station(station_icao).region
+
+
+def region_bankroll_usd(station_icao: str) -> float:
+    """
+    Kelly's bankroll for THIS station's region.
+
+    Raises KeyError on a region with no funding entry rather than falling
+    back to a default. A station whose region was typo'd must not quietly
+    size against another region's money.
+    """
+    region = region_of(station_icao)
+    if region not in REGION_BANKROLL_USD:
+        raise KeyError(
+            f"{station_icao} names region {region!r}, which has no entry in "
+            f"config.REGION_BANKROLL_USD (known: {list(REGION_BANKROLL_USD)})."
+        )
+    return REGION_BANKROLL_USD[region]
+
+
+def region_max_daily_exposure_usd(station_icao: str) -> float:
+    """This station's region's portfolio-wide daily exposure cap."""
+    region = region_of(station_icao)
+    if region not in REGION_MAX_DAILY_EXPOSURE_USD:
+        raise KeyError(
+            f"{station_icao} names region {region!r}, which has no entry in "
+            f"config.REGION_MAX_DAILY_EXPOSURE_USD "
+            f"(known: {list(REGION_MAX_DAILY_EXPOSURE_USD)})."
+        )
+    return REGION_MAX_DAILY_EXPOSURE_USD[region]
+
 
 def live_size_cap_usd(station_icao: str, execution_mode: str) -> Optional[float]:
     """
@@ -2154,6 +2587,13 @@ MATURITY_SNAPSHOT = {
     "ZGGG": "exploratory",
     "ZGSZ": "exploratory",
     "OPKC": "exploratory",
+    "EGLC": "exploratory",
+    "LFPB": "exploratory",
+    "LEMD": "exploratory",
+    "EHAM": "exploratory",
+    "LIMC": "exploratory",
+    "EDDM": "exploratory",
+    "EPWA": "exploratory",
 }
 
 _maturity_cache: dict = {}

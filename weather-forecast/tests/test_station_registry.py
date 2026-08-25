@@ -13,10 +13,10 @@ a bad trade or a silently-skipped station-day.
 import config
 from clients.official.registry import _CLIENTS
 
-EXPECTED_STATION_COUNT = 13
+EXPECTED_STATION_COUNT = 20
 
 
-def test_thirteen_stations_registered():
+def test_station_count_matches_expected():
     assert len(config.STATIONS) == EXPECTED_STATION_COUNT
 
 
@@ -42,8 +42,14 @@ def test_bucket_span_is_eleven_for_every_station():
 
 
 def test_utc_offset_hours_in_registered_timezones():
+    # 5/8/9 are the Asian registry. 0/1 are European STANDARD-time offsets
+    # (see StationConfig.iana_timezone -- the live path resolves DST via
+    # config.current_utc_offset_hours(); this static field is what the
+    # backtest reads).
     for icao, st in config.STATIONS.items():
-        assert st.utc_offset_hours in (5, 8, 9), f"{icao}: unexpected utc_offset_hours {st.utc_offset_hours}"
+        assert st.utc_offset_hours in (0, 1, 5, 8, 9), (
+            f"{icao}: unexpected utc_offset_hours {st.utc_offset_hours}"
+        )
 
 
 def test_every_station_has_a_maturity_entry():
@@ -137,15 +143,19 @@ def test_official_client_key_is_registered():
         )
 
 
-def test_wwis_stations_have_city_name_except_taipei():
+def test_wwis_stations_have_city_name_except_taipei_and_london():
     # Every station served by the generic "wwis" client must name its WWIS
-    # city -- EXCEPT RCSS (Taipei), which is honestly absent from WWIS (a
-    # UN service that does not cover Taiwan; see config.py's RCSS entry).
+    # city -- EXCEPT two documented gaps, both honestly absent from WWIS
+    # rather than guessed:
+    #   RCSS (Taipei)  -- WWIS is a UN service that does not cover Taiwan.
+    #   EGLC (London)  -- London is simply not in the WWIS city list (verified
+    #                     twice, directly, against the live full city list).
+    exempt = {"RCSS", "EGLC"}
     for icao, st in config.STATIONS.items():
         if st.official_client_key != "wwis":
             continue
-        if icao == "RCSS":
-            assert st.wwis_city_name == "", "RCSS is expected to have an empty wwis_city_name (Taiwan absent from WWIS)"
+        if icao in exempt:
+            assert st.wwis_city_name == "", f"{icao} is expected to have an empty wwis_city_name (absent from WWIS)"
         else:
             assert st.wwis_city_name != "", f"{icao}: wwis-keyed station has no wwis_city_name set"
 

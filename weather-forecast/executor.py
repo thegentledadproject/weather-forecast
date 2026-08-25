@@ -136,7 +136,7 @@ def _validated_mode(station_icao: str) -> str:
 # Live-track blast-radius checks
 # --------------------------------------------------------------------------
 
-def _live_budget_breach(size_usd: float) -> Optional[str]:
+def _live_budget_breach(size_usd: float, station_icao: str) -> Optional[str]:
     """
     Whether opening one more live position would breach a config backstop.
     Returns the reason string, or None if the entry is within budget.
@@ -145,6 +145,12 @@ def _live_budget_breach(size_usd: float) -> Optional[str]:
     anywhere in this module: refusing to close a real position because an
     exposure counter says so would strand actual money on the exchange,
     which is strictly worse than the exposure that opened it.
+
+    EVERY CAP BELOW IS SCOPED TO THIS STATION'S REGION. The caps are a
+    blast radius, and a blast radius is per-cohort: a European station's
+    live entries must neither consume nor be blocked by the Asian book's
+    slots. See config.REGION_LIVE_MAX_* for why this is a separate
+    mechanism from the Kelly-side region pools.
     """
     live_positions = [
         p for p in storage.load_open_positions(is_paper=False)
@@ -180,17 +186,34 @@ def _live_budget_breach(size_usd: float) -> Optional[str]:
             f"agree, because every backstop below is computed from the database"
         )
 
-    if len(live_positions) >= config.LIVE_MAX_CONCURRENT_POSITIONS:
+    # AFTER reconciliation, DELIBERATELY. reconcile_cached() compares the
+    # database's ENTIRE live book against the exchange's actual holdings;
+    # handing it one region's positions would report every other region's
+    # real holdings as unrecorded exposure and fail every entry. The caps
+    # below are per-region; the reconciliation that licenses trusting them
+    # is not, and cannot be.
+    region = config.region_of(station_icao)
+    live_positions = [
+        p for p in live_positions
+        if p.station_icao in config.STATIONS
+        and config.region_of(p.station_icao) == region
+    ]
+
+    max_concurrent = config.REGION_LIVE_MAX_CONCURRENT_POSITIONS[region]
+    if len(live_positions) >= max_concurrent:
         return (
-            f"{len(live_positions)} live position(s) already open, at the "
-            f"LIVE_MAX_CONCURRENT_POSITIONS limit of {config.LIVE_MAX_CONCURRENT_POSITIONS}"
+            f"{len(live_positions)} live position(s) already open in region "
+            f"{region!r}, at its REGION_LIVE_MAX_CONCURRENT_POSITIONS limit of "
+            f"{max_concurrent}"
         )
 
+    max_exposure = config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD[region]
     exposure = sum(p.size_usd for p in live_positions)
-    if exposure + size_usd > config.LIVE_MAX_TOTAL_EXPOSURE_USD:
+    if exposure + size_usd > max_exposure:
         return (
-            f"${exposure:.2f} live exposure + ${size_usd:.2f} would exceed the "
-            f"LIVE_MAX_TOTAL_EXPOSURE_USD ceiling of ${config.LIVE_MAX_TOTAL_EXPOSURE_USD:.2f}"
+            f"${exposure:.2f} live exposure in region {region!r} + ${size_usd:.2f} "
+            f"would exceed its REGION_LIVE_MAX_TOTAL_EXPOSURE_USD ceiling of "
+            f"${max_exposure:.2f}"
         )
 
     # SUBMISSIONS, not fills. This used to count rows in `positions`, and an
@@ -204,16 +227,20 @@ def _live_budget_breach(size_usd: float) -> Optional[str]:
     # Exits are counted in the same table but NOT against this cap. An exit
     # must never be rate-limited; the audit trail still wants them.
     today = datetime.now(timezone.utc).date().isoformat()
-    submitted = storage.count_live_order_attempts("entry", today)
+    submitted = storage.count_live_order_attempts(
+        "entry", today, station_icaos=config.stations_in_region(region),
+    )
     if submitted is None:
         return (
             "could not read today's live order count -- refusing to authorise on an "
             "unenforceable rate limit (a cap that fails open is not a cap)"
         )
-    if submitted >= config.LIVE_MAX_ORDERS_PER_DAY:
+    max_orders = config.REGION_LIVE_MAX_ORDERS_PER_DAY[region]
+    if submitted >= max_orders:
         return (
-            f"{submitted} live order(s) already SUBMITTED today (filled or not), at the "
-            f"LIVE_MAX_ORDERS_PER_DAY limit of {config.LIVE_MAX_ORDERS_PER_DAY}"
+            f"{submitted} live order(s) already SUBMITTED today (filled or not) in "
+            f"region {region!r}, at its REGION_LIVE_MAX_ORDERS_PER_DAY limit of "
+            f"{max_orders}"
         )
     return None
 
@@ -636,7 +663,7 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         print(f"[executor] {tag}: {label} resized -- {size_note}")
 
     if mode == "live":
-        breach = _live_budget_breach(spec.notional_usd)
+        breach = _live_budget_breach(spec.notional_usd, decision.station_icao)
         if breach:
             print(f"[executor] LIVE: {label} entry BLOCKED by a risk backstop -- {breach}")
             return

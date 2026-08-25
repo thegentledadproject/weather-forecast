@@ -78,9 +78,10 @@ class WWISClient(OfficialClient):
     config.py's per-station comments for cases where the WWIS city is a
     documented PROXY for the actual settlement station, e.g. RKSI's
     "Seoul" listing standing in for the Incheon airport ~50km away).
-    Stations with wwis_city_name == "" (Taiwan -- absent from WWIS
-    entirely, a UN service) get an honest None from get_24hr_forecast
-    instead of a guess.
+    Stations with wwis_city_name == "" (absent from WWIS entirely --
+    Taiwan, a UN service, and London/EGLC, verified absent from the WWIS
+    city list) get an honest None from get_24hr_forecast instead of a
+    guess.
     """
 
     # Class-level, not instance-level: the full city list is a single

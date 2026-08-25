@@ -132,8 +132,8 @@ class TestExecutorNoLongerBlocksOnSettledTokens:
         import executor
 
         monkeypatch.setattr(executor.storage, "count_live_order_attempts",
-                            lambda kind, since: 0)
-        breach = executor._live_budget_breach(1.00)
+                            lambda kind, since, station_icaos=None: 0)
+        breach = executor._live_budget_breach(1.00, "WSSS")
         assert breach is None or "reconciliation" not in breach, (
             f"the 2026-08-22 halt is back: {breach}"
         )
@@ -149,8 +149,8 @@ class TestExecutorNoLongerBlocksOnSettledTokens:
         import executor
 
         monkeypatch.setattr(executor.storage, "count_live_order_attempts",
-                            lambda kind, since: 0)
-        breach = executor._live_budget_breach(1.00)
+                            lambda kind, since, station_icaos=None: 0)
+        breach = executor._live_budget_breach(1.00, "WSSS")
         assert breach is not None and "reconciliation" in breach
 
 
