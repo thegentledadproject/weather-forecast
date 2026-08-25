@@ -255,17 +255,38 @@ class TestRegionScopedCapital:
         assert (config.REGION_MAX_DAILY_EXPOSURE_USD["asia"]
                 == config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD)
 
-    def test_europe_starts_at_zero(self):
-        assert config.REGION_BANKROLL_USD["europe"] == 0.0
-        assert config.REGION_MAX_DAILY_EXPOSURE_USD["europe"] == 0.0
+    def test_europe_paper_pools_are_funded(self):
+        """
+        Europe's PAPER pools are funded, deliberately. They shipped at 0.0
+        and were raised the same day: paper sizes off Kelly too, so a zero
+        pool blocked paper positions as well as real ones, and paper
+        positions are the evidence a promotion case is built from.
+
+        What stays at zero is the real-money blast radius --
+        REGION_LIVE_MAX_*, a separate mechanism, asserted in
+        TestRegionScopedLiveBlastRadius::test_europe_is_locked_at_zero.
+        """
+        assert config.REGION_BANKROLL_USD["europe"] == config.BANKROLL_USD
+        assert (config.REGION_MAX_DAILY_EXPOSURE_USD["europe"]
+                == config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD)
+
+    def test_the_two_pools_are_separate_even_though_equal(self):
+        """
+        Equal values are not one pool. entry_manager sums exposure per
+        region, so an Asian drawdown cannot consume Europe's budget -- the
+        equality here is a sizing choice, not a shared pot.
+        """
+        assert config.REGION_BANKROLL_USD is not config.REGION_MAX_DAILY_EXPOSURE_USD
+        assert set(config.REGION_BANKROLL_USD) == {"asia", "europe"}
 
     def test_region_lookup_helpers_resolve_through_the_station(self, monkeypatch):
         st = _station(icao="TEST", region="europe", iana_timezone="Europe/London")
         monkeypatch.setitem(config.STATIONS, "TEST", st)
 
         assert config.region_of("TEST") == "europe"
-        assert config.region_bankroll_usd("TEST") == 0.0
-        assert config.region_max_daily_exposure_usd("TEST") == 0.0
+        assert config.region_bankroll_usd("TEST") == config.REGION_BANKROLL_USD["europe"]
+        assert (config.region_max_daily_exposure_usd("TEST")
+                == config.REGION_MAX_DAILY_EXPOSURE_USD["europe"])
 
     def test_an_asia_station_reads_the_asia_pool(self):
         assert config.region_bankroll_usd("WSSS") == config.BANKROLL_USD
@@ -405,12 +426,13 @@ class TestPortfolioCapArgumentIsActuallyApplied:
     def test_a_europe_candidate_is_rejected_by_its_own_zero_cap_not_the_global_default(
         self, monkeypatch
     ):
-        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        _pin_zero_region(monkeypatch)
+        eu = _station(icao="EUTEST", region=ZERO_REGION, iana_timezone="Europe/London")
         monkeypatch.setitem(config.STATIONS, "EUTEST", eu)
 
         # Nothing deployed yet today, for the one station this cycle
         # actually looks at (EUTEST) -- the loop skips every other
-        # station once scoped to region="europe".
+        # station once scoped to this region.
         monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [])
         monkeypatch.setattr(storage, "load_position_history", lambda *a, **kw: [])
 
@@ -422,9 +444,9 @@ class TestPortfolioCapArgumentIsActuallyApplied:
         monkeypatch.setattr(storage, "forecast_error_samples",
                             lambda icao, source: [0.2] * config.MIN_BIAS_PAIRS_BEFORE_ENTRY)
 
-        # Bypass decide_entries()/Kelly sizing: a Europe station's $0
-        # bankroll would already zero recommended_size_usd on its own,
-        # which would make this test pass for the wrong reason. Feed a
+        # Bypass decide_entries()/Kelly sizing: this region's $0 bankroll
+        # would already zero recommended_size_usd on its own, which would
+        # make this test pass for the wrong reason. Feed a
         # canned, already-approved, nonzero-sized decision straight into
         # the budget stage instead, exactly as decide_entries() would
         # have handed it to decide_portfolio_entries().
@@ -444,6 +466,32 @@ class TestPortfolioCapArgumentIsActuallyApplied:
         assert decisions[0].recommended_size_usd == 0.0
         assert "portfolio/day" in decisions[0].reason
         assert "budget exhausted" in decisions[0].reason
+
+
+
+# --- synthetic zero-funded region -----------------------------------------
+# Three regression guards below prove that a region-scoped cap is actually
+# THREADED THROUGH to its consumer, and each works by showing the consumer
+# used a value that differs from the global default. They originally leaned
+# on Europe being funded at 0.0 while Asia was 1000.0.
+#
+# Europe is now funded at the SAME value as Asia, which would make all three
+# vacuous -- region-aware and region-blind become indistinguishable, which is
+# precisely the condition that let the backtest region-blindness bug survive
+# (tests/test_parity_entry.py runs on WSSS, where the two agree).
+#
+# So they pin a synthetic region at zero instead. The guards no longer depend
+# on any real region's funding level, and cannot silently rot if one changes.
+ZERO_REGION = "testzero"
+
+
+def _pin_zero_region(monkeypatch):
+    """Register a zero-funded synthetic region across all five pools."""
+    monkeypatch.setitem(config.REGION_BANKROLL_USD, ZERO_REGION, 0.0)
+    monkeypatch.setitem(config.REGION_MAX_DAILY_EXPOSURE_USD, ZERO_REGION, 0.0)
+    monkeypatch.setitem(config.REGION_LIVE_MAX_CONCURRENT_POSITIONS, ZERO_REGION, 0)
+    monkeypatch.setitem(config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, ZERO_REGION, 0.0)
+    monkeypatch.setitem(config.REGION_LIVE_MAX_ORDERS_PER_DAY, ZERO_REGION, 0)
 
 
 import executor
@@ -840,7 +888,8 @@ class TestBacktestEngineIsRegionAware:
     """
 
     def test_run_constructs_portfolio_state_with_the_region_bankroll(self, monkeypatch):
-        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London")
+        _pin_zero_region(monkeypatch)
+        eu = _station(icao="EUTEST", region=ZERO_REGION, iana_timezone="Europe/London")
         monkeypatch.setitem(config.STATIONS, "EUTEST", eu)
 
         captured = {}
@@ -858,7 +907,11 @@ class TestBacktestEngineIsRegionAware:
         assert captured["bankroll_usd"] == 0.0
         assert captured["bankroll_usd"] == config.region_bankroll_usd("EUTEST")
         assert captured["bankroll_usd"] != config.BANKROLL_USD, (
-            "a European replay must not size off Asia's bankroll"
+            "a replay must size off its own region's bankroll, not Asia's. "
+            "This assertion is why the station above uses a synthetic "
+            "zero-funded region rather than 'europe': Europe and Asia are "
+            "funded identically, so a europe station could not tell "
+            "region-aware from region-blind."
         )
 
     def test_run_constructs_portfolio_state_with_asias_bankroll_for_an_asia_station(
@@ -888,7 +941,8 @@ class TestBacktestEngineIsRegionAware:
         entry_sim.decide_portfolio_entries_sim() to capture the
         max_portfolio_usd it was actually called with.
         """
-        eu = _station(icao="EUTEST", region="europe", iana_timezone="Europe/London",
+        _pin_zero_region(monkeypatch)
+        eu = _station(icao="EUTEST", region=ZERO_REGION, iana_timezone="Europe/London",
                       utc_offset_hours=0)
         monkeypatch.setitem(config.STATIONS, "EUTEST", eu)
 

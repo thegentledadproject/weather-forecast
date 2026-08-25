@@ -2121,19 +2121,45 @@ MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD = 400.0
 # so retuning BANKROLL_USD still moves the Asian pool and there is exactly
 # one number to change.
 #
-# EUROPE IS FUNDED AT ZERO ON PURPOSE. A station registered into a
-# zero-funded region collects data, produces decisions and is scored, but
-# Kelly sizing multiplies by 0.0 and every candidate resolves to a $0
-# order. Raising these is a deliberate, auditable, one-line operator
-# decision -- not a side effect of adding a station to the registry.
+# THESE TWO ARE THE PAPER/SIMULATION SIZING POOLS, AND EUROPE IS FUNDED.
+#
+# Europe shipped at 0.0/0.0 on 2026-08-25 and was raised the same day. The
+# zero was an over-correction, and the reason is worth keeping because it is
+# not obvious from either constant's name: PAPER TRADING SIZES OFF KELLY
+# TOO. live_size_cap_usd() returns None for the paper track (it only fires
+# for simulation/live on an allowlisted, mature station), so paper size is
+# `kelly_applied * region_bankroll_usd(...)`, and a zero pool made that
+# $0.00 -- which the `depth_capped_usd < 1.0` guard in entry_manager then
+# rejects. A zero-funded region therefore cannot open a PAPER position
+# either, only collect forecasts, observations and rejected decisions.
+#
+# That is the wrong trade. Paper positions cost nothing and they are the
+# evidence: `positions.model_prob` is what a point-in-time Brier score off
+# the live book is computed from, and it is what promotion_dossier.py reads.
+# A region left at zero can never accumulate the case for its own funding,
+# so it would sit collecting forever.
+#
+# WHAT ACTUALLY HAS TO BE ZERO IS THE REAL-MONEY BLAST RADIUS, and that is
+# a SEPARATE mechanism -- see REGION_LIVE_MAX_* below, which stays 0/0.0/0
+# for Europe. Live orders never pass through Kelly sizing at all, so these
+# two dicts have no bearing on whether a real order can be submitted.
+#
+# The two regions reference the same constants rather than restating them,
+# so retuning the notional moves both. They are still SEPARATE POOLS: a
+# drawdown in one does not consume the other's budget, and the day the two
+# cohorts should be sized differently, that is this line and nothing else.
 REGION_BANKROLL_USD = {
     "asia": BANKROLL_USD,
-    "europe": 0.0,
+    "europe": BANKROLL_USD,
 }
 
+# Raised with the bankroll above, and it HAS to be. Leaving this at 0.0
+# while funding the bankroll would still block every European paper entry:
+# apply_portfolio_budget() computes portfolio_remaining_usd = cap - spent,
+# and a 0.0 cap is an exhausted budget on the first candidate of the day.
 REGION_MAX_DAILY_EXPOSURE_USD = {
     "asia": MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD,
-    "europe": 0.0,
+    "europe": MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD,
 }
 
 

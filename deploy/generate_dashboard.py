@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Render the polyweather status dashboard to /var/www/html/index.html.
+"""Render one region's polyweather status dashboard.
 
-Runs on the EC2 instance from a systemd timer (every 5 min). Reads only:
-systemd unit state, the journal tail, and the package's own storage layer.
-Every data read is fail-soft: a failure shows up ON the page rather than
-killing the render.
+Runs on the EC2 instance from a systemd timer (every 5 min), once per
+registered region -- see --region below. Reads only: systemd unit state,
+the journal tail, and the package's own storage layer. Every data read is
+fail-soft: a failure shows up ON the page rather than killing the render.
 """
+import argparse
 import calendar as calmod
 import html
 import json
@@ -15,11 +16,48 @@ import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-PKG = "/home/ubuntu/weather-forecast/weather-forecast"
-OUT = "/var/www/html/index.html"
+# DASHBOARD_PKG_DIR mirrors DASHBOARD_OUT_DIR below: unset, it's the real
+# EC2 path; set, it lets this script be pointed at a local checkout for
+# testing off the instance (this file has no unit tests of its own -- this
+# env var and DASHBOARD_OUT_DIR are how it gets exercised end to end).
+PKG = os.environ.get("DASHBOARD_PKG_DIR", "/home/ubuntu/weather-forecast/weather-forecast")
 
 sys.path.insert(0, PKG)
 os.chdir(PKG)
+
+import config  # noqa: E402 -- needed up front to validate --region and scope every station loop
+
+# --- region selection ---------------------------------------------------------
+# One page per region: Asia and Europe draw on separate capital pools and
+# separate live blast radius, with no shared thesis, so a mixed page
+# misrepresents both. Defaults to "asia" so an un-updated invocation (the
+# pre-existing systemd ExecStart, a stale cron entry, a bare command line)
+# keeps rendering exactly the page it always has, at exactly the URL it
+# always has.
+_parser = argparse.ArgumentParser(description=__doc__)
+_parser.add_argument("--region", default="asia",
+                      help="Which registered region to render (default: asia).")
+args = _parser.parse_args()
+region = args.region
+if region not in config.REGION_BANKROLL_USD:
+    sys.exit(
+        f"generate_dashboard.py: unknown region {region!r} -- known regions: "
+        f"{sorted(config.REGION_BANKROLL_USD)} (see config.REGION_BANKROLL_USD)"
+    )
+
+# Every config.STATIONS iteration in this file is routed through one of
+# these two instead of the raw registry, so nothing belonging to another
+# region -- a station, a position, an EV snapshot -- can leak onto this page.
+REGION_STATIONS = config.stations_in_region(region)         # ordered list of ICAOs
+REGION_STATIONS_SET = set(REGION_STATIONS)                  # O(1) membership for position filtering
+
+# asia keeps the original hardcoded path -- the page's existing public URL --
+# so nothing that already links or bookmarks it breaks. Any other region
+# gets its own file alongside it. DASHBOARD_OUT_DIR exists purely so this
+# script is testable off the EC2 box (the real /var/www/html doesn't exist
+# locally); left unset it reproduces production exactly.
+OUT_DIR = os.environ.get("DASHBOARD_OUT_DIR", "/var/www/html")
+OUT = os.path.join(OUT_DIR, "index.html" if region == "asia" else f"{region}.html")
 
 warnings = []
 
@@ -58,7 +96,6 @@ open_n = closed_n = None
 pnl_display = "&mdash;"
 pnl_note = "closed trades only"
 try:
-    import config  # noqa: E402
     import storage  # noqa: E402
 
     # limit=1000 matches paper_trading_report.load_paper_history(), which is what
@@ -67,9 +104,14 @@ try:
     # the oldest closed trades before those aggregates did -- invisible in the
     # "15 most recent" table, but the daily P&L calendar below would lose whole
     # early days off the front of the grid while the tile still counted them.
-    open_positions = storage.load_open_positions(is_paper=True)
+    #
+    # load_open_positions() takes no region -- it reads across the whole
+    # registry -- so the open lists are filtered to this region's stations
+    # right after the read, before anything downstream aggregates over them.
+    open_positions = [p for p in storage.load_open_positions(is_paper=True)
+                       if p.station_icao in REGION_STATIONS_SET]
     closed_positions = []
-    for icao in config.STATIONS:
+    for icao in REGION_STATIONS:
         closed_positions.extend(storage.load_position_history(icao, limit=1000, is_paper=True))
     closed_positions.sort(key=lambda p: p.exit_time or "", reverse=True)
     open_n, closed_n = len(open_positions), len(closed_positions)
@@ -81,9 +123,10 @@ try:
     # page was is_paper=True -- a real position could be open on WSSS and
     # the page would show nothing at all, while the header still claimed
     # "paper mode -- no live orders".
-    live_open = storage.load_open_positions(is_paper=False)
+    live_open = [p for p in storage.load_open_positions(is_paper=False)
+                 if p.station_icao in REGION_STATIONS_SET]
     live_closed = []
-    for icao in config.STATIONS:
+    for icao in REGION_STATIONS:
         live_closed.extend(storage.load_position_history(icao, limit=1000, is_paper=False))
     live_closed.sort(key=lambda p: p.exit_time or "", reverse=True)
 except Exception as exc:  # noqa: BLE001
@@ -93,9 +136,9 @@ except Exception as exc:  # noqa: BLE001
 
 # Registry size, computed once and reused everywhere the page used to say
 # "both stations" or hardcode "WSSS & WMKK" -- the count (and every string
-# built from it) now tracks config.STATIONS instead of silently going stale
-# the next time a station is added or retired from the registry.
-station_count = len(config.STATIONS)
+# built from it) now tracks this region's slice of config.STATIONS instead
+# of silently going stale the next time a station is added or retired.
+station_count = len(REGION_STATIONS)
 
 station_summaries = {}  # icao -> summarize_paper_performance dict; reused by the station table
 if closed_n:
@@ -104,7 +147,7 @@ if closed_n:
 
         pnl_usd = 0.0
         staked_usd = 0.0
-        for icao in config.STATIONS:
+        for icao in REGION_STATIONS:
             summary = ptr.summarize_paper_performance(icao)
             if isinstance(summary, dict):
                 station_summaries[icao] = summary
@@ -129,7 +172,7 @@ if closed_n:
 # is a dashboard that will eventually disagree with the executor.
 def _live_armed_stations():
     armed = []
-    for icao in config.STATIONS:
+    for icao in REGION_STATIONS:
         try:
             if config.live_mode_is_permitted(icao, "live"):
                 armed.append(icao)
@@ -145,9 +188,28 @@ except Exception as exc:  # noqa: BLE001
     warnings.append(f"live station check failed: {exc}")
 
 live_at_risk = sum(float(p.size_usd or 0.0) for p in live_open)
-live_cap_usd = float(getattr(config, "LIVE_MAX_TOTAL_EXPOSURE_USD", 0.0) or 0.0)
-live_cap_n = getattr(config, "LIVE_MAX_CONCURRENT_POSITIONS", None)
+# Region-scoped live blast radius. These used to read the flat LIVE_MAX_*
+# constants directly, which was fine back when there was only one region --
+# now that Europe carries its own (zero) blast radius, the card must read
+# THIS region's ceiling or it would show Asia's caps on Europe's page.
+# getattr-first, same fail-soft convention as the flat constants used to
+# get, so a package checkout that predates the REGION_LIVE_MAX_* dicts still
+# renders instead of crashing this card.
+_region_live_cap_usd = getattr(config, "REGION_LIVE_MAX_TOTAL_EXPOSURE_USD", {})
+_region_live_cap_n = getattr(config, "REGION_LIVE_MAX_CONCURRENT_POSITIONS", {})
+_region_live_orders_per_day = getattr(config, "REGION_LIVE_MAX_ORDERS_PER_DAY", {})
+live_cap_usd = float(_region_live_cap_usd.get(region, 0.0) or 0.0)
+live_cap_n = _region_live_cap_n.get(region)
+live_orders_per_day_cap = _region_live_orders_per_day.get(region)
+# Per-entry size is still a single flat notional, not region-keyed (see
+# config.LIVE_TRADE_SIZE_USD) -- it's what one order asks for, not a ceiling.
 live_size_usd = float(getattr(config, "LIVE_TRADE_SIZE_USD", 0.0) or 0.0)
+# All three blast-radius backstops at zero (Europe today) means no station in
+# this region can ever pass config.live_mode_is_permitted(), independent of
+# LIVE_TRADING_STATIONS -- the real-money card says so explicitly below
+# rather than just rendering an empty "no station armed" line that reads the
+# same as "temporarily paper" instead of "structurally paper".
+live_region_caps_all_zero = not live_cap_usd and not live_cap_n and not live_orders_per_day_cap
 
 # Realized real-money P&L, computed by summarize_positions() -- the same
 # arithmetic paper_trading_report uses for the paper track, so the two
@@ -215,7 +277,8 @@ def _run_probes():
         # below (Open-Meteo, Wunderground, CLOB don't care WHICH station in
         # a timezone group you ask, only the Gamma per-event check does).
         offset_reps = {}
-        for icao, st in config.STATIONS.items():
+        for icao in REGION_STATIONS:
+            st = config.STATIONS[icao]
             offset_reps.setdefault(st.utc_offset_hours, st)
         rep_stations = list(offset_reps.values())
         primary = rep_stations[0]  # arbitrary anchor for the station-agnostic probes below
@@ -243,8 +306,13 @@ def _run_probes():
 
         # NEA is Singapore's own government feed, tied to whichever station
         # actually uses the "nea" official client (WSSS today) -- probe it
-        # only if such a station is registered, instead of assuming WSSS.
-        nea_station = next((s for s in config.STATIONS.values() if s.official_client_key == "nea"), None)
+        # only if such a station is registered IN THIS REGION, instead of
+        # assuming WSSS (Europe has no "nea" station at all).
+        nea_station = next(
+            (config.STATIONS[icao] for icao in REGION_STATIONS
+             if config.STATIONS[icao].official_client_key == "nea"),
+            None,
+        )
         if nea_station is not None:
             probes.append(_probe("NEA (data.gov.sg)", "https://api.data.gov.sg/v1/environment/24-hour-weather-forecast"))
 
@@ -253,8 +321,9 @@ def _run_probes():
         # regeneration would be neither cheap nor informative (one WWIS
         # outage looks like every WWIS station going down at once anyway).
         wwis_station = next(
-            (s for s in config.STATIONS.values()
-             if s.official_client_key == "wwis" and s.wwis_city_name in _WWIS_CITY_ID_BY_NAME),
+            (config.STATIONS[icao] for icao in REGION_STATIONS
+             if config.STATIONS[icao].official_client_key == "wwis"
+             and config.STATIONS[icao].wwis_city_name in _WWIS_CITY_ID_BY_NAME),
             None,
         )
         if wwis_station is not None:
@@ -308,7 +377,7 @@ EV_ENTRY_SCREEN = 0.15  # matches scheduler's min_net_ev entry screen
 
 def _load_ev_snapshots():
     snaps = []
-    for icao in config.STATIONS:
+    for icao in REGION_STATIONS:
         p = config.DATA_DIR / f"ev_latest_{icao}.json"
         try:
             if p.exists():
@@ -820,6 +889,17 @@ try:
             f"<tbody>{''.join(_pos_row(p, with_order_id=True) for p in live_open)}</tbody>"
             "</table></div>"
         )
+    elif live_region_caps_all_zero:
+        blocks.append(
+            "<div class='moneybar flat'>"
+            "<div class='mb-amt'>$0.00</div>"
+            "<div class='mb-lab'>no real capital at risk right now<br>"
+            f"<span class='mb-sub'>no station in the {html.escape(region)} region can submit a real "
+            "order &mdash; config.REGION_LIVE_MAX_CONCURRENT_POSITIONS, _TOTAL_EXPOSURE_USD and "
+            f"_ORDERS_PER_DAY are all 0 for {html.escape(region)!r}. Promotion means raising those "
+            "three entries, not just adding a station to LIVE_TRADING_STATIONS.</span></div>"
+            "</div>"
+        )
     else:
         blocks.append(
             "<div class='moneybar flat'>"
@@ -857,6 +937,11 @@ try:
         realmoney_cap = (f"live-armed: {html.escape(', '.join(live_stations))} &middot; "
                          f"${live_size_usd:,.2f} per entry &middot; separate from every paper number "
                          "on this page, never summed with them")
+    elif live_region_caps_all_zero:
+        realmoney_cap = (f"no station in the {html.escape(region)} region can submit a real order "
+                         "&mdash; REGION_LIVE_MAX_CONCURRENT_POSITIONS / _TOTAL_EXPOSURE_USD / "
+                         f"_ORDERS_PER_DAY are all 0 for {html.escape(region)!r} &middot; the whole "
+                         "book below is paper")
     else:
         realmoney_cap = ("no station passes config.live_mode_is_permitted() &mdash; "
                          "the whole book below is paper")
@@ -883,6 +968,21 @@ if live_stations:
                  f"{html.escape(', '.join(live_stations))}</span>")
 else:
     mode_pill = "<span class='pill paperm'><span class='dot'></span>paper mode &mdash; no live orders</span>"
+
+region_label = region.capitalize()
+
+# Cross-link every registered region's page. Built from
+# config.REGION_BANKROLL_USD's keys rather than a hardcoded "Asia"/"Europe"
+# pair, so a third region gets its own nav pill for free the day it's
+# registered. Filenames mirror the OUT computation above: asia is
+# index.html (the pre-existing URL), everything else is "<region>.html".
+region_nav_html = "".join(
+    (f"<span class='pill regioncur'>{html.escape(_r.capitalize())}</span>"
+     if _r == region else
+     f"<a class='pill' href='{html.escape('index.html' if _r == 'asia' else f'{_r}.html')}'>"
+     f"{html.escape(_r.capitalize())}</a>")
+    for _r in sorted(config.REGION_BANKROLL_USD)
+)
 
 live_at_risk_display = f"${live_at_risk:,.2f}"
 if live_open:
@@ -921,7 +1021,7 @@ def _station_table():
         open_count[p.station_icao] = open_count.get(p.station_icao, 0) + 1
         open_staked[p.station_icao] = open_staked.get(p.station_icao, 0.0) + float(p.size_usd or 0.0)
     rows = []
-    for icao in sorted(config.STATIONS):
+    for icao in sorted(REGION_STATIONS):
         st = config.STATIONS[icao]
         maturity = config.STATION_MATURITY.get(icao, "exploratory")
         badge_cls = "mature" if maturity == "mature" else "immature"
@@ -985,11 +1085,12 @@ except Exception as exc:  # noqa: BLE001
 # cycle against that group's OWN local clock (config.SCHEDULE_WINDOWS), so a
 # single "Singapore time" strip stopped being an honest picture of the whole
 # system's trading day the moment a station outside UTC+8 was registered.
-# Group stations by utc_offset_hours -- derived from the live registry, never
-# hardcoded, so a future station on a not-yet-seen offset gets its own strip
-# automatically -- and render one strip per group.
+# Group stations by utc_offset_hours -- derived from this region's slice of
+# the live registry, never hardcoded, so a future station on a not-yet-seen
+# offset gets its own strip automatically -- and render one strip per group.
 _offset_groups = {}
-for _icao, _st in config.STATIONS.items():
+for _icao in REGION_STATIONS:
+    _st = config.STATIONS[_icao]
     _offset_groups.setdefault(_st.utc_offset_hours, []).append(_icao)
 
 _now_for_strips = datetime.now(timezone.utc)
@@ -1096,6 +1197,10 @@ page = """<!doctype html>
      rather than something you read your way into. */
   .pill.livem { border-color:var(--heat); color:var(--heat); background:transparent; font-weight:700; }
   .pill.livem .dot { background:var(--heat); }
+  /* Region nav: the current region renders as an inert, muted pill (no href,
+     nothing to click into) so it never reads as a live link back to itself;
+     the other regions stay ordinary clickable pills. */
+  .pill.regioncur { background:var(--paper); color:var(--muted); cursor:default; }
   .card.money, .tile.money { border-color:var(--heat); border-width:2px; }
   .card.money h2 { color:var(--heat); }
   .moneybar { display:flex; align-items:center; gap:16px; padding:14px 16px; border-radius:8px;
@@ -1230,11 +1335,12 @@ page = """<!doctype html>
       <div>
         <div class="eyebrow">polyweather &middot; EC2 ap-southeast-5</div>
         <h1>Trading monitor</h1>
-        <p class="sub">Polymarket temperature brackets &middot; @@STATIONCOUNT@@ stations across Asia &middot; generated @@SNAP@@</p>
+        <p class="sub">Polymarket temperature brackets &middot; @@STATIONCOUNT@@ stations across @@REGIONLABEL@@ &middot; generated @@SNAP@@</p>
       </div>
       <div class="pills">
         <span class="pill @@PILLCLS@@"><span class="dot"></span>@@PILLTXT@@</span>
         @@MODEPILL@@
+        @@REGIONNAV@@
         <a class="pill" href="backtest.html">backtest lab &rarr;</a>
       </div>
     </div>
@@ -1372,6 +1478,8 @@ page = (
     .replace("@@POSCAP@@", positions_cap)
     .replace("@@POSTABLE@@", positions_html)
     .replace("@@MODEPILL@@", mode_pill)
+    .replace("@@REGIONNAV@@", region_nav_html)
+    .replace("@@REGIONLABEL@@", html.escape(region_label))
     .replace("@@LIVEATRISK@@", live_at_risk_display)
     .replace("@@LIVEDIM@@", "" if live_open else "dim")
     .replace("@@LIVENOTE@@", live_note)
