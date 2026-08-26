@@ -370,3 +370,196 @@ def test_the_mechanism_itself_the_clamp_decides_the_winner():
     # RJTT 2026-08-08, 34.0C. Live event 22-32 vs config's stale 26-36.
     assert resolution.bucket_for_temp(34.0, 22, 32, "half_up") == 32
     assert resolution.bucket_for_temp(34.0, 26, 36, "half_up") == 34
+
+
+# ==========================================================================
+# The market's own settlement record, for stations whose thermometer lags
+# ==========================================================================
+"""
+THE FAILURE THIS FIXES, measured on the box 2026-08-25.
+
+VHHH:2026-08-21:32:YES ($2.00) and VHHH:2026-08-22:33:YES ($2.31) sat
+`open` for 93h and 69h, logging the "Refusing to guess between 1.0 and 0.0"
+warning every cycle -- 36 consecutive by the time they were found.
+
+The observation fallback above cannot help them. It requires the station's
+`resolution_grade_source`, and VHHH's is `hko_daily_max`: HKO publishes
+CLMMAXT monthly, so the box's VHHH observations ran 2026-06-02..2026-07-31
+and August would not land until ~2026-09-16. Four weeks of a position held
+open on a market that settled days ago, with no stop-loss behind it.
+
+VHHH is the only one of the 20 stations with a non-METAR settlement source,
+so in practice this is VHHH's failure -- but it is structural, not a data
+gap: every VHHH position HELD TO SETTLEMENT hangs. Eight of the ten VHHH
+positions to date exited on price and never reached this path.
+
+The answer was already in the database. `settled_buckets` records which
+bucket each station-day settled into, derived from the settled token prices
+by bucket_bias, and it had both dates (2026-08-21 -> 31, 2026-08-22 -> 31 --
+both positions losers). That is the same authority Polymarket pays on.
+
+WHAT MUST NOT REGRESS: the refusal, again. Every test here that removes the
+settled_buckets row asserts the position stays OPEN, and the observation
+record still takes precedence wherever it exists.
+"""
+
+VHHH_DAY = SETTLED_DAY
+
+
+def _vhhh(bucket_c=32, side="YES", **kw) -> Position:
+    return _pos(bucket_c=bucket_c, side=side, station="VHHH",
+                target_date=VHHH_DAY, **kw)
+
+
+def _settled_buckets(monkeypatch, rows):
+    """rows: {target_date: (bucket_c, bucket_min_c, bucket_max_c)}"""
+    monkeypatch.setattr(storage, "load_settled_buckets", lambda icao: rows)
+
+
+def _no_observations_ever(monkeypatch):
+    """VHHH's real state: an observation table that stops in July."""
+    _observations(monkeypatch, [])
+
+
+class TestClosesFromTheMarketSettlementRecord:
+    def test_a_station_whose_thermometer_lags_still_settles(self, monkeypatch):
+        """
+        The production case: VHHH:2026-08-21 32C YES, settled bucket 31.
+        No hko_daily_max row exists for the date and none will for weeks.
+        """
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        _settled_buckets(monkeypatch, {VHHH_DAY: (31, 24, 34)})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        decision = position_manager._close_resolved_without_price(_vhhh(bucket_c=32), "tok")
+
+        assert decision is not None and decision.should_exit
+        assert decision.reason == "resolution"
+        assert closed[0][1] == 0.0
+        assert closed[0][2:] == ("closed_resolution", "market_resolved")
+
+    def test_the_winning_bucket_pays_par(self, monkeypatch):
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        _settled_buckets(monkeypatch, {VHHH_DAY: (31, 24, 34)})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        position_manager._close_resolved_without_price(_vhhh(bucket_c=31), "tok")
+
+        assert closed[0][1] == 1.0
+
+    def test_a_NO_position_pays_on_every_bucket_but_the_winner(self, monkeypatch):
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        _settled_buckets(monkeypatch, {VHHH_DAY: (31, 24, 34)})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        position_manager._close_resolved_without_price(_vhhh(bucket_c=33, side="NO"), "tok")
+
+        assert closed[0][1] == 1.0
+
+    def test_the_log_names_the_market_not_a_temperature(self, monkeypatch, capsys):
+        """
+        `basis` exists so the record cannot blur "the airport's thermometer
+        said 31C" with "the exchange paid bucket 31". This path is the
+        second claim and must not be written up as the first.
+        """
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        _settled_buckets(monkeypatch, {VHHH_DAY: (31, 24, 34)})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        _capture_closes(monkeypatch)
+
+        position_manager._close_resolved_without_price(_vhhh(bucket_c=32), "tok")
+
+        out = capsys.readouterr().out
+        assert "settled_buckets" in out or "market settlement" in out
+        assert "C -> winning bucket" not in out, "reads as a thermometer reading"
+
+
+class TestTheObservationRecordStillWins:
+    def test_a_settlement_grade_reading_takes_precedence(self, monkeypatch):
+        """
+        Strictly additive: the 19 METAR stations must behave exactly as
+        before. Where both records exist the thermometer decides, and the
+        settled_buckets row is never consulted.
+        """
+        _dead_book(monkeypatch)
+        _observations(monkeypatch, [_reading(33.0)])
+        # Deliberately disagrees. If this row is read at all, the assert fails.
+        _settled_buckets(monkeypatch, {SETTLED_DAY: (31, 24, 34)})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        position_manager._close_resolved_without_price(_pos(bucket_c=33), "tok")
+
+        assert closed[0][1] == 1.0, "the observation record did not win"
+
+
+class TestNeverGuessFromTheMarketRecordEither:
+    def test_no_settled_row_leaves_the_position_open(self, monkeypatch):
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        _settled_buckets(monkeypatch, {})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        assert position_manager._close_resolved_without_price(_vhhh(), "tok") is None
+        assert closed == []
+
+    def test_a_settled_row_for_a_DIFFERENT_DAY_is_not_used(self, monkeypatch):
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        _settled_buckets(monkeypatch, {VHHH_DAY + timedelta(days=1): (31, 24, 34)})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        assert position_manager._close_resolved_without_price(_vhhh(), "tok") is None
+        assert closed == []
+
+    def test_a_bucket_outside_the_recorded_event_refuses(self, monkeypatch):
+        """
+        The settled bucket is a LABEL, so nothing is clamped here and the
+        bounds do not decide the answer -- but a position whose bucket the
+        recorded event never listed belongs to a different token map, and
+        settling it against this winner would be a guess wearing a record's
+        clothes.
+        """
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        _settled_buckets(monkeypatch, {VHHH_DAY: (31, 24, 34)})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
+        closed = _capture_closes(monkeypatch)
+
+        assert position_manager._close_resolved_without_price(_vhhh(bucket_c=37), "tok") is None
+        assert closed == []
+
+    def test_a_storage_failure_does_not_settle_anything(self, monkeypatch):
+        def _boom(icao):
+            raise sqlite_error("database is locked")
+
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        monkeypatch.setattr(storage, "load_settled_buckets", _boom)
+        closed = _capture_closes(monkeypatch)
+
+        assert position_manager._close_from_settlement_source(_vhhh(), gamma_closed=True) is None
+        assert closed == []
+
+    def test_gamma_saying_OPEN_is_still_never_overridden(self, monkeypatch):
+        """A live market with a dead feed is a feed problem, on this path too."""
+        _dead_book(monkeypatch)
+        _no_observations_ever(monkeypatch)
+        _settled_buckets(monkeypatch, {VHHH_DAY: (31, 24, 34)})
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: False)
+        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [_vhhh()])
+        closed = _capture_closes(monkeypatch)
+
+        for _ in range(position_manager.UNMONITORABLE_CYCLES_WARN + 1):
+            position_manager.check_and_exit_positions()
+
+        assert closed == []
