@@ -443,6 +443,105 @@ def render_readiness(icaos, now_utc, warnings):
     return "".join(blocks)
 
 
+# --- EV detail ---------------------------------------------------------------
+# RENDERED UNFILTERED, unlike the region pages. Those show only rows clearing
+# the entry screen, which is right when the question is "is there anything to
+# take" and wrong when it is "how close did we get". On a real-money page the
+# near-misses are the signal.
+#
+# EVERY THRESHOLD IS READ FROM CONFIG, NEVER RESTATED. The existing EV card
+# has gone stale this way twice: once when EV_MIN_PRICE_SCREEN was hardcoded
+# and phantom "+18,820% EV" rows ranked top of the table, and again when a
+# flat MAX_PLAUSIBLE_RAW_EDGE was restated after the real ceiling became
+# price-relative. Both are read through getattr with a fallback so this page
+# still renders against a package checkout predating either constant.
+def _ev_snapshot_path(icao):
+    import config
+
+    return config.DATA_DIR / f"ev_latest_{icao}.json"
+
+
+def ev_row_flags(row, max_entry_price, edge_ceiling_for):
+    """Badge HTML for one EV row, in the order evaluate_entry() vetoes:
+    the entry-price ceiling first (a property of the market), then the
+    price-relative edge ceiling (a property of the signal).
+    """
+    flags = ""
+    price = row.get("market_price")
+    if price is not None and price > max_entry_price:
+        flags += " <span class='badge veto'>over price cap</span>"
+    if abs(row.get("raw_edge") or 0.0) > edge_ceiling_for(price):
+        flags += " <span class='badge veto'>veto zone</span>"
+    if row.get("spread_source") == "fallback_default":
+        flags += " <span class='badge fallback'>fallback est</span>"
+    return flags
+
+
+def render_ev(icaos, bar, warnings):
+    import json
+
+    import config
+
+    max_entry_price = getattr(config, "MAX_ENTRY_PRICE", 1.0)
+    edge_ceiling_for = getattr(
+        config, "max_plausible_edge_for",
+        lambda price: getattr(config, "MAX_PLAUSIBLE_RAW_EDGE", 0.25),
+    )
+
+    blocks = []
+    for icao in sorted(icaos):
+        path = _ev_snapshot_path(icao)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                snap = json.load(fh)
+        except FileNotFoundError:
+            blocks.append(
+                f"<h3>{html.escape(icao)}</h3><div class='empty'>no EV snapshot yet &mdash; "
+                "the engine writes one every time it computes, including when it finds "
+                "nothing, so this means it has not run.</div>"
+            )
+            continue
+        except (OSError, ValueError) as exc:
+            warnings.append(f"EV snapshot unreadable for {icao}: {exc}")
+            continue
+
+        rows = []
+        for r in sorted(snap.get("results", []),
+                        key=lambda x: (x.get("net_ev_per_dollar") is None,
+                                       -(x.get("net_ev_per_dollar") or 0))):
+            ev = r.get("net_ev_per_dollar")
+            price = r.get("market_price")
+            over_bar = bar is not None and ev is not None and ev >= bar
+            rows.append(
+                "<tr>"
+                f"<td class='mono'>{r.get('bucket_c')}&deg;C</td>"
+                f"<td class='mono'>{html.escape(str(r.get('side', '')))}</td>"
+                f"<td class='mono num'>{'&mdash;' if r.get('model_prob') is None else format(r['model_prob'], '.1%')}</td>"
+                f"<td class='mono num'>{'&mdash;' if price is None else format(price, '.3f')}</td>"
+                f"<td class='mono num'>{'&mdash;' if r.get('raw_edge') is None else format(r['raw_edge'], '+.1%')}</td>"
+                f"<td class='mono num dim2'>{'&mdash;' if r.get('slippage_pct') is None else format(r['slippage_pct'], '.1%')}</td>"
+                f"<td class='mono num {'pos' if over_bar else 'dim2'}'>"
+                f"{'&mdash;' if ev is None else format(ev, '+.1%')}"
+                f"{ev_row_flags(r, max_entry_price, edge_ceiling_for)}</td>"
+                "</tr>"
+            )
+        gen_at = str(snap.get("generated_at", ""))[11:16]
+        head = (f"<h3>{html.escape(icao)}</h3><p class='cap'>computed {html.escape(gen_at)} UTC "
+                f"&middot; target {html.escape(str(snap.get('target_date')))} "
+                f"&middot; {len(rows)} bucket/side row(s), unfiltered</p>")
+        if not rows:
+            blocks.append(head + "<div class='empty'>the engine computed and produced no rows.</div>")
+            continue
+        blocks.append(
+            head + "<div class='tablewrap'><table class='ptable'>"
+            "<thead><tr><th>Bucket</th><th>Side</th><th class='num'>Model p</th>"
+            "<th class='num'>Mkt price</th><th class='num'>Raw edge</th>"
+            "<th class='num'>Slip</th><th class='num'>Net EV/$</th></tr></thead>"
+            f"<tbody>{''.join(rows)}</tbody></table></div>"
+        )
+    return "".join(blocks) or "<div class='empty'>no EV data for any real-money station.</div>"
+
+
 def render_page(sections, warnings):
     """Assemble the full document from (title, caption, body_html) triples.
 

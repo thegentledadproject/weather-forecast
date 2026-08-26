@@ -324,3 +324,70 @@ def test_render_readiness_groups_by_region(monkeypatch, isolated_stores):
     )
     assert "asia" in out.lower()
     assert "WSSS" in out and "RCSS" in out
+
+
+# --- EV detail ---------------------------------------------------------------
+# The region pages show only rows clearing the entry screen. This page shows
+# ALL of them: when the question is "why didn't it trade", the near-misses are
+# the signal. The badges must read config, never restate it -- the existing EV
+# card has gone stale that way twice.
+
+
+def test_ev_row_flags_marks_over_price_cap():
+    gen = load_gen()
+    row = {"market_price": 0.92, "raw_edge": 0.02}
+    flags = gen.ev_row_flags(row, max_entry_price=0.90, edge_ceiling_for=lambda p: 0.25)
+    assert "over price cap" in flags
+
+
+def test_ev_row_flags_marks_veto_zone_using_the_price_relative_ceiling():
+    """The edge ceiling is a FUNCTION of price, not a flat constant."""
+    gen = load_gen()
+    row = {"market_price": 0.10, "raw_edge": 0.30}
+    flags = gen.ev_row_flags(row, max_entry_price=1.0, edge_ceiling_for=lambda p: 0.20)
+    assert "veto zone" in flags
+
+
+def test_ev_row_flags_clean_row_has_no_badges():
+    gen = load_gen()
+    row = {"market_price": 0.40, "raw_edge": 0.05}
+    assert gen.ev_row_flags(row, 1.0, lambda p: 0.25) == ""
+
+
+def test_ev_row_flags_marks_fallback_spread():
+    gen = load_gen()
+    row = {"market_price": 0.40, "raw_edge": 0.05, "spread_source": "fallback_default"}
+    assert "fallback" in gen.ev_row_flags(row, 1.0, lambda p: 0.25)
+
+
+def test_ev_row_flags_tolerates_a_missing_price():
+    """An unpriced far-tail book has market_price None; it must not raise."""
+    gen = load_gen()
+    assert gen.ev_row_flags({"market_price": None, "raw_edge": 0.05}, 1.0, lambda p: 0.25) == ""
+
+
+def test_render_ev_shows_rows_below_the_bar(tmp_path, monkeypatch):
+    """The whole point of this section: a row under the bar still renders."""
+    import json
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"ev_latest_{icao}.json")
+    (tmp_path / "ev_latest_WSSS.json").write_text(json.dumps({
+        "station_icao": "WSSS",
+        "generated_at": "2026-08-26T05:01:00+00:00",
+        "target_date": "2026-08-26",
+        "results": [
+            {"bucket_c": 32, "side": "YES", "model_prob": 0.30, "market_price": 0.28,
+             "raw_edge": 0.02, "slippage_pct": 0.01, "net_ev_per_dollar": 0.02,
+             "spread_source": "measured", "notes": ""},
+        ],
+    }), encoding="utf-8")
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "32" in out
+    assert "2.0%" in out or "+2.0%" in out
+
+
+def test_render_ev_reports_a_missing_snapshot_as_never_computed(monkeypatch, tmp_path):
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "no ev snapshot" in out.lower() or "never" in out.lower()
