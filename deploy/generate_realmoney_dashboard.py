@@ -86,6 +86,84 @@ header .sub { margin:0 0 22px; color:var(--ink-2); font-size:14px; }
 """
 
 
+# --- gate 2 probe ------------------------------------------------------------
+# GATE 2 IS PROCESS-GLOBAL AND LIVES NOWHERE THIS PROCESS CAN SEE IT.
+# POLYMARKET_LIVE_TRADING is set in a systemd drop-in that reaches only the
+# daemon's own process; the dashboard runs in a different process on its own
+# timer. The only honest way to observe it is to ask the daemon's own
+# environment whether the NAME is there.
+#
+# THAT FILE ALSO HOLDS POLYMARKET_PRIVATE_KEY. This is why the probe is split
+# in three: a subprocess call for the pid, a byte read, and a PURE predicate
+# that answers a yes/no question about a name. Nothing here returns, prints,
+# logs or stores a value, and the tests assert it. Never widen these to
+# return the entry, the blob, or a parsed dict "for debugging".
+#
+# The alternative -- reporting what the repo believes -- is not equivalent.
+# On 2026-08-12 the daemon ran active/running with the credentials silently
+# dropped by systemd, and an armed-looking daemon with no credentials is
+# indistinguishable from a working one until an order is attempted.
+GATE2_NAME = "POLYMARKET_LIVE_TRADING"
+
+
+def environ_blob_has_name(blob, name):
+    """True if `name` is a variable name in a NUL-separated environ blob.
+
+    Matches on the full name up to '=' -- a prefix test would report
+    POLYMARKET_LIVE as satisfying a probe for POLYMARKET_LIVE_TRADING.
+    Returns a bool and nothing else, ever.
+    """
+    needle = name.encode("utf-8", "replace") + b"="
+    for entry in (blob or b"").split(b"\0"):
+        if entry.startswith(needle):
+            return True
+    return False
+
+
+def _main_pid(unit):
+    """The unit's MainPID, or None if it cannot be determined."""
+    import subprocess
+
+    try:
+        r = subprocess.run(
+            ["systemctl", "show", unit, "-p", "MainPID", "--value"],
+            capture_output=True, text=True, timeout=10,
+        )
+        pid = int((r.stdout or "").strip() or 0)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return pid or None  # systemd reports 0 for a stopped unit
+
+
+def _read_environ(pid):
+    """The raw environ blob for `pid`, or None if it cannot be read.
+
+    Unreadable is the NORMAL case off the box and without privilege, and it
+    must stay distinguishable from "the name is absent".
+    """
+    try:
+        with open(f"/proc/{int(pid)}/environ", "rb") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def gate2_state(unit="polyweather"):
+    """"present" | "absent" | "unknown" -- never a boolean, never a value.
+
+    "unknown" is not "absent". A probe that cannot run must not be rendered
+    as a closed gate: that would report the safest-looking answer for the
+    state we are least sure about.
+    """
+    pid = _main_pid(unit)
+    if pid is None:
+        return "unknown"
+    blob = _read_environ(pid)
+    if blob is None:
+        return "unknown"
+    return "present" if environ_blob_has_name(blob, GATE2_NAME) else "absent"
+
+
 def render_page(sections, warnings):
     """Assemble the full document from (title, caption, body_html) triples.
 

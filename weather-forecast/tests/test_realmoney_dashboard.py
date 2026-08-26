@@ -51,3 +51,65 @@ def test_render_page_escapes_warnings():
     page = gen.render_page([], ["boom <script>alert(1)</script>"])
     assert "<script>alert(1)</script>" not in page
     assert "&lt;script&gt;" in page
+
+
+# --- gate 2 probe ------------------------------------------------------------
+# The drop-in this probe reads also holds POLYMARKET_PRIVATE_KEY. Every test
+# here exists to pin one property: the probe answers a yes/no question about
+# a NAME and never surfaces a VALUE.
+
+_BLOB = (
+    b"PATH=/usr/bin\x00"
+    b"POLYMARKET_PRIVATE_KEY=0xdeadbeefcafe\x00"
+    b"POLYMARKET_LIVE_TRADING=true\x00"
+    b"HOME=/root\x00"
+)
+
+
+def test_environ_blob_has_name_finds_the_name():
+    gen = load_gen()
+    assert gen.environ_blob_has_name(_BLOB, "POLYMARKET_LIVE_TRADING") is True
+
+
+def test_environ_blob_has_name_missing_name():
+    gen = load_gen()
+    assert gen.environ_blob_has_name(_BLOB, "POLYMARKET_NOT_SET") is False
+
+
+def test_environ_blob_has_name_returns_a_bool_not_a_value():
+    """The only thing that may leave this function is True or False. A prefix
+    match that returned the entry would leak the private key."""
+    gen = load_gen()
+    result = gen.environ_blob_has_name(_BLOB, "POLYMARKET_PRIVATE_KEY")
+    assert result is True
+    assert isinstance(result, bool)
+    assert "0xdeadbeefcafe" not in repr(result)
+
+
+def test_environ_blob_has_name_does_not_match_a_prefix():
+    """POLYMARKET_LIVE must not satisfy a probe for POLYMARKET_LIVE_TRADING,
+    and vice versa -- the match is on the full name up to '='."""
+    gen = load_gen()
+    assert gen.environ_blob_has_name(_BLOB, "POLYMARKET_LIVE") is False
+
+
+def test_gate2_state_unknown_when_pid_unavailable(monkeypatch):
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_main_pid", lambda unit: None)
+    assert gen.gate2_state() == "unknown"
+
+
+def test_gate2_state_unknown_when_environ_unreadable(monkeypatch):
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_main_pid", lambda unit: 4242)
+    monkeypatch.setattr(gen, "_read_environ", lambda pid: None)
+    assert gen.gate2_state() == "unknown"
+
+
+def test_gate2_state_present_and_absent(monkeypatch):
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_main_pid", lambda unit: 4242)
+    monkeypatch.setattr(gen, "_read_environ", lambda pid: _BLOB)
+    assert gen.gate2_state() == "present"
+    monkeypatch.setattr(gen, "_read_environ", lambda pid: b"PATH=/usr/bin\x00")
+    assert gen.gate2_state() == "absent"
