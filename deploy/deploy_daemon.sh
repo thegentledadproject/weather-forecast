@@ -68,6 +68,13 @@ if [ -f /usr/local/bin/generate_dashboard.py ]; then
     sudo cp "$APP_DIR/deploy/generate_backtest_dashboard.py" /usr/local/bin/generate_backtest_dashboard.py
     sudo cp "$APP_DIR/deploy/generate_realmoney_dashboard.py" /usr/local/bin/generate_realmoney_dashboard.py
     sudo chmod 644 /usr/local/bin/generate_dashboard.py /usr/local/bin/generate_backtest_dashboard.py /usr/local/bin/generate_realmoney_dashboard.py
+    # The file is now in place, but the timer's unit runs a fixed ExecStart --
+    # copying the generator does not add it to that command line. Installing
+    # a generator that is never invoked renders nothing, silently (the
+    # 2026-08-25 europe.html trap). Warn loudly; do not fail the deploy or
+    # hand-edit the unit here.
+    grep -q generate_realmoney_dashboard.py /etc/systemd/system/polyweather-dashboard.service \
+      || echo "!! dashboard unit ExecStart does not invoke generate_realmoney_dashboard.py -- realmoney.html will not render; hand-edit the unit"
     sudo systemctl start polyweather-dashboard.service 2>/dev/null || true
 fi
 

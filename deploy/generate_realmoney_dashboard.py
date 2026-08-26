@@ -20,8 +20,11 @@ helpers can be unit-tested (see tests/test_realmoney_dashboard.py).
 """
 import argparse
 import html
+import json
 import os
+import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 
 # Mirrors generate_dashboard.py: unset, it's the real EC2 path; set, it
@@ -121,18 +124,30 @@ def environ_blob_has_name(blob, name):
 
 
 def _main_pid(unit):
-    """The unit's MainPID, or None if it cannot be determined."""
-    import subprocess
+    """The unit's MainPID as a real int (0 included), or None if the probe
+    itself could not be run (no systemctl, no privilege, timeout, malformed
+    output).
 
+    0 and None are NOT the same case. systemd reports MainPID=0 for a unit
+    that is stopped or crash-looping -- that is an ANSWER ("not running"),
+    not an inability to observe. Collapsing them cost gate2_state() its
+    fourth state: a dead daemon used to render identically to "cannot be
+    observed from this process".
+    """
     try:
         r = subprocess.run(
             ["systemctl", "show", unit, "-p", "MainPID", "--value"],
             capture_output=True, text=True, timeout=10,
         )
-        pid = int((r.stdout or "").strip() or 0)
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError):
         return None
-    return pid or None  # systemd reports 0 for a stopped unit
+    stdout = (r.stdout or "").strip()
+    if not stdout:
+        return None
+    try:
+        return int(stdout)
+    except ValueError:
+        return None
 
 
 def _read_environ(pid):
@@ -149,15 +164,23 @@ def _read_environ(pid):
 
 
 def gate2_state(unit="polyweather"):
-    """"present" | "absent" | "unknown" -- never a boolean, never a value.
+    """"present" | "absent" | "not_running" | "unknown" -- never a boolean,
+    never a value.
 
     "unknown" is not "absent". A probe that cannot run must not be rendered
     as a closed gate: that would report the safest-looking answer for the
     state we are least sure about.
+
+    "not_running" is not "unknown" either, in the other direction: MainPID=0
+    is systemctl actually answering "this unit is not running", which on the
+    production box means no real order can be submitted by any station --
+    the same practical meaning as "absent", not a shrug.
     """
     pid = _main_pid(unit)
     if pid is None:
         return "unknown"
+    if pid == 0:
+        return "not_running"
     blob = _read_environ(pid)
     if blob is None:
         return "unknown"
@@ -175,6 +198,23 @@ def gate2_state(unit="polyweather"):
 # discriminator scheduler.run_cycle() uses: a window with no EV bar has no
 # bar to clear because it does not open positions.
 MINUTES_PER_DAY = 24 * 60
+
+
+def effective_windows(cfg):
+    """The window table active_window()/next_entry_boundary() must be handed
+    -- `cfg.SCHEDULE_WINDOWS` with `cfg.MARKET_OPEN_WINDOW` prepended when
+    `cfg.ENABLE_MARKET_OPEN_WINDOW` is set.
+
+    Mirrors scheduler.determine_window() (scheduler.py:172-177) exactly.
+    Without this adapter these two pure helpers see the base table only, so
+    flipping the flag opens entries in the scheduler while the page keeps
+    reporting "closed (no entries)" at that time -- a false negative on the
+    page's single central claim.
+    """
+    w = list(cfg.SCHEDULE_WINDOWS)
+    if getattr(cfg, "ENABLE_MARKET_OPEN_WINDOW", False):
+        w = [cfg.MARKET_OPEN_WINDOW] + w   # PREPEND -- must not be shadowed by the base window
+    return w
 
 
 def active_window(minute_of_day, windows):
@@ -306,6 +346,9 @@ def readiness_rungs(icao, now_utc):
                          "read by NAME from the daemon's environ; the value is never read"),
         "absent": _rung("Gate 2 (process)", f"{GATE2_NAME} NOT set", "no",
                         "no real order can be submitted by any station"),
+        "not_running": _rung("Gate 2 (process)", "daemon not running", "no",
+                             "systemctl reports MainPID=0 for this unit -- "
+                             "no real order can be submitted by any station"),
         "unknown": _rung("Gate 2 (process)", "cannot be observed from this process", "unknown",
                          "the daemon's environ is unreadable here -- this is the normal "
                          "answer off the box, and is NOT the same as 'off'"),
@@ -355,8 +398,9 @@ def readiness_rungs(icao, now_utc):
     local = now_utc.timestamp() + offset * 3600
     local_dt = datetime.fromtimestamp(local, tz=timezone.utc)
     mod = local_dt.hour * 60 + local_dt.minute
-    win = active_window(mod, config.SCHEDULE_WINDOWS)
-    boundary = next_entry_boundary(mod, config.SCHEDULE_WINDOWS)
+    windows = effective_windows(config)
+    win = active_window(mod, windows)
+    boundary = next_entry_boundary(mod, windows)
     if win is None:
         rungs.append(_rung("Window", "no window covers this minute", "unknown",
                            "a gap in config.SCHEDULE_WINDOWS"))
@@ -367,7 +411,8 @@ def readiness_rungs(icao, now_utc):
             detail += f" · EV bar {win['min_net_ev']:.0%} · scan {win['interval_min']}m"
         if boundary:
             what, mins = boundary
-            detail += f" · entries {what} in {mins // 60}h{mins % 60:02d}m"
+            verb = {"opens": "open", "closes": "close"}[what]
+            detail += f" · entries {verb} in {mins // 60}h{mins % 60:02d}m"
         rungs.append(
             _rung("Window", f"{win['mode']}{'' if accepts else ' (no entries)'}",
                   "ok" if accepts else "no", detail)
@@ -420,6 +465,10 @@ def render_readiness(icaos, now_utc, warnings):
             by_region.setdefault(config.region_of(icao), []).append(icao)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"region lookup failed for {icao}: {exc}")
+
+    if not by_region:
+        return ("<div class='empty'>region lookup failed for every station &mdash; "
+                "see Render warnings.</div>")
 
     blocks = []
     for region in sorted(by_region):
@@ -478,8 +527,6 @@ def ev_row_flags(row, max_entry_price, edge_ceiling_for):
 
 
 def render_ev(icaos, bar, warnings):
-    import json
-
     import config
 
     max_entry_price = getattr(config, "MAX_ENTRY_PRICE", 1.0)
@@ -518,6 +565,11 @@ def render_ev(icaos, bar, warnings):
                 ev = r.get("net_ev_per_dollar")
                 price = r.get("market_price")
                 bucket_c = r.get("bucket_c")
+                # `bar` is icaos[0]'s own local-window bar (see main()), applied
+                # uniformly to every station's rows here. Correct today because
+                # every live station shares one clock; it stops being correct
+                # the moment a live station sits in a different timezone with a
+                # different active window at render time.
                 over_bar = bar is not None and ev is not None and ev >= bar
                 rows.append(
                     "<tr>"
@@ -533,8 +585,10 @@ def render_ev(icaos, bar, warnings):
                     "</tr>"
                 )
             gen_at = str(snap.get("generated_at", ""))[11:16]
+            target_date = snap.get("target_date")
+            target_html = "&mdash;" if target_date is None else html.escape(str(target_date))
             head = (f"<h3>{html.escape(icao)}</h3><p class='cap'>computed {html.escape(gen_at)} UTC "
-                    f"&middot; target {html.escape(str(snap.get('target_date')))} "
+                    f"&middot; target {target_html} "
                     f"&middot; {len(rows)} bucket/side row(s), unfiltered</p>")
             if not rows:
                 blocks.append(head + "<div class='empty'>the engine computed and produced no rows.</div>")
@@ -565,9 +619,14 @@ def discovery_state(icao, target_date, db_path=None):
     ABSENCE OF EVIDENCE, NOT EVIDENCE OF ABSENCE. market_tokens is populated
     by snapshot capture, so an empty result means "capture has recorded
     nothing", NOT "the market does not exist". The renderer says so.
-    """
-    import time
 
+    `discovered_at` IS A LAST-SEEN TIMESTAMP, NOT A FIRST-SEEN ONE.
+    price_store.upsert_token is INSERT OR REPLACE and both writers stamp a
+    fresh timestamp on every pass, so the column always holds the most
+    recent capture. max(seen) -- not min(seen) -- is therefore the only
+    reading that lets a FROZEN value mean what it should: capture has
+    stopped updating this station, the one signal that capture has died.
+    """
     import config
     import backtest.price_store as price_store
 
@@ -575,14 +634,20 @@ def discovery_state(icao, target_date, db_path=None):
     buckets = sorted({r["bucket_c"] for r in rows if isinstance(r.get("bucket_c"), int)})
     seen = [r["discovered_at"] for r in rows if r.get("discovered_at")]
 
+    # market_tokens holds one row per (bucket, side) -- both ev_engine.py and
+    # snapshot_collector.py write yes AND no. Count DISTINCT BUCKETS with a
+    # quote, not rows with a quote, or two quoted sides of one bucket double
+    # it (reproduced directly: 3 buckets x 2 sides, all quoted, rendered
+    # "6 of 3").
     now = int(time.time())
-    with_book = 0
+    books = set()
     for r in rows:
         try:
             if price_store.get_price_at(r["token_id"], now, db_path=db_path):
-                with_book += 1
+                books.add(r["bucket_c"])
         except Exception:  # noqa: BLE001 - one bad token must not cost the section
             continue
+    with_book = len(books & set(buckets))
 
     drift = None
     try:
@@ -593,7 +658,7 @@ def discovery_state(icao, target_date, db_path=None):
 
     return {
         "buckets": buckets,
-        "first_seen": min(seen) if seen else None,
+        "last_seen": max(seen) if seen else None,
         "with_book": with_book,
         "drift": drift,
     }
@@ -626,7 +691,7 @@ def render_discovery(icaos, warnings):
             f"<div class='rung ok'><span class='lab'>Discovered</span>"
             f"<span class='val'>{len(st['buckets'])} bucket(s), "
             f"{min(st['buckets'])}-{max(st['buckets'])}&deg;C</span>"
-            f"<span class='why'>first seen {html.escape(str(st['first_seen'])[:16])} UTC</span></div>"
+            f"<span class='why'>last recorded by capture {html.escape(str(st['last_seen'])[:16])} UTC</span></div>"
             f"<div class='rung {'ok' if st['with_book'] else 'unknown'}'>"
             f"<span class='lab'>With a live book</span>"
             f"<span class='val'>{st['with_book']} of {len(st['buckets'])}</span>"
@@ -783,7 +848,7 @@ def main(argv=None):
         if icaos:
             offset = config.current_utc_offset_hours(icaos[0])
             local = datetime.fromtimestamp(now_utc.timestamp() + offset * 3600, tz=timezone.utc)
-            win = active_window(local.hour * 60 + local.minute, config.SCHEDULE_WINDOWS)
+            win = active_window(local.hour * 60 + local.minute, effective_windows(config))
             bar = win["min_net_ev"] if win else None
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"EV bar undetermined: {exc}")
@@ -814,16 +879,21 @@ def main(argv=None):
         "<b>not recorded anywhere</b> and are not shown here.",
         lambda: render_readiness(icaos, now_utc, warnings),
     )
-    _section(
-        sections, warnings, "Edge and EV",
-        ev_caption,
-        lambda: render_ev(icaos, bar, warnings),
-    )
+    # Discovery is rendered right after Readiness, and BEFORE Edge and EV, so
+    # it sits beside the Window rung it is meant to be read against. Spec §4:
+    # "Stacking is the whole point. A station sitting inside its primary
+    # window with zero discovered buckets currently looks exactly like a
+    # quiet night. Here it reads as a fault."
     _section(
         sections, warnings, "Discovery",
         "What market discovery has recorded for today's target date. An empty result means "
         "capture has recorded nothing, not that the market is absent.",
         lambda: render_discovery(icaos, warnings),
+    )
+    _section(
+        sections, warnings, "Edge and EV",
+        ev_caption,
+        lambda: render_ev(icaos, bar, warnings),
     )
     _section(
         sections, warnings, "Order activity",

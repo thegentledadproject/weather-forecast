@@ -95,10 +95,70 @@ def test_environ_blob_has_name_does_not_match_a_prefix():
     assert gen.environ_blob_has_name(_BLOB, "POLYMARKET_LIVE") is False
 
 
+# --- _main_pid stdout parsing -------------------------------------------
+# Deferred at Task 2. MainPID=0 is systemctl actually answering "not
+# running" -- an ANSWER, not an inability to observe -- and must stay
+# distinguishable from every case where the probe itself could not run.
+
+
+def test_main_pid_zero_stdout_means_not_running(monkeypatch):
+    gen = load_gen()
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="0\n", stderr=""),
+    )
+    assert gen._main_pid("polyweather") == 0
+
+
+def test_main_pid_empty_stdout_means_unknown(monkeypatch):
+    gen = load_gen()
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="", stderr=""),
+    )
+    assert gen._main_pid("polyweather") is None
+
+
+def test_main_pid_garbage_stdout_means_unknown(monkeypatch):
+    gen = load_gen()
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="not-a-pid\n", stderr=""),
+    )
+    assert gen._main_pid("polyweather") is None
+
+
+def test_main_pid_real_int_is_returned(monkeypatch):
+    gen = load_gen()
+    import subprocess
+
+    monkeypatch.setattr(
+        subprocess, "run",
+        lambda *a, **k: subprocess.CompletedProcess(a, 0, stdout="4242\n", stderr=""),
+    )
+    assert gen._main_pid("polyweather") == 4242
+
+
 def test_gate2_state_unknown_when_pid_unavailable(monkeypatch):
     gen = load_gen()
     monkeypatch.setattr(gen, "_main_pid", lambda unit: None)
     assert gen.gate2_state() == "unknown"
+
+
+def test_gate2_state_not_running_when_pid_is_zero(monkeypatch):
+    """The reachable-today bug: --mode live without the ack flag makes
+    scheduler.py call parser.error(), the unit dies, Restart=on-failure
+    loops, MainPID stays 0 -- and the old code rendered that identically to
+    'cannot be observed from this process'."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_main_pid", lambda unit: 0)
+    assert gen.gate2_state() == "not_running"
 
 
 def test_gate2_state_unknown_when_environ_unreadable(monkeypatch):
@@ -170,6 +230,67 @@ def test_next_entry_boundary_none_when_nothing_accepts_entries():
     gen = load_gen()
     closed_only = [(0, 0, 24, 0, None, "closed", None, "nothing runs")]
     assert gen.next_entry_boundary(6 * 60, closed_only) is None
+
+
+# --- effective_windows --------------------------------------------------
+# scheduler.determine_window() prepends config.MARKET_OPEN_WINDOW when
+# config.ENABLE_MARKET_OPEN_WINDOW is set; active_window()/next_entry_boundary()
+# used to be handed the base table only and never did. That is correct only
+# while the flag is False -- flip it and the page reports "closed" while the
+# scheduler is actually open, a false negative on the page's central claim.
+
+
+def test_effective_windows_prepends_market_open_window_when_enabled():
+    """The prepended window must win over a base window covering the same
+    minute -- that ordering is the whole point, per scheduler.py's own
+    comment."""
+    gen = load_gen()
+    import types
+
+    cfg = types.SimpleNamespace(
+        SCHEDULE_WINDOWS=[(23, 0, 24, 0, 30, "closed", None, "overnight")],
+        ENABLE_MARKET_OPEN_WINDOW=True,
+        MARKET_OPEN_WINDOW=(23, 0, 23, 30, 10, "secondary", 0.35, "market open"),
+    )
+    windows = gen.effective_windows(cfg)
+    w = gen.active_window(23 * 60 + 10, windows)
+    assert w["mode"] == "secondary"
+    assert w["min_net_ev"] == 0.35
+
+
+def test_effective_windows_leaves_base_table_alone_when_disabled():
+    gen = load_gen()
+    import types
+
+    cfg = types.SimpleNamespace(
+        SCHEDULE_WINDOWS=[(23, 0, 24, 0, 30, "closed", None, "overnight")],
+        ENABLE_MARKET_OPEN_WINDOW=False,
+        MARKET_OPEN_WINDOW=(23, 0, 23, 30, 10, "secondary", 0.35, "market open"),
+    )
+    windows = gen.effective_windows(cfg)
+    assert windows == cfg.SCHEDULE_WINDOWS
+
+
+def test_readiness_window_rung_uses_market_open_window_when_enabled(monkeypatch, isolated_stores):
+    """Wiring, not just the helper: readiness_rungs() must actually call
+    effective_windows(config), or the flag can flip in production and the
+    Window rung never notices."""
+    gen = load_gen()
+    import config
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "present")
+    monkeypatch.setattr(config, "current_utc_offset_hours", lambda icao: 0)
+    monkeypatch.setattr(config, "SCHEDULE_WINDOWS",
+                         [(0, 0, 24, 0, 30, "monitor_only", None, "exits only")])
+    monkeypatch.setattr(config, "ENABLE_MARKET_OPEN_WINDOW", True)
+    monkeypatch.setattr(config, "MARKET_OPEN_WINDOW",
+                         (23, 0, 23, 30, 10, "secondary", 0.35, "market open window"))
+
+    rungs = gen.readiness_rungs("WSSS", datetime(2026, 8, 26, 23, 10, tzinfo=timezone.utc))
+    window = next(r for r in rungs if r["label"] == "Window")
+    assert "secondary" in window["value"]
+    assert window["state"] == "ok"
 
 
 # --- bounds drift ------------------------------------------------------------
@@ -302,6 +423,20 @@ def test_readiness_gate2_unknown_renders_unknown_not_off(monkeypatch, isolated_s
     assert "cannot" in gate2["value"].lower()
 
 
+def test_readiness_gate2_not_running_renders_no_not_unknown(monkeypatch, isolated_stores):
+    """A dead daemon must render as a closed gate ('no'), not a shrug
+    ('unknown') -- on the production box this IS the answer to 'why can't an
+    order open right now'."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "not_running")
+    from datetime import datetime, timezone
+
+    rungs = gen.readiness_rungs("WSSS", datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc))
+    gate2 = next(r for r in rungs if "Gate 2" in r["label"])
+    assert gate2["state"] == "no"
+    assert "not running" in gate2["value"].lower()
+
+
 def test_readiness_maturity_says_when_it_is_an_override(monkeypatch, isolated_stores):
     """Both live stations are mature only by MATURITY_OVERRIDE, and RCSS fails
     the measured beats_market criterion. A bare 'mature' would misreport the
@@ -324,8 +459,63 @@ def test_render_readiness_groups_by_region(monkeypatch, isolated_stores):
     out = gen.render_readiness(
         ["WSSS", "RCSS"], datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc), warnings
     )
-    assert "asia" in out.lower()
+    # "asia" also appears in the Capacity rung's why
+    # (REGION_LIVE_MAX_ORDERS_PER_DAY['asia']) -- assert on the actual
+    # grouping markup, not a substring that proves nothing about grouping.
+    assert "class='region'" in out
     assert "WSSS" in out and "RCSS" in out
+
+
+def test_render_readiness_empty_state_when_region_lookup_fails_for_everyone(monkeypatch):
+    """If config.region_of raises for every station, the card must say so
+    in-card rather than render blank -- a blank card gives the operator no
+    way to tell 'no live stations' from 'this section is broken'."""
+    gen = load_gen()
+    import config
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(config, "region_of", lambda icao: (_ for _ in ()).throw(RuntimeError("boom")))
+    warnings = []
+    out = gen.render_readiness(
+        ["WSSS"], datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc), warnings
+    )
+    assert out.strip() != ""
+    assert "class='empty'" in out
+    assert any("WSSS" in w for w in warnings)
+
+
+def test_readiness_window_detail_uses_correct_grammar_for_entries_open(monkeypatch, isolated_stores):
+    """'entries opens in 5h18m' is bad grammar -- the plural subject
+    'entries' must not take a singular verb."""
+    gen = load_gen()
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "present")
+    monkeypatch.setattr(gen, "active_window", lambda minute, windows: {
+        "start_minute": 0, "end_minute": 1440, "interval_min": 10,
+        "mode": "monitor_only", "min_net_ev": None, "description": "exits only",
+    })
+    monkeypatch.setattr(gen, "next_entry_boundary", lambda minute, windows: ("opens", 318))
+    rungs = gen.readiness_rungs("WSSS", datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc))
+    window = next(r for r in rungs if r["label"] == "Window")
+    assert "entries open in" in window["why"]
+    assert "entries opens in" not in window["why"]
+
+
+def test_readiness_window_detail_uses_correct_grammar_for_entries_close(monkeypatch, isolated_stores):
+    gen = load_gen()
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "present")
+    monkeypatch.setattr(gen, "active_window", lambda minute, windows: {
+        "start_minute": 0, "end_minute": 1440, "interval_min": 10,
+        "mode": "primary", "min_net_ev": 0.15, "description": "primary edge window",
+    })
+    monkeypatch.setattr(gen, "next_entry_boundary", lambda minute, windows: ("closes", 120))
+    rungs = gen.readiness_rungs("WSSS", datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc))
+    window = next(r for r in rungs if r["label"] == "Window")
+    assert "entries close in" in window["why"]
+    assert "entries closes in" not in window["why"]
 
 
 # --- EV detail ---------------------------------------------------------------
@@ -459,39 +649,101 @@ def test_render_ev_tolerates_a_missing_bucket_like_every_other_numeric_field(mon
     assert "None" not in out
 
 
+def test_render_ev_tolerates_a_missing_target_date(monkeypatch, tmp_path):
+    """target_date had no None guard while its sibling bucket_c did -- a
+    null target_date must not render the literal string 'None'."""
+    import json
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"ev_latest_{icao}.json")
+    (tmp_path / "ev_latest_WSSS.json").write_text(json.dumps({
+        "station_icao": "WSSS",
+        "generated_at": "2026-08-26T05:01:00+00:00",
+        "target_date": None,
+        "results": [],
+    }), encoding="utf-8")
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "target None" not in out
+
+
 # --- discovery + order trail -------------------------------------------------
 
 
 def _seed_tokens(db_path, icao, target_date, buckets, with_book=()):
-    """Seed market_tokens (+ optional fresh snapshots) in a throwaway db."""
+    """Seed market_tokens (+ optional fresh snapshots) in a throwaway db.
+
+    Seeds BOTH sides (yes and no) for every bucket -- market_tokens holds one
+    row per (bucket, side), same as the real writers (ev_engine.py,
+    snapshot_collector.py). A fixture that seeded one side only would make
+    tokens coincidentally equal buckets and hide a row-vs-bucket counting bug
+    in discovery_state's with_book computation.
+    """
     import time
 
     import backtest.price_store as price_store
 
     now = int(time.time())
     for b in buckets:
-        token = f"tok-{icao}-{b}"
-        price_store.upsert_token(
-            token_id=token, station_icao=icao, target_date=target_date,
-            bucket_c=b, side="yes", discovered_at="2026-08-26T05:01:00+00:00",
-            db_path=db_path,
-        )
-        if b in with_book:
-            price_store.save_snapshot(
-                token_id=token, ts=now - 60, price=0.30, depth_usd=None,
-                source=price_store.EXIT_SNAPSHOT_SOURCE, fidelity_min=5,
+        for side in ("yes", "no"):
+            token = f"tok-{icao}-{b}-{side}"
+            price_store.upsert_token(
+                token_id=token, station_icao=icao, target_date=target_date,
+                bucket_c=b, side=side, discovered_at="2026-08-26T05:01:00+00:00",
                 db_path=db_path,
             )
+            if b in with_book:
+                price_store.save_snapshot(
+                    token_id=token, ts=now - 60, price=0.30, depth_usd=None,
+                    source=price_store.EXIT_SNAPSHOT_SOURCE, fidelity_min=5,
+                    db_path=db_path,
+                )
 
 
 def test_discovery_state_reports_buckets_and_books(tmp_path):
+    """With BOTH sides seeded (real shape: one market_tokens row per
+    (bucket, side)), with_book must count DISTINCT BUCKETS with a quote, not
+    rows with a quote -- 2 quoted buckets x 2 sides each must still read 2,
+    never 4."""
     gen = load_gen()
     db = str(tmp_path / "market.sqlite3")
     _seed_tokens(db, "WSSS", "2026-08-26", [30, 31, 32], with_book=(30, 32))
     st = gen.discovery_state("WSSS", "2026-08-26", db_path=db)
     assert sorted(st["buckets"]) == [30, 31, 32]
     assert st["with_book"] == 2
-    assert st["first_seen"] == "2026-08-26T05:01:00+00:00"
+    assert st["last_seen"] == "2026-08-26T05:01:00+00:00"
+
+
+def test_discovery_state_with_book_never_exceeds_bucket_count(tmp_path):
+    """The reviewer's exact repro: 3 buckets x 2 sides, ALL quoted, must
+    render '3 of 3', never '6 of 3'."""
+    gen = load_gen()
+    db = str(tmp_path / "market.sqlite3")
+    _seed_tokens(db, "WSSS", "2026-08-26", [30, 31, 32], with_book=(30, 31, 32))
+    st = gen.discovery_state("WSSS", "2026-08-26", db_path=db)
+    assert st["with_book"] == 3
+    assert st["with_book"] <= len(st["buckets"])
+
+
+def test_discovery_state_last_seen_is_the_maximum_not_the_minimum(tmp_path):
+    """discovered_at is a LAST-seen timestamp (INSERT OR REPLACE stamps a
+    fresh value on every write) -- a frozen value is the one signal that
+    capture has died. min() would read a live, actively-recapturing station
+    as though it had gone stale the moment it started."""
+    gen = load_gen()
+    import backtest.price_store as price_store
+
+    db = str(tmp_path / "market.sqlite3")
+    price_store.upsert_token(
+        token_id="tok-a", station_icao="WSSS", target_date="2026-08-26",
+        bucket_c=30, side="yes", discovered_at="2026-08-26T05:01:00+00:00",
+        db_path=db,
+    )
+    price_store.upsert_token(
+        token_id="tok-b", station_icao="WSSS", target_date="2026-08-26",
+        bucket_c=31, side="yes", discovered_at="2026-08-26T07:45:00+00:00",
+        db_path=db,
+    )
+    st = gen.discovery_state("WSSS", "2026-08-26", db_path=db)
+    assert st["last_seen"] == "2026-08-26T07:45:00+00:00"
 
 
 def test_discovery_state_empty_when_nothing_recorded(tmp_path):
@@ -501,7 +753,7 @@ def test_discovery_state_empty_when_nothing_recorded(tmp_path):
     st = gen.discovery_state("WSSS", "2026-08-26", db_path=db)
     assert st["buckets"] == []
     assert st["with_book"] == 0
-    assert st["first_seen"] is None
+    assert st["last_seen"] is None
     assert st["drift"] is None
 
 
@@ -558,7 +810,7 @@ def test_render_discovery_empty_says_capture_not_absence(monkeypatch):
 
     monkeypatch.setattr(config, "local_today", lambda icao: "2026-08-26")
     monkeypatch.setattr(gen, "discovery_state", lambda icao, target, db_path=None: {
-        "buckets": [], "first_seen": None, "with_book": 0, "drift": None,
+        "buckets": [], "last_seen": None, "with_book": 0, "drift": None,
     })
     out = gen.render_discovery(["WSSS"], warnings=[])
     assert "capture has recorded no" in out.lower()
@@ -571,7 +823,7 @@ def test_render_discovery_reports_buckets_books_and_drift(monkeypatch):
 
     monkeypatch.setattr(config, "local_today", lambda icao: "2026-08-26")
     monkeypatch.setattr(gen, "discovery_state", lambda icao, target, db_path=None: {
-        "buckets": [30, 31, 32], "first_seen": "2026-08-26T05:01:00+00:00",
+        "buckets": [30, 31, 32], "last_seen": "2026-08-26T05:01:00+00:00",
         "with_book": 2,
         "drift": {"config": (28, 30), "discovered": (30, 32),
                   "note": "registry lists 28-30°C, discovery recorded 30-32°C"},
@@ -581,6 +833,7 @@ def test_render_discovery_reports_buckets_books_and_drift(monkeypatch):
     assert "3 bucket" in out
     assert "2 of 3" in out
     assert "bounds drift" in out.lower()
+    assert "last recorded by capture" in out.lower()
 
 
 def test_render_discovery_one_station_failing_does_not_cost_the_others(monkeypatch):
@@ -592,7 +845,7 @@ def test_render_discovery_one_station_failing_does_not_cost_the_others(monkeypat
     def flaky(icao, target, db_path=None):
         if icao == "RCSS":
             raise RuntimeError("boom")
-        return {"buckets": [32], "first_seen": "2026-08-26T05:01:00+00:00",
+        return {"buckets": [32], "last_seen": "2026-08-26T05:01:00+00:00",
                 "with_book": 1, "drift": None}
 
     monkeypatch.setattr(gen, "discovery_state", flaky)
@@ -609,11 +862,27 @@ def test_full_render_has_every_section(tmp_path, monkeypatch, isolated_stores):
     gen = load_gen()
     monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
     monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
     out = tmp_path / "realmoney.html"
     assert gen.main(["--out", str(out)]) == 0
     page = out.read_text(encoding="utf-8")
     for heading in ("Readiness", "Edge and EV", "Discovery", "Order activity"):
         assert heading in page, f"missing section: {heading}"
+
+
+def test_full_render_discovery_sits_beside_readiness_before_edge_and_ev(tmp_path, monkeypatch, isolated_stores):
+    """Spec §4: 'Stacking is the whole point... [zero discovered buckets
+    inside a primary window] reads as a fault' only if Discovery is adjacent
+    to the Window rung, not separated from it by the full unfiltered EV
+    table."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>discovery-marker</div>")
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
+    out = tmp_path / "realmoney.html"
+    assert gen.main(["--out", str(out)]) == 0
+    page = out.read_text(encoding="utf-8")
+    assert page.index("Readiness") < page.index("Discovery") < page.index("Edge and EV")
 
 
 def test_full_render_states_what_the_ladder_cannot_know(tmp_path, monkeypatch, isolated_stores):
@@ -622,6 +891,7 @@ def test_full_render_states_what_the_ladder_cannot_know(tmp_path, monkeypatch, i
     gen = load_gen()
     monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
     monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
     out = tmp_path / "realmoney.html"
     gen.main(["--out", str(out)])
     page = out.read_text(encoding="utf-8").lower()
@@ -634,6 +904,7 @@ def test_full_render_survives_a_broken_section(tmp_path, monkeypatch, isolated_s
     gen = load_gen()
     monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
     monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
 
     def boom(*a, **k):
         raise RuntimeError("synthetic failure")
@@ -659,6 +930,7 @@ def test_full_render_survives_a_broken_render_page(tmp_path, monkeypatch, isolat
     gen = load_gen()
     monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
     monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
 
     def boom(sections, warnings):
         raise RuntimeError("render_page synthetic failure")
@@ -677,6 +949,7 @@ def test_full_render_survives_a_non_numeric_ev_bar(tmp_path, monkeypatch, isolat
     gen = load_gen()
     monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
     monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
     monkeypatch.setattr(gen, "active_window", lambda minute, windows: {
         "start_minute": 0, "end_minute": 1440, "interval_min": 5,
         "mode": "primary", "min_net_ev": "not-a-number", "description": "test window",
@@ -696,6 +969,7 @@ def test_full_render_ev_caption_names_the_station_the_bar_came_from(tmp_path, mo
     gen = load_gen()
     monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
     monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
     monkeypatch.setattr(gen, "active_window", lambda minute, windows: {
         "start_minute": 0, "end_minute": 1440, "interval_min": 5,
         "mode": "primary", "min_net_ev": 0.08, "description": "test window",
@@ -730,6 +1004,17 @@ def test_deploy_daemon_refreshes_the_realmoney_generator():
     )
 
 
+def test_deploy_daemon_warns_if_the_dashboard_unit_never_invokes_the_realmoney_generator():
+    """deploy_daemon.sh copies the generator into /usr/local/bin but never
+    touches the systemd unit's ExecStart -- installing the file alone
+    renders nothing (the 2026-08-25 europe.html trap). Must warn loudly and
+    must NOT fail the deploy over it."""
+    script = (_REPO / "deploy" / "deploy_daemon.sh").read_text(encoding="utf-8")
+    assert "generate_realmoney_dashboard.py" in script
+    assert "polyweather-dashboard.service" in script
+    assert "hand-edit the unit" in script
+
+
 def test_setup_dashboard_installs_the_realmoney_generator():
     script = (_REPO / "deploy" / "setup_dashboard.sh").read_text(encoding="utf-8")
     assert "generate_realmoney_dashboard.py" in script
@@ -737,7 +1022,15 @@ def test_setup_dashboard_installs_the_realmoney_generator():
 
 def test_setup_dashboard_execstart_renders_the_realmoney_page():
     """A generator installed but never invoked renders nothing. This is the
-    2026-08-25 gotcha, where europe.html silently never rendered."""
+    2026-08-25 gotcha, where europe.html silently never rendered.
+
+    Also pins the three EXISTING invocations on this same ExecStart line --
+    a future edit could drop --region asia, --region europe, or the
+    backtest generator and the suite would stay green with only the
+    realmoney assertion in place."""
     script = (_REPO / "deploy" / "setup_dashboard.sh").read_text(encoding="utf-8")
     exec_line = next(l for l in script.splitlines() if l.startswith("ExecStart="))
     assert "generate_realmoney_dashboard.py" in exec_line
+    assert "generate_dashboard.py --region asia" in exec_line
+    assert "generate_dashboard.py --region europe" in exec_line
+    assert "generate_backtest_dashboard.py" in exec_line
