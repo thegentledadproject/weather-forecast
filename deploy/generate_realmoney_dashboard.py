@@ -552,6 +552,152 @@ def render_ev(icaos, bar, warnings):
     return "".join(blocks) or "<div class='empty'>no EV data for any real-money station.</div>"
 
 
+# --- discovery ---------------------------------------------------------------
+# STACKED UNDER THE SCHEDULE ON PURPOSE. A station sitting inside its primary
+# window with zero discovered buckets currently looks exactly like a quiet
+# night. Side by side with the window state, it reads as a fault.
+#
+# `db_path` is threaded through purely so this is testable against a throwaway
+# database; production passes None and gets settings.MARKET_DATA_DB.
+def discovery_state(icao, target_date, db_path=None):
+    """What market discovery has actually recorded for one station/date.
+
+    ABSENCE OF EVIDENCE, NOT EVIDENCE OF ABSENCE. market_tokens is populated
+    by snapshot capture, so an empty result means "capture has recorded
+    nothing", NOT "the market does not exist". The renderer says so.
+    """
+    import time
+
+    import config
+    import backtest.price_store as price_store
+
+    rows = price_store.list_tokens(station_icao=icao, target_date=target_date, db_path=db_path)
+    buckets = sorted({r["bucket_c"] for r in rows if isinstance(r.get("bucket_c"), int)})
+    seen = [r["discovered_at"] for r in rows if r.get("discovered_at")]
+
+    now = int(time.time())
+    with_book = 0
+    for r in rows:
+        try:
+            if price_store.get_price_at(r["token_id"], now, db_path=db_path):
+                with_book += 1
+        except Exception:  # noqa: BLE001 - one bad token must not cost the section
+            continue
+
+    drift = None
+    try:
+        station = config.get_station(icao)
+        drift = bounds_drift(station.bucket_min_c, station.bucket_max_c, buckets)
+    except Exception:  # noqa: BLE001
+        drift = None
+
+    return {
+        "buckets": buckets,
+        "first_seen": min(seen) if seen else None,
+        "with_book": with_book,
+        "drift": drift,
+    }
+
+
+def render_discovery(icaos, warnings):
+    import config
+
+    blocks = []
+    for icao in sorted(icaos):
+        try:
+            target = config.local_today(icao)
+            st = discovery_state(icao, str(target))
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"discovery state failed for {icao}: {exc}")
+            continue
+        if not st["buckets"]:
+            blocks.append(
+                f"<h3>{html.escape(icao)}</h3><div class='empty'>capture has recorded no "
+                f"buckets for {html.escape(str(target))}. This means snapshot capture has "
+                "not seen this market &mdash; NOT that the market does not exist.</div>"
+            )
+            continue
+        drift_html = ""
+        if st["drift"]:
+            drift_html = (f"<span class='badge fallback'>bounds drift</span> "
+                          f"<span class='why'>{html.escape(st['drift']['note'])}</span>")
+        blocks.append(
+            f"<h3>{html.escape(icao)}</h3>"
+            f"<div class='rung ok'><span class='lab'>Discovered</span>"
+            f"<span class='val'>{len(st['buckets'])} bucket(s), "
+            f"{min(st['buckets'])}-{max(st['buckets'])}&deg;C</span>"
+            f"<span class='why'>first seen {html.escape(str(st['first_seen'])[:16])} UTC</span></div>"
+            f"<div class='rung {'ok' if st['with_book'] else 'unknown'}'>"
+            f"<span class='lab'>With a live book</span>"
+            f"<span class='val'>{st['with_book']} of {len(st['buckets'])}</span>"
+            "<span class='why'>a quote fresh enough for price_store's staleness guard</span></div>"
+            + (f"<div class='rung unknown'><span class='lab'>Bounds</span>{drift_html}</div>"
+               if drift_html else "")
+        )
+    return "".join(blocks) or "<div class='empty'>no discovery data.</div>"
+
+
+# --- order audit trail -------------------------------------------------------
+# THE ONLY RECORD OF A REFUSED ORDER ANYWHERE. An unfilled FOK deliberately
+# writes no position -- a stored position with no shares behind it is the
+# worst thing this codebase can produce -- so an order that was built,
+# submitted and refused leaves no trace outside the process log and this
+# table. Nothing rendered it before this page.
+def render_orders(limit, warnings):
+    import config
+    import storage
+
+    try:
+        attempts = storage.load_live_order_attempts(limit=limit)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"order trail unreadable: {exc}")
+        return "<div class='empty'>order trail unavailable</div>"
+
+    day_start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0).isoformat()
+    counts = []
+    for region in sorted(getattr(config, "REGION_LIVE_MAX_ORDERS_PER_DAY", {})):
+        try:
+            n = storage.count_live_order_attempts(
+                "entry", day_start, station_icaos=config.stations_in_region(region))
+        except Exception:  # noqa: BLE001
+            n = None
+        cap = config.REGION_LIVE_MAX_ORDERS_PER_DAY[region]
+        counts.append(f"{html.escape(region)}: "
+                      + ("<b>unknown</b>" if n is None else f"{n}")
+                      + f" of {cap} today")
+    head = f"<p class='cap'>entries submitted today &mdash; {' &middot; '.join(counts)}</p>"
+
+    if not attempts:
+        return head + ("<div class='empty'>no real order has been submitted yet &mdash; "
+                       "this trail records every submission, including refused and "
+                       "unfilled ones.</div>")
+
+    rows = "".join(
+        "<tr>"
+        f"<td class='mono dim2'>{html.escape(str(a.get('ts', ''))[5:16].replace('T', ' '))}</td>"
+        f"<td class='mono'>{html.escape(str(a.get('kind', '')))}</td>"
+        f"<td class='mono'>{html.escape(str(a.get('station_icao', '')))}</td>"
+        f"<td class='mono'>{a.get('bucket_c')}&deg;C {html.escape(str(a.get('side', '')))}</td>"
+        f"<td class='mono num'>{'&mdash;' if a.get('notional_usd') is None else '$' + format(a['notional_usd'], ',.2f')}</td>"
+        f"<td class='mono num'>{'&mdash;' if a.get('size_shares') is None else format(a['size_shares'], ',.2f')}</td>"
+        f"<td class='mono num'>{'&mdash;' if a.get('limit_price') is None else format(a['limit_price'], '.3f')}</td>"
+        f"<td class='mono'>{html.escape(str(a.get('outcome', '')))}</td>"
+        f"<td class='mono dim2' title='{html.escape(str(a.get('order_id') or ''))}'>"
+        f"{html.escape(str(a.get('order_id') or '')[:10]) or '&mdash;'}</td>"
+        f"<td class='mono dim2'>{html.escape(str(a.get('detail') or '')[:60])}</td>"
+        "</tr>"
+        for a in attempts
+    )
+    return head + (
+        "<div class='tablewrap'><table class='ptable'>"
+        "<thead><tr><th>When</th><th>Kind</th><th>Station</th><th>Bucket</th>"
+        "<th class='num'>Notional</th><th class='num'>Shares</th><th class='num'>Limit</th>"
+        "<th>Outcome</th><th>Order id</th><th>Detail</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>"
+    )
+
+
 def render_page(sections, warnings):
     """Assemble the full document from (title, caption, body_html) triples.
 

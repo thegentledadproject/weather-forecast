@@ -455,3 +455,88 @@ def test_render_ev_tolerates_a_missing_bucket_like_every_other_numeric_field(mon
     }), encoding="utf-8")
     out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
     assert "None" not in out
+
+
+# --- discovery + order trail -------------------------------------------------
+
+
+def _seed_tokens(db_path, icao, target_date, buckets, with_book=()):
+    """Seed market_tokens (+ optional fresh snapshots) in a throwaway db."""
+    import time
+
+    import backtest.price_store as price_store
+
+    now = int(time.time())
+    for b in buckets:
+        token = f"tok-{icao}-{b}"
+        price_store.upsert_token(
+            token_id=token, station_icao=icao, target_date=target_date,
+            bucket_c=b, side="yes", discovered_at="2026-08-26T05:01:00+00:00",
+            db_path=db_path,
+        )
+        if b in with_book:
+            price_store.save_snapshot(
+                token_id=token, ts=now - 60, price=0.30, depth_usd=None,
+                source=price_store.EXIT_SNAPSHOT_SOURCE, fidelity_min=5,
+                db_path=db_path,
+            )
+
+
+def test_discovery_state_reports_buckets_and_books(tmp_path):
+    gen = load_gen()
+    db = str(tmp_path / "market.sqlite3")
+    _seed_tokens(db, "WSSS", "2026-08-26", [30, 31, 32], with_book=(30, 32))
+    st = gen.discovery_state("WSSS", "2026-08-26", db_path=db)
+    assert sorted(st["buckets"]) == [30, 31, 32]
+    assert st["with_book"] == 2
+    assert st["first_seen"] == "2026-08-26T05:01:00+00:00"
+
+
+def test_discovery_state_empty_when_nothing_recorded(tmp_path):
+    gen = load_gen()
+    db = str(tmp_path / "market.sqlite3")
+    _seed_tokens(db, "WSSS", "2026-08-26", [])
+    st = gen.discovery_state("WSSS", "2026-08-26", db_path=db)
+    assert st["buckets"] == []
+    assert st["with_book"] == 0
+    assert st["first_seen"] is None
+    assert st["drift"] is None
+
+
+def test_render_orders_says_unknown_when_the_count_is_unreadable(monkeypatch):
+    gen = load_gen()
+    import storage
+
+    monkeypatch.setattr(storage, "load_live_order_attempts", lambda limit=50: [])
+    monkeypatch.setattr(storage, "count_live_order_attempts",
+                        lambda kind, since_iso, station_icaos=None: None)
+    out = gen.render_orders(limit=10, warnings=[])
+    assert "unknown" in out.lower()
+
+
+def test_render_orders_lists_a_submission(monkeypatch):
+    gen = load_gen()
+    import storage
+
+    monkeypatch.setattr(storage, "load_live_order_attempts", lambda limit=50: [{
+        "ts": "2026-08-26T05:02:00+00:00", "kind": "entry", "station_icao": "RCSS",
+        "target_date": "2026-08-26", "bucket_c": 32, "side": "YES",
+        "notional_usd": 1.55, "size_shares": 5.0, "limit_price": 0.31,
+        "outcome": "filled", "order_id": "0xa1d4c085deadbeef", "detail": "",
+    }])
+    monkeypatch.setattr(storage, "count_live_order_attempts",
+                        lambda kind, since_iso, station_icaos=None: 1)
+    out = gen.render_orders(limit=10, warnings=[])
+    assert "RCSS" in out and "filled" in out
+    assert "0xa1d4c085" in out
+
+
+def test_render_orders_empty_trail(monkeypatch):
+    gen = load_gen()
+    import storage
+
+    monkeypatch.setattr(storage, "load_live_order_attempts", lambda limit=50: [])
+    monkeypatch.setattr(storage, "count_live_order_attempts",
+                        lambda kind, since_iso, station_icaos=None: 0)
+    out = gen.render_orders(limit=10, warnings=[])
+    assert "no real order" in out.lower()
