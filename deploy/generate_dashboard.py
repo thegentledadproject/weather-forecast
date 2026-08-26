@@ -556,7 +556,105 @@ def _hm(iso_ts, utc_offset_hours=8):
         return html.escape(str(iso_ts)[:16])
 
 
-def _pos_row(p, with_order_id=False):
+def _usd(amount):
+    """'+$12.34' / '-$12.34', with the sign DERIVED from the value.
+
+    Every signed dollar figure in the calendar used to rebuild this inline, and
+    two of the four sites asserted the sign they expected instead of reading
+    it: "Best" hardcoded a '+' and "Worst" a '-'. A grid always has a best and
+    a worst day and NEITHER has a guaranteed sign -- on an all-winning grid the
+    worst day is still a profit, and it rendered as "Worst -$5.00" in red; on
+    an all-losing grid the best day is still a loss, and it rendered as the
+    garbled "Best +$-12.34". Both are reachable on a young real-money track
+    with a handful of closes.
+    """
+    return f"{'+' if amount >= 0 else '-'}${abs(amount):,.2f}"
+
+
+def _pn(amount):
+    """CSS class for a signed figure -- derived, for the same reason as _usd."""
+    return "pos" if amount >= 0 else "neg"
+
+
+def _age(epoch_s):
+    """'4m ago' / '2h ago' for a captured-quote timestamp.
+
+    A mark is only worth reading next to how old it is: the exit checker only
+    quotes a position while its station is in an active scan window, so a
+    perfectly valid row can be hours stale outside one.
+    """
+    secs = max(0, int(time.time()) - int(epoch_s))
+    if secs < 90:
+        return f"{secs}s ago"
+    if secs < 5400:
+        return f"{secs // 60}m ago"
+    return f"{secs // 3600}h ago"
+
+
+_mark_lookup_failed = []
+
+
+def _open_mark(p):
+    """The last bid ACTUALLY CAPTURED for this open position's token, or None.
+
+    Reads backtest.price_store -- the series position_manager writes on every
+    exit check (price_store.EXIT_SNAPSHOT_SOURCE) -- through get_price_at(), so
+    the staleness guard is the same one the replay honours: a series that has
+    gone quiet for longer than its own recorded fidelity allows returns None
+    rather than pretending the last print is still the market.
+
+    DELIBERATELY NOT position.high_water_mark, which is what this column used
+    to show. The hwm is a monotone non-decreasing peak (risk_manager.
+    update_high_water_mark), so an unrealized P&L computed off it could never
+    print a loss -- every open row would read flat-or-up regardless of where
+    the market actually is, which is the overhang trap the P&L calendar caption
+    below already warns about, dressed up as a number.
+
+    Fail-soft like every other read on this page: no token id, no rows, or an
+    unreachable price store all mean "no mark", never a fabricated one.
+    """
+    if not p.token_id:
+        return None
+    try:
+        import backtest.price_store as price_store  # noqa: E402
+
+        return price_store.get_price_at(p.token_id, int(time.time()))
+    except Exception as exc:  # noqa: BLE001 - a missing mark must not kill the page
+        if not _mark_lookup_failed:
+            _mark_lookup_failed.append(1)
+            warnings.append(f"open-position marks unavailable: {exc}")
+        return None
+
+
+def _ret_and_pnl(p, price):
+    """(return string, css, P&L string, css) for this position marked at `price`.
+
+    ONE arithmetic for the open row and the closed row, and the same one
+    paper_trading_report uses: the percentage is _position_return_pct()'s
+    (price - entry) / entry, and the dollar figure is that fraction times the
+    stake, which is exactly how summarize_positions() accumulates
+    total_pnl_usd. A row and the tile above it cannot drift apart because
+    neither re-derives P&L its own way.
+    """
+    if price is None or not p.entry_price:
+        return "&mdash;", "", "&mdash;", ""
+    r = (price - p.entry_price) / p.entry_price
+    return f"{r * 100:+.1f}%", _pn(r), _usd(p.size_usd * r), _pn(r)
+
+
+# Entry and exit get their OWN columns, and so do the entered and exited
+# timestamps. The merged "Last/exit" and "Entered/exited" cells they replace
+# printed an open position's running mark under a heading that says exit, which
+# reads as a trade already closed at that price -- the one thing an operator
+# scanning this table must never be misled about. Paper and real money share
+# these columns; the only difference between the two tables is stake precision.
+POS_COLS = ("<thead><tr><th>Station</th><th>Market date</th><th>Bucket</th><th>Side</th>"
+            "<th class='num'>Size</th><th class='num'>Entry</th><th class='num'>Mark</th>"
+            "<th class='num'>Exit</th><th class='num'>Return</th><th class='num'>P&amp;L</th>"
+            "<th>Status</th><th>Entered</th><th>Exited</th></tr></thead>")
+
+
+def _pos_row(p, live=False):
     is_open = p.status == "open"
     label, cls = status_label(p.status)
     # Entered/exited times render in THIS position's own station's local
@@ -569,31 +667,30 @@ def _pos_row(p, with_order_id=False):
         station_offset = config.get_station(p.station_icao).utc_offset_hours
     except KeyError:
         station_offset = 8
+    entered = _hm(p.entry_time, station_offset)
+    exited = _hm(p.exit_time, station_offset) if not is_open else "&mdash;"
+
     if is_open:
-        mark = p.high_water_mark if p.high_water_mark is not None else p.entry_price
-        last_price = f"{mark:.2f}<span class='sub'>hwm</span>"
-        ret = "&mdash;"
-        ret_cls = ""
-        when = _hm(p.entry_time, station_offset)
-    else:
-        last_price = f"{p.exit_price:.2f}" if p.exit_price is not None else "&mdash;"
-        if p.exit_price is not None and p.entry_price:
-            r = (p.exit_price - p.entry_price) / p.entry_price * 100
-            ret = f"{r:+.1f}%"
-            ret_cls = "pos" if r >= 0 else "neg"
+        # UNREALIZED. An open row's P&L is a mark-to-market against a quote
+        # nobody has traded on, and the position can still round-trip to
+        # anything between 0 and 1 before it settles. No mark means no number:
+        # an em-dash is honest, a stale print dressed as a P&L is not.
+        mark = _open_mark(p)
+        exit_cell = "&mdash;"
+        if mark is None:
+            mark_cell = "&mdash;<span class='sub'>no fresh quote</span>"
+            ret, ret_cls, pnl, pnl_cls = "&mdash;", "", "&mdash;", ""
         else:
-            ret, ret_cls = "&mdash;", ""
-        when = _hm(p.exit_time, station_offset)
+            mark_cell = f"{mark['price']:.2f}<span class='sub'>{_age(mark['ts'])}</span>"
+            ret, ret_cls, pnl, pnl_cls = _ret_and_pnl(p, mark["price"])
+    else:
+        mark_cell = "&mdash;"
+        exit_cell = f"{p.exit_price:.2f}" if p.exit_price is not None else "&mdash;"
+        ret, ret_cls, pnl, pnl_cls = _ret_and_pnl(p, p.exit_price)
+
     # Real money is sized in dollars and cents ($1.00 an entry), so the paper
     # table's whole-dollar format would render every live stake as "$1".
-    size = f"${p.size_usd:,.2f}" if with_order_id else f"${p.size_usd:,.0f}"
-    # Exchange order id, truncated -- enough to reconcile a real fill against
-    # the exchange by hand, which is the whole reason models.Position keeps it.
-    order_cell = ""
-    if with_order_id:
-        oid = p.order_id or ""
-        order_cell = (f"<td class='mono dim2' title='{html.escape(oid)}'>{html.escape(oid[:10])}</td>"
-                      if oid else "<td class='mono dim2'>&mdash;</td>")
+    size = f"${p.size_usd:,.2f}" if live else f"${p.size_usd:,.0f}"
     return (
         "<tr>"
         f"<td class='mono'>{html.escape(p.station_icao)}</td>"
@@ -602,11 +699,13 @@ def _pos_row(p, with_order_id=False):
         f"<td class='mono'>{html.escape(p.side)}</td>"
         f"<td class='mono num'>{size}</td>"
         f"<td class='mono num'>{p.entry_price:.2f}</td>"
-        f"<td class='mono num'>{last_price}</td>"
+        f"<td class='mono num'>{mark_cell}</td>"
+        f"<td class='mono num'>{exit_cell}</td>"
         f"<td class='mono num {ret_cls}'>{ret}</td>"
+        f"<td class='mono num {pnl_cls}'>{pnl}</td>"
         f"<td><span class='st {cls}'>{html.escape(label)}</span></td>"
-        f"<td class='mono dim2'>{when}</td>"
-        f"{order_cell}"
+        f"<td class='mono dim2'>{entered}</td>"
+        f"<td class='mono dim2'>{exited}</td>"
         "</tr>"
     )
 
@@ -623,14 +722,13 @@ try:
         )
         positions_html = (
             "<div class='tablewrap'><table class='ptable'>"
-            "<thead><tr><th>Station</th><th>Market date</th><th>Bucket</th><th>Side</th>"
-            "<th class='num'>Size</th><th class='num'>Entry</th><th class='num'>Last/exit</th>"
-            "<th class='num'>Return</th><th>Status</th><th>Entered/exited</th></tr></thead>"
+            + POS_COLS +
             f"<tbody>{rows}</tbody></table></div>{foot}"
         )
         positions_cap = (
             f"{len(open_positions)} open &middot; {min(len(closed_positions), MAX_CLOSED_SHOWN)} most recent closed"
-            " &middot; open rows show high-water mark, not a live quote"
+            " &middot; open rows are marked to the last captured bid and their P&amp;L is"
+            " UNREALIZED &mdash; nothing has traded against it"
         )
     else:
         positions_html = (
@@ -664,26 +762,6 @@ except Exception as exc:  # noqa: BLE001
 #    paper_trading_report.summarize_positions() the headline tile and the station
 #    table use, so a cell and the total above it cannot drift apart.
 CAL_DOW = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-
-
-def _usd(amount):
-    """'+$12.34' / '-$12.34', with the sign DERIVED from the value.
-
-    Every signed dollar figure in the calendar used to rebuild this inline, and
-    two of the four sites asserted the sign they expected instead of reading
-    it: "Best" hardcoded a '+' and "Worst" a '-'. A grid always has a best and
-    a worst day and NEITHER has a guaranteed sign -- on an all-winning grid the
-    worst day is still a profit, and it rendered as "Worst -$5.00" in red; on
-    an all-losing grid the best day is still a loss, and it rendered as the
-    garbled "Best +$-12.34". Both are reachable on a young real-money track
-    with a handful of closes.
-    """
-    return f"{'+' if amount >= 0 else '-'}${abs(amount):,.2f}"
-
-
-def _pn(amount):
-    """CSS class for a signed figure -- derived, for the same reason as _usd."""
-    return "pos" if amount >= 0 else "neg"
 
 
 def _exit_local_date(p):
@@ -864,10 +942,6 @@ except Exception as exc:  # noqa: BLE001
 # at this page should never have to work out whether money is currently at
 # risk, which was impossible when the page read is_paper=True everywhere.
 MAX_LIVE_CLOSED_SHOWN = 10
-LIVE_COLS = ("<thead><tr><th>Station</th><th>Market date</th><th>Bucket</th><th>Side</th>"
-             "<th class='num'>Size</th><th class='num'>Entry</th><th class='num'>Last/exit</th>"
-             "<th class='num'>Return</th><th>Status</th><th>Entered/exited</th>"
-             "<th>Order id</th></tr></thead>")
 try:
     blocks = []
     if live_open:
@@ -885,8 +959,8 @@ try:
             "</div>"
         )
         blocks.append(
-            "<div class='tablewrap'><table class='ptable'>" + LIVE_COLS +
-            f"<tbody>{''.join(_pos_row(p, with_order_id=True) for p in live_open)}</tbody>"
+            "<div class='tablewrap'><table class='ptable'>" + POS_COLS +
+            f"<tbody>{''.join(_pos_row(p, live=True) for p in live_open)}</tbody>"
             "</table></div>"
         )
     elif live_region_caps_all_zero:
@@ -919,8 +993,8 @@ try:
             f"<p class='cap' style='margin:16px 0 6px'>Closed real-money trades &mdash; realized "
             f"<span class='{realized_cls}'><b>{realized}</b></span> on ${live_staked_usd:,.2f} staked"
             f"{pct}, {len(live_closed)} trade(s)</p>"
-            "<div class='tablewrap'><table class='ptable'>" + LIVE_COLS +
-            f"<tbody>{''.join(_pos_row(p, with_order_id=True) for p in shown_live)}</tbody>"
+            "<div class='tablewrap'><table class='ptable'>" + POS_COLS +
+            f"<tbody>{''.join(_pos_row(p, live=True) for p in shown_live)}</tbody>"
             "</table></div>"
         )
         # Real money gets its own daily grid, inside its own card. Same builder

@@ -68,9 +68,13 @@ LIVE QUIRKS REPLICATED, NOT FIXED
     entry_manager.station_day_exposure_usd(), the sim passes the same
     figure from PortfolioState through existing_exposure_usd below.
   - The per-bucket cap counts (station, target_date, bucket, SIDE) --
-    side-specific. Note backtest/portfolio.py's count_open_for_bucket()
-    counts across BOTH sides, which is stricter than live; this module
-    counts side-specifically to match entry_manager, and
+    side-specific. backtest/portfolio.py's count_open_for_bucket()
+    counts across BOTH sides; that USED to be stricter than live, and
+    the divergence closed on 2026-08-25 when live gained veto 0b2, the
+    opposite-side lock, replicated here as gates 4b/4c. The two counts
+    are still kept separate rather than merged into one both-sides
+    count, because live reads them as two lookups producing two
+    different rejection reasons, and the funnel names them apart.
     decide_portfolio_entries_sim() does its own counting rather than
     using that helper.
   - Gate 7's hard slippage bar is effectively unreachable once depth is
@@ -117,7 +121,8 @@ from ev_engine import best_opportunities  # noqa: F401  (re-exported for tests)
 # one, so it lives in decide_portfolio_entries()/_sim() beside the
 # portfolio budget rather than inside evaluate_entry(). Nothing was added
 # to or removed from the per-candidate sequence below.
-GATE_COUNT = 13  # 12 until 2026-08-09, when Veto 00 (MAX_ENTRY_PRICE) was added to both sides
+GATE_COUNT = 15  # 12 until 2026-08-09 (Veto 00, MAX_ENTRY_PRICE);
+                 # 13 -> 15 on 2026-08-25 (Veto 0b2, the opposite-side lock)
 
 
 def _maturity_for(station_icao: str, station_maturity: Optional[str]) -> str:
@@ -138,6 +143,7 @@ def evaluate_entry_sim(
     ev: EVResult,
     token_id: str,
     open_count_for_bucket: Optional[int],
+    opposite_count_for_bucket: Optional[int],
     stop_outs_for_bucket: Optional[int],
     depth_usd: Optional[float],
     slippage_fn: Callable[[float], float],
@@ -153,6 +159,14 @@ def evaluate_entry_sim(
                                 None replicates the live "could not read
                                 open positions" case, which is a REJECT
                                 (refuse to open blind), not a zero.
+      opposite_count_for_bucket
+                             <- the SAME storage.load_open_positions() read,
+                                counted on the OTHER side of this bucket.
+                                Live reads it a second time rather than
+                                reusing the first count, because the count
+                                is filtered by side in Python. None
+                                replicates that second read failing, which
+                                is a REJECT for the same reason as above.
       stop_outs_for_bucket   <- entry_manager.count_stop_outs_for_bucket()'s
                                 storage.load_position_history() count of
                                 same-day closed_stop_loss exits on this
@@ -227,6 +241,23 @@ def evaluate_entry_sim(
         return _rejected(
             f"Per-bucket cap: {open_count_for_bucket} position(s) already open on this bucket/side "
             f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET})."
+        )
+
+    # --- Gate 4b: Veto 0b2, opposite-side count unreadable ---------------
+    if opposite_count_for_bucket is None:
+        return _rejected(
+            "Open positions unreadable -- opposite-side lock unenforceable, refusing to open blind."
+        )
+
+    # --- Gate 4c: Veto 0b2, opposite side already open -------------------
+    # The same bucket with the sign flipped is the same bet, and gate 4's
+    # side filter cannot see it. Live added this 2026-08-25 after RPLL held
+    # 32 YES and 32 NO simultaneously on target 2026-08-24.
+    if opposite_count_for_bucket > 0:
+        opposite_side = "NO" if ev.side.upper() == "YES" else "YES"
+        return _rejected(
+            f"Opposite side already open: {opposite_count_for_bucket} {opposite_side} "
+            f"position(s) on this bucket."
         )
 
     # --- Gate 5: Veto 0c, position history unreadable --------------------
@@ -376,10 +407,12 @@ def count_open_for_bucket_side(portfolio, station_icao: str, target_date, bucket
     replay portfolio -- the injected stand-in for
     entry_manager.count_open_positions_for_bucket()'s storage query.
 
-    Side-specific ON PURPOSE. backtest/portfolio.py's
-    count_open_for_bucket() deliberately counts both sides together, which
-    is a stricter rule than the live system enforces; using it here would
-    make the replay refuse entries the live system takes. Live's paper/real
+    Side-specific ON PURPOSE, and called TWICE per candidate -- once for
+    the candidate's own side (gate 4) and once for the opposite side
+    (gate 4c) -- mirroring live's two lookups. backtest/portfolio.py's
+    count_open_for_bucket() collapses both sides into one number, which
+    would merge two gates with two distinct rejection reasons into one and
+    cost the funnel the ability to tell them apart. Live's paper/real
     scoping needs no equivalent because every replay position is paper.
     """
     side_upper = side.upper()
@@ -501,6 +534,10 @@ def decide_portfolio_entries_sim(
         open_count = count_open_for_bucket_side(
             portfolio, ev.station_icao, ev.target_date, ev.bucket_c, ev.side
         )
+        opposite_count = count_open_for_bucket_side(
+            portfolio, ev.station_icao, ev.target_date, ev.bucket_c,
+            "NO" if ev.side.upper() == "YES" else "YES",
+        )
         stop_outs = count_stop_outs_for_bucket_side(
             portfolio, ev.station_icao, ev.target_date, ev.bucket_c, ev.side
         )
@@ -517,6 +554,7 @@ def decide_portfolio_entries_sim(
                 ev=ev,
                 token_id=token_id,
                 open_count_for_bucket=open_count,
+                opposite_count_for_bucket=opposite_count,
                 stop_outs_for_bucket=stop_outs,
                 depth_usd=depth_usd,
                 slippage_fn=_slippage_fn,
