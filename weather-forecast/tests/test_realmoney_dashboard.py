@@ -1034,3 +1034,82 @@ def test_setup_dashboard_execstart_renders_the_realmoney_page():
     assert "generate_dashboard.py --region asia" in exec_line
     assert "generate_dashboard.py --region europe" in exec_line
     assert "generate_backtest_dashboard.py" in exec_line
+
+
+# --- EV display floor --------------------------------------------------------
+# Rows below EV_DISPLAY_FLOOR are dropped. The extremes this removes are an
+# artifact of estimating slippage against an unseeded far-tail book (net EV
+# divides by price, so a 0.001 quote yields four-figure percentages), not an
+# opinion about the market. The suppressed count is always reported.
+
+
+def _ev_snap(rows):
+    return {
+        "station_icao": "WSSS",
+        "generated_at": "2026-08-26T05:01:00+00:00",
+        "target_date": "2026-08-26",
+        "results": rows,
+    }
+
+
+def _row(bucket, ev, price=0.28, slip=0.01):
+    return {"bucket_c": bucket, "side": "YES", "model_prob": 0.30, "market_price": price,
+            "raw_edge": 0.02, "slippage_pct": slip, "net_ev_per_dollar": ev,
+            "spread_source": "measured", "notes": ""}
+
+
+def _write(tmp_path, monkeypatch, gen, rows):
+    import json
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"ev_latest_{icao}.json")
+    (tmp_path / "ev_latest_WSSS.json").write_text(json.dumps(_ev_snap(rows)), encoding="utf-8")
+
+
+def test_render_ev_suppresses_rows_below_the_floor(tmp_path, monkeypatch):
+    """A -6299% row is arithmetic noise from an unseeded book, not a near-miss."""
+    gen = load_gen()
+    _write(tmp_path, monkeypatch, gen, [_row(32, 0.02), _row(28, -62.99, price=0.001, slip=61.9)])
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "-6299" not in out
+    assert "28&deg;C" not in out
+    assert "32&deg;C" in out          # the sane row survives
+    assert "1 below -10% net EV suppressed" in out
+
+
+def test_render_ev_keeps_a_genuine_near_miss(tmp_path, monkeypatch):
+    """The floor must not eat the rows the section exists for: under the bar,
+    but nowhere near the noise."""
+    gen = load_gen()
+    _write(tmp_path, monkeypatch, gen, [_row(33, -0.08)])
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "33&deg;C" in out
+    assert "-8.0%" in out
+    assert "suppressed" not in out
+
+
+def test_render_ev_floor_is_inclusive_at_the_boundary(tmp_path, monkeypatch):
+    """Exactly -10% is kept; a hair below is not."""
+    gen = load_gen()
+    _write(tmp_path, monkeypatch, gen, [_row(33, -0.10), _row(34, -0.1001)])
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "33&deg;C" in out
+    assert "34&deg;C" not in out
+    assert "1 below -10% net EV suppressed" in out
+
+
+def test_render_ev_does_not_suppress_an_unpriced_row(tmp_path, monkeypatch):
+    """'no quote' is a different fact from 'deeply negative', and it is one
+    worth seeing on a page about why nothing traded."""
+    gen = load_gen()
+    _write(tmp_path, monkeypatch, gen, [_row(35, None, price=None)])
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "35&deg;C" in out
+    assert "suppressed" not in out
+
+
+def test_render_ev_has_no_slip_column(tmp_path, monkeypatch):
+    gen = load_gen()
+    _write(tmp_path, monkeypatch, gen, [_row(32, 0.02)])
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "Slip" not in out
+    for kept in ("Bucket", "Side", "Model p", "Mkt price", "Raw edge", "Net EV/$"):
+        assert kept in out, f"lost column: {kept}"

@@ -150,10 +150,31 @@ Reads the same `data/ev_latest_<ICAO>.json` snapshots the region pages
 read, written by `ev_engine.save_ev_snapshot()`. Columns: bucket, side,
 model p, market price, raw edge, slippage, net EV/$, spread source, notes.
 
-**Rendered unfiltered**, unlike the region pages. Those show only rows
+**Rendered near-unfiltered**, unlike the region pages. Those show only rows
 clearing the entry screen, which is correct when the question is "is there
 anything to take" and wrong when it is "how close did we get". On a
 real-money page, a table of near-misses is the signal.
+
+REVISED 2026-08-27, after seeing the live page. The original decision was
+"unfiltered, full stop", and it was wrong at the tail. Twenty-two rows per
+station arrived with half of them reading like -244%, -736%, -6299%. Those
+are not opinions about the market: net EV divides by price, so estimating
+slippage against an unseeded far-tail book at a 0.001 quote produces
+four-figure percentages as an arithmetic artifact. They buried the handful
+of rows a human should read.
+
+Rows below **-10% net EV** are now suppressed, and the count is always
+reported in the caption -- a filtered table that does not say it is
+filtered is the same overclaim this page exists to avoid. The floor sits
+comfortably below the tightest bar the schedule sets (15%), so genuine
+near-misses still render; only the noise goes. An UNPRICED row (net EV
+None) is never suppressed: "no quote" is a different fact from "deeply
+negative", and it is one worth seeing here.
+
+The **slippage column was dropped** in the same change. Its value is
+already inside net EV, and once the extreme rows are gone the survivors'
+slippage is uniformly small -- a column of near-identical small numbers
+costing horizontal space on a table that has to be read at a glance.
 
 **The EV bar comes from the active window** (`min_net_ev` on the window
 `scheduler.determine_window()` returns), not a constant. A row is only

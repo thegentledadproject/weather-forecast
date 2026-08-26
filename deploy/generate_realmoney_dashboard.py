@@ -526,6 +526,24 @@ def ev_row_flags(row, max_entry_price, edge_ceiling_for):
     return flags
 
 
+# Rows below this net EV are dropped. The section was deliberately UNFILTERED
+# at first, on the argument that near-misses are the signal when the question
+# is "why didn't it trade" -- and that argument still holds for a row a few
+# points under the bar. It does not hold for a row at -6299%.
+#
+# Those extremes are not opinions about the market, they are an artifact of
+# estimating slippage against an unseeded far-tail book: net EV divides by
+# price, so a 0.001 quote turns any model disagreement into a four-figure
+# percentage. Twenty-two rows per station, half of them arithmetic noise,
+# buries the handful a human should actually read.
+#
+# -10% is the floor because it is comfortably below any bar the schedule
+# sets (the tightest is 15%) while still admitting genuine near-misses. The
+# suppressed count is always reported -- a filtered table that does not say
+# it is filtered is the same overclaim this page exists to avoid.
+EV_DISPLAY_FLOOR = -0.10
+
+
 def render_ev(icaos, bar, warnings):
     import config
 
@@ -559,10 +577,17 @@ def render_ev(icaos, bar, warnings):
                 continue
 
             rows = []
+            suppressed = 0
             for r in sorted(snap.get("results", []),
                             key=lambda x: (x.get("net_ev_per_dollar") is None,
                                            -(x.get("net_ev_per_dollar") or 0))):
                 ev = r.get("net_ev_per_dollar")
+                # An unpriced row (ev is None) is NOT suppressed: "no quote" is
+                # a different fact from "deeply negative", and it is one worth
+                # seeing on a page about why nothing traded.
+                if ev is not None and ev < EV_DISPLAY_FLOOR:
+                    suppressed += 1
+                    continue
                 price = r.get("market_price")
                 bucket_c = r.get("bucket_c")
                 # `bar` is icaos[0]'s own local-window bar (see main()), applied
@@ -578,7 +603,6 @@ def render_ev(icaos, bar, warnings):
                     f"<td class='mono num'>{'&mdash;' if r.get('model_prob') is None else format(r['model_prob'], '.1%')}</td>"
                     f"<td class='mono num'>{'&mdash;' if price is None else format(price, '.3f')}</td>"
                     f"<td class='mono num'>{'&mdash;' if r.get('raw_edge') is None else format(r['raw_edge'], '+.1%')}</td>"
-                    f"<td class='mono num dim2'>{'&mdash;' if r.get('slippage_pct') is None else format(r['slippage_pct'], '.1%')}</td>"
                     f"<td class='mono num {'pos' if over_bar else 'dim2'}'>"
                     f"{'&mdash;' if ev is None else format(ev, '+.1%')}"
                     f"{ev_row_flags(r, max_entry_price, edge_ceiling_for)}</td>"
@@ -589,7 +613,10 @@ def render_ev(icaos, bar, warnings):
             target_html = "&mdash;" if target_date is None else html.escape(str(target_date))
             head = (f"<h3>{html.escape(icao)}</h3><p class='cap'>computed {html.escape(gen_at)} UTC "
                     f"&middot; target {target_html} "
-                    f"&middot; {len(rows)} bucket/side row(s), unfiltered</p>")
+                    f"&middot; {len(rows)} bucket/side row(s)"
+                    + (f" &middot; {suppressed} below {EV_DISPLAY_FLOOR:.0%} net EV suppressed"
+                       if suppressed else "")
+                    + "</p>")
             if not rows:
                 blocks.append(head + "<div class='empty'>the engine computed and produced no rows.</div>")
                 continue
@@ -597,7 +624,7 @@ def render_ev(icaos, bar, warnings):
                 head + "<div class='tablewrap'><table class='ptable'>"
                 "<thead><tr><th>Bucket</th><th>Side</th><th class='num'>Model p</th>"
                 "<th class='num'>Mkt price</th><th class='num'>Raw edge</th>"
-                "<th class='num'>Slip</th><th class='num'>Net EV/$</th></tr></thead>"
+                "<th class='num'>Net EV/$</th></tr></thead>"
                 f"<tbody>{''.join(rows)}</tbody></table></div>"
             )
         except Exception as exc:  # noqa: BLE001
