@@ -712,3 +712,32 @@ def test_full_render_ev_caption_names_the_station_the_bar_came_from(tmp_path, mo
     # that does not exist -- it points to the per-station rung instead.
     assert "different timezone" not in page
     assert "Window rung" in page
+
+
+# --- deploy wiring -----------------------------------------------------------
+# deploy_daemon.sh refreshes the FROZEN COPIES in /usr/local/bin by name. A
+# generator missing from that list is never refreshed by any deploy and rots
+# there permanently -- the 2026-08-05 failure that motivated the block.
+
+_REPO = pathlib.Path(__file__).resolve().parents[2]
+
+
+def test_deploy_daemon_refreshes_the_realmoney_generator():
+    script = (_REPO / "deploy" / "deploy_daemon.sh").read_text(encoding="utf-8")
+    assert "generate_realmoney_dashboard.py" in script, (
+        "deploy_daemon.sh must copy the real-money generator into /usr/local/bin; "
+        "a generator it does not name is never refreshed by any deploy"
+    )
+
+
+def test_setup_dashboard_installs_the_realmoney_generator():
+    script = (_REPO / "deploy" / "setup_dashboard.sh").read_text(encoding="utf-8")
+    assert "generate_realmoney_dashboard.py" in script
+
+
+def test_setup_dashboard_execstart_renders_the_realmoney_page():
+    """A generator installed but never invoked renders nothing. This is the
+    2026-08-25 gotcha, where europe.html silently never rendered."""
+    script = (_REPO / "deploy" / "setup_dashboard.sh").read_text(encoding="utf-8")
+    exec_line = next(l for l in script.splitlines() if l.startswith("ExecStart="))
+    assert "generate_realmoney_dashboard.py" in exec_line

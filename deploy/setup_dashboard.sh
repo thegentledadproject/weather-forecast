@@ -13,6 +13,8 @@ sudo mv /home/ubuntu/generate_dashboard.py /usr/local/bin/generate_dashboard.py
 sudo chmod 644 /usr/local/bin/generate_dashboard.py
 sudo mv /home/ubuntu/generate_backtest_dashboard.py /usr/local/bin/generate_backtest_dashboard.py
 sudo chmod 644 /usr/local/bin/generate_backtest_dashboard.py
+sudo mv /home/ubuntu/generate_realmoney_dashboard.py /usr/local/bin/generate_realmoney_dashboard.py
+sudo chmod 644 /usr/local/bin/generate_realmoney_dashboard.py
 
 echo "== systemd service + timer =="
 sudo tee /etc/systemd/system/polyweather-dashboard.service >/dev/null <<UNIT
@@ -22,7 +24,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c '$VENV_PY /usr/local/bin/generate_dashboard.py --region asia && $VENV_PY /usr/local/bin/generate_dashboard.py --region europe && $VENV_PY /usr/local/bin/generate_backtest_dashboard.py'
+ExecStart=/bin/sh -c '$VENV_PY /usr/local/bin/generate_dashboard.py --region asia && $VENV_PY /usr/local/bin/generate_dashboard.py --region europe && $VENV_PY /usr/local/bin/generate_backtest_dashboard.py && $VENV_PY /usr/local/bin/generate_realmoney_dashboard.py'
 UNIT
 
 sudo tee /etc/systemd/system/polyweather-dashboard.timer >/dev/null <<UNIT

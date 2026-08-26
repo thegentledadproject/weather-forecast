@@ -66,7 +66,8 @@ echo "== dashboard generators into place =="
 if [ -f /usr/local/bin/generate_dashboard.py ]; then
     sudo cp "$APP_DIR/deploy/generate_dashboard.py" /usr/local/bin/generate_dashboard.py
     sudo cp "$APP_DIR/deploy/generate_backtest_dashboard.py" /usr/local/bin/generate_backtest_dashboard.py
-    sudo chmod 644 /usr/local/bin/generate_dashboard.py /usr/local/bin/generate_backtest_dashboard.py
+    sudo cp "$APP_DIR/deploy/generate_realmoney_dashboard.py" /usr/local/bin/generate_realmoney_dashboard.py
+    sudo chmod 644 /usr/local/bin/generate_dashboard.py /usr/local/bin/generate_backtest_dashboard.py /usr/local/bin/generate_realmoney_dashboard.py
     sudo systemctl start polyweather-dashboard.service 2>/dev/null || true
 fi
 
