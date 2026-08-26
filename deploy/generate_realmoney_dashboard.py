@@ -738,14 +738,83 @@ def render_page(sections, warnings):
     )
 
 
+def _section(sections, warnings, title, caption, builder):
+    """Build one card, or record why it could not be built.
+
+    EVERY SECTION DEGRADES INDEPENDENTLY. An unreadable EV snapshot must not
+    cost the reader the readiness ladder -- that is the whole fail-soft
+    contract this page inherits from its two siblings.
+    """
+    try:
+        sections.append((title, caption, builder()))
+    except Exception as exc:  # noqa: BLE001 - the page must render regardless
+        warnings.append(f"{title}: {exc}")
+        sections.append((title, caption, f"<div class='empty'>{html.escape(title)} unavailable</div>"))
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default="/var/www/html/realmoney.html",
                         help="path to write the rendered HTML page to")
+    parser.add_argument("--orders", type=int, default=25,
+                        help="how many rows of the order audit trail to show")
     args = parser.parse_args(argv)
 
     warnings = []
     sections = []
+    now_utc = datetime.now(timezone.utc)
+
+    try:
+        import config
+
+        icaos = sorted(getattr(config, "LIVE_TRADING_STATIONS", set()))
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"config unreadable, no station list: {exc}")
+        icaos = []
+
+    # The EV bar is whatever the FIRST live station's active window sets. All
+    # live stations share config.SCHEDULE_WINDOWS, but not the same local
+    # clock, so this is a label for the section rather than a per-row gate --
+    # the per-station bar is on that station's Window rung.
+    bar = None
+    try:
+        import config
+
+        if icaos:
+            offset = config.current_utc_offset_hours(icaos[0])
+            local = datetime.fromtimestamp(now_utc.timestamp() + offset * 3600, tz=timezone.utc)
+            win = active_window(local.hour * 60 + local.minute, config.SCHEDULE_WINDOWS)
+            bar = win["min_net_ev"] if win else None
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"EV bar undetermined: {exc}")
+
+    _section(
+        sections, warnings, "Readiness",
+        "Could a real order open right now. Rungs are in the order the executor applies them. "
+        "This says an order COULD open, never that a given candidate WOULD &mdash; the "
+        "per-candidate gates (per-bucket cap, stop-out cooldown, opposite-side lock) are "
+        "<b>not recorded anywhere</b> and are not shown here.",
+        lambda: render_readiness(icaos, now_utc, warnings),
+    )
+    _section(
+        sections, warnings, "Edge and EV",
+        "Every bucket/side the engine computed, unfiltered &mdash; including rows under the bar, "
+        + (f"which is {bar:.0%} in the active window." if bar is not None
+           else "with no entry window currently open."),
+        lambda: render_ev(icaos, bar, warnings),
+    )
+    _section(
+        sections, warnings, "Discovery",
+        "What market discovery has recorded for today's target date. An empty result means "
+        "capture has recorded nothing, not that the market is absent.",
+        lambda: render_discovery(icaos, warnings),
+    )
+    _section(
+        sections, warnings, "Order activity",
+        "Every real submission, including refused and unfilled ones. This table is the only "
+        "record of a refused order anywhere.",
+        lambda: render_orders(args.orders, warnings),
+    )
 
     page = render_page(sections, warnings)
     try:

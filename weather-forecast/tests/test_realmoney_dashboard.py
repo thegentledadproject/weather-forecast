@@ -32,11 +32,13 @@ def test_import_writes_nothing(tmp_path, monkeypatch):
     assert not (tmp_path / "x.html").exists()
 
 
-def test_main_renders_a_page(tmp_path):
-    """Safe without store isolation: at Task 1 main() builds no sections and
-    so touches no database. From Task 8 the full-render tests take the
-    isolated_stores fixture instead."""
+def test_main_renders_a_page(tmp_path, monkeypatch, isolated_stores):
+    """From Task 8, main() builds all four sections, which read storage and
+    price_store -- both create their sqlite file lazily on first use. Needs
+    isolated_stores like the full-render tests below it."""
     gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
     out = tmp_path / "realmoney.html"
     status = gen.main(["--out", str(out)])
     assert status == 0
@@ -598,3 +600,48 @@ def test_render_discovery_one_station_failing_does_not_cost_the_others(monkeypat
     out = gen.render_discovery(["RCSS", "WSSS"], warnings)
     assert "WSSS" in out
     assert any("RCSS" in w for w in warnings)
+
+
+# --- full render -------------------------------------------------------------
+
+
+def test_full_render_has_every_section(tmp_path, monkeypatch, isolated_stores):
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    out = tmp_path / "realmoney.html"
+    assert gen.main(["--out", str(out)]) == 0
+    page = out.read_text(encoding="utf-8")
+    for heading in ("Readiness", "Edge and EV", "Discovery", "Order activity"):
+        assert heading in page, f"missing section: {heading}"
+
+
+def test_full_render_states_what_the_ladder_cannot_know(tmp_path, monkeypatch, isolated_stores):
+    """Stage 1 has no persisted EntryDecision. The page must say so rather
+    than let the ladder read as the whole gate."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    out = tmp_path / "realmoney.html"
+    gen.main(["--out", str(out)])
+    page = out.read_text(encoding="utf-8").lower()
+    assert "per-candidate" in page or "not recorded" in page
+
+
+def test_full_render_survives_a_broken_section(tmp_path, monkeypatch, isolated_stores):
+    """Fail-soft is the contract: one section blowing up costs the reader that
+    section and nothing else."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+
+    def boom(*a, **k):
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(gen, "render_ev", boom)
+    out = tmp_path / "realmoney.html"
+    assert gen.main(["--out", str(out)]) == 0
+    page = out.read_text(encoding="utf-8")
+    assert "Render warnings" in page
+    assert "synthetic failure" in page
+    assert "Readiness" in page  # the other sections still rendered
