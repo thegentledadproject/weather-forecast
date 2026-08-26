@@ -222,12 +222,37 @@ def isolated_stores(monkeypatch):
     data/polyweather.sqlite3 and data/market_data.sqlite3 into the checkout
     -- a test suite with a side effect on the operator's own box. Every test
     that exercises an impure path takes this fixture.
+
+    count_observations_from_source, forecast_error_samples and
+    load_position_history are patched too, and NOT because any test today
+    calls them directly: they are the storage reads on
+    config.station_maturity()'s non-override path (maturity_report(), which
+    checks observations, bias pairs/precision/stability via the first two,
+    and the order_path criterion via the third). WSSS and RCSS both happen
+    to be in config.MATURITY_OVERRIDE today, so station_maturity()
+    short-circuits before ever reaching any of them -- but that is an
+    unstated invariant, not isolation. This page exists partly to show
+    readiness for stations that are NOT yet live, so a future test naming a
+    non-overridden station would otherwise fall through to maturity_report()
+    and lazily create the real sqlite file on the strength of an assumption
+    this fixture never actually enforced. Verified directly: with only the
+    first two of these three patched, calling maturity_report() for a
+    non-overridden station (e.g. WMKK) still creates the sqlite file --
+    order_path's storage.load_position_history() call is unguarded. All
+    three must be patched for the claim in this docstring to be true rather
+    than lucky.
     """
     import storage
 
     monkeypatch.setattr(storage, "count_live_order_attempts",
                         lambda kind, since_iso, station_icaos=None: 0)
     monkeypatch.setattr(storage, "load_live_order_attempts", lambda limit=50: [])
+    monkeypatch.setattr(storage, "count_observations_from_source",
+                        lambda station_icao, source: 0)
+    monkeypatch.setattr(storage, "forecast_error_samples",
+                        lambda station_icao, source: [])
+    monkeypatch.setattr(storage, "load_position_history",
+                        lambda station_icao, limit=100, is_paper=None: [])
     return monkeypatch
 
 
