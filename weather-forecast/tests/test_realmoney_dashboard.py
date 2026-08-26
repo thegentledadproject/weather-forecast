@@ -529,6 +529,7 @@ def test_render_orders_lists_a_submission(monkeypatch):
     out = gen.render_orders(limit=10, warnings=[])
     assert "RCSS" in out and "filled" in out
     assert "0xa1d4c085" in out
+    assert "$1.55" in out
 
 
 def test_render_orders_empty_trail(monkeypatch):
@@ -540,3 +541,60 @@ def test_render_orders_empty_trail(monkeypatch):
                         lambda kind, since_iso, station_icaos=None: 0)
     out = gen.render_orders(limit=10, warnings=[])
     assert "no real order" in out.lower()
+
+
+# --- render_discovery ---------------------------------------------------------
+# discovery_state itself is monkeypatched here, not exercised through a real
+# db_path -- render_discovery's interface takes no db_path, so the only way
+# to keep these off the real sqlite file is to fake the function it calls,
+# the same way the EV tests fake _ev_snapshot_path.
+
+
+def test_render_discovery_empty_says_capture_not_absence(monkeypatch):
+    gen = load_gen()
+    import config
+
+    monkeypatch.setattr(config, "local_today", lambda icao: "2026-08-26")
+    monkeypatch.setattr(gen, "discovery_state", lambda icao, target, db_path=None: {
+        "buckets": [], "first_seen": None, "with_book": 0, "drift": None,
+    })
+    out = gen.render_discovery(["WSSS"], warnings=[])
+    assert "capture has recorded no" in out.lower()
+    assert "not that the market does not exist" in out.lower()
+
+
+def test_render_discovery_reports_buckets_books_and_drift(monkeypatch):
+    gen = load_gen()
+    import config
+
+    monkeypatch.setattr(config, "local_today", lambda icao: "2026-08-26")
+    monkeypatch.setattr(gen, "discovery_state", lambda icao, target, db_path=None: {
+        "buckets": [30, 31, 32], "first_seen": "2026-08-26T05:01:00+00:00",
+        "with_book": 2,
+        "drift": {"config": (28, 30), "discovered": (30, 32),
+                  "note": "registry lists 28-30°C, discovery recorded 30-32°C"},
+    })
+    out = gen.render_discovery(["WSSS"], warnings=[])
+    assert "WSSS" in out
+    assert "3 bucket" in out
+    assert "2 of 3" in out
+    assert "bounds drift" in out.lower()
+
+
+def test_render_discovery_one_station_failing_does_not_cost_the_others(monkeypatch):
+    gen = load_gen()
+    import config
+
+    monkeypatch.setattr(config, "local_today", lambda icao: "2026-08-26")
+
+    def flaky(icao, target, db_path=None):
+        if icao == "RCSS":
+            raise RuntimeError("boom")
+        return {"buckets": [32], "first_seen": "2026-08-26T05:01:00+00:00",
+                "with_book": 1, "drift": None}
+
+    monkeypatch.setattr(gen, "discovery_state", flaky)
+    warnings = []
+    out = gen.render_discovery(["RCSS", "WSSS"], warnings)
+    assert "WSSS" in out
+    assert any("RCSS" in w for w in warnings)

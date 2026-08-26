@@ -660,7 +660,8 @@ def render_orders(limit, warnings):
         try:
             n = storage.count_live_order_attempts(
                 "entry", day_start, station_icaos=config.stations_in_region(region))
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"order count unreadable for region {region}: {exc}")
             n = None
         cap = config.REGION_LIVE_MAX_ORDERS_PER_DAY[region]
         counts.append(f"{html.escape(region)}: "
@@ -678,7 +679,7 @@ def render_orders(limit, warnings):
         f"<td class='mono dim2'>{html.escape(str(a.get('ts', ''))[5:16].replace('T', ' '))}</td>"
         f"<td class='mono'>{html.escape(str(a.get('kind', '')))}</td>"
         f"<td class='mono'>{html.escape(str(a.get('station_icao', '')))}</td>"
-        f"<td class='mono'>{a.get('bucket_c')}&deg;C {html.escape(str(a.get('side', '')))}</td>"
+        f"<td class='mono'>{'&mdash;' if a.get('bucket_c') is None else str(a['bucket_c']) + '&deg;C'} {html.escape(str(a.get('side', '')))}</td>"
         f"<td class='mono num'>{'&mdash;' if a.get('notional_usd') is None else '$' + format(a['notional_usd'], ',.2f')}</td>"
         f"<td class='mono num'>{'&mdash;' if a.get('size_shares') is None else format(a['size_shares'], ',.2f')}</td>"
         f"<td class='mono num'>{'&mdash;' if a.get('limit_price') is None else format(a['limit_price'], '.3f')}</td>"
