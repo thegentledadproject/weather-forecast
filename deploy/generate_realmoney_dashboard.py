@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+"""Render the polyweather real-money station dashboard to /var/www/html/realmoney.html.
+
+Sibling to generate_dashboard.py and generate_backtest_dashboard.py, same
+fail-soft philosophy: every data read is wrapped so a missing or corrupt
+source shows up as a warning ON the page rather than killing the render.
+
+WHAT THIS PAGE IS FOR, AND WHAT IT IS NOT. The region pages report what the
+book DID -- P&L, positions, daily grids. This page reports the state of the
+machinery that decides whether the book does anything at all: the gate
+ladder, the schedule position, whether market discovery has happened, and
+what was actually submitted to the exchange. It carries no P&L, deliberately;
+a second place where the book is scored is a second place for those numbers
+to disagree.
+
+UNLIKE ITS TWO SIBLINGS, THIS MODULE RUNS NOTHING AT IMPORT TIME. Both of
+those parse argv at module scope, which makes every function in them
+unreachable from a test. Everything here is behind main(), so the pure
+helpers can be unit-tested (see tests/test_realmoney_dashboard.py).
+"""
+import argparse
+import html
+import os
+import sys
+from datetime import datetime, timezone
+
+# Mirrors generate_dashboard.py: unset, it's the real EC2 path; set, it
+# points at a local checkout so this script can be exercised off the box.
+# The SAME variable name on purpose -- one export points both generators at
+# a local checkout.
+PKG = os.environ.get("DASHBOARD_PKG_DIR", "/home/ubuntu/weather-forecast/weather-forecast")
+if PKG not in sys.path:
+    sys.path.insert(0, PKG)
+
+# NOTE: no os.chdir(). generate_dashboard.py chdirs into PKG; doing that here
+# would make a relative --out resolve differently under test than in
+# production. config.DATA_DIR is absolute, so the chdir buys nothing.
+
+CSS = """
+:root { --bg:#0f1115; --card:#171a21; --line:#252a34; --ink:#e6e9ef;
+        --ink-2:#a7b0c0; --muted:#6f7a8d; --good:#3fb950; --bad:#f85149;
+        --warn:#d29922; --accent:#58a6ff;
+        --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; }
+* { box-sizing:border-box; }
+body { margin:0; padding:28px 20px 60px; background:var(--bg); color:var(--ink);
+       font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+.wrap { max-width:1180px; margin:0 auto; }
+header h1 { margin:0 0 4px; font-size:22px; letter-spacing:-.01em; }
+header .sub { margin:0 0 22px; color:var(--ink-2); font-size:14px; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+        padding:18px 20px; margin:0 0 18px; }
+.card h2 { margin:0 0 2px; font-size:15px; letter-spacing:.01em; }
+.cap { margin:0 0 14px; color:var(--muted); font-size:12px; }
+.empty { color:var(--muted); font-size:13px; padding:10px 0; }
+.warn { border-color:var(--warn); }
+.warn ul { margin:6px 0 0; padding-left:18px; color:var(--ink-2); font-size:12.5px; }
+.tablewrap { overflow-x:auto; }
+.ptable { border-collapse:collapse; width:100%; font-size:12.5px; }
+.ptable th { text-align:left; font-size:10.5px; letter-spacing:.08em;
+             text-transform:uppercase; color:var(--muted); padding:0 12px 8px 0;
+             border-bottom:1px solid var(--line); white-space:nowrap; }
+.ptable td { padding:8px 12px 8px 0; border-bottom:1px solid var(--line);
+             white-space:nowrap; vertical-align:top; }
+.ptable tr:last-child td { border-bottom:none; }
+.ptable .mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+.ptable th.num, .ptable td.num { text-align:right; }
+.ptable .pos { color:var(--good); } .ptable .neg { color:var(--bad); }
+.ptable .dim2 { color:var(--muted); }
+.ptable .sub { font-size:9.5px; color:var(--muted); margin-left:4px; }
+.badge { display:inline-block; font-size:9.5px; letter-spacing:.05em;
+         text-transform:uppercase; padding:1px 5px; border-radius:4px;
+         margin-left:5px; border:1px solid var(--line); color:var(--ink-2); }
+.badge.veto { border-color:var(--bad); color:var(--bad); }
+.badge.fallback { border-color:var(--warn); color:var(--warn); }
+.rung { display:flex; gap:10px; align-items:baseline; padding:6px 0;
+        border-bottom:1px solid var(--line); font-size:13px; }
+.rung:last-child { border-bottom:none; }
+.rung .lab { width:190px; color:var(--ink-2); flex:none; }
+.rung .val { font-family:var(--mono); }
+.rung.ok .val { color:var(--good); }
+.rung.no .val { color:var(--bad); }
+.rung.unknown .val { color:var(--warn); }
+.rung .why { color:var(--muted); font-size:12px; }
+.region { margin:22px 0 10px; font-size:12px; letter-spacing:.1em;
+          text-transform:uppercase; color:var(--muted); }
+"""
+
+
+def render_page(sections, warnings):
+    """Assemble the full document from (title, caption, body_html) triples.
+
+    `warnings` are exception strings and other machine text -- ESCAPED here,
+    never interpolated raw. A warning routinely carries the repr of whatever
+    blew up, which can contain markup.
+    """
+    body = []
+    for title, caption, html_body in sections:
+        body.append(
+            f"<div class='card'><h2>{html.escape(title)}</h2>"
+            + (f"<p class='cap'>{caption}</p>" if caption else "")
+            + html_body
+            + "</div>"
+        )
+    warn_html = ""
+    if warnings:
+        items = "".join(f"<li>{html.escape(str(w))}</li>" for w in warnings)
+        warn_html = (
+            "<div class='card warn'><h2>Render warnings</h2>"
+            "<p class='cap'>Sections that could not be built. The page renders anyway.</p>"
+            f"<ul>{items}</ul></div>"
+        )
+    stamp = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>polyweather -- real money</title>"
+        f"<style>{CSS}</style></head><body><div class='wrap'>"
+        "<header><h1>Real-money stations</h1>"
+        "<p class='sub'>Can an order open right now &mdash; and if not, what is in the way? "
+        "No P&amp;L here; the region pages own that.</p></header>"
+        + "".join(body)
+        + warn_html
+        + f"<p class='cap'>rendered {stamp}</p>"
+        "</div></body></html>"
+    )
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--out", default="/var/www/html/realmoney.html",
+                        help="path to write the rendered HTML page to")
+    args = parser.parse_args(argv)
+
+    warnings = []
+    sections = []
+
+    page = render_page(sections, warnings)
+    try:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(page)
+    except OSError as exc:
+        print(f"[realmoney] could not write {args.out}: {exc}", file=sys.stderr)
+        return 1
+    print(f"real-money dashboard written to {args.out} ({len(page)} bytes)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
