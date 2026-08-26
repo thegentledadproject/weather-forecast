@@ -217,6 +217,37 @@ def next_entry_boundary(minute_of_day, windows):
     return ("opens", min((s - minute_of_day) % MINUTES_PER_DAY for s in starts))
 
 
+# --- bounds drift ------------------------------------------------------------
+def bounds_drift(config_min, config_max, discovered):
+    """The BOUNDS DRIFT check, as page state rather than a journal line.
+
+    ev_engine logs "BOUNDS DRIFT for <ICAO>: live event lists X-Y" when the
+    exchange's bucket range disagrees with the registry's. Recovering it
+    from the journal means knowing to grep for it; recomputing it from what
+    discovery actually recorded puts it on the page.
+
+    NOT AN ERROR, and the page must not present it as one. Bounds are a
+    cross-check; the live token map is authoritative at trade time. A
+    mismatch is noisy rather than dangerous -- but it is the first
+    authoritative signal that a station's registry entry was researched
+    wrong, which is exactly the open question on the European stations.
+
+    Nothing discovered is not drift: that is the discovery section's story,
+    and reporting it here too would double-count one fact as two problems.
+    """
+    buckets = [b for b in (discovered or []) if isinstance(b, int)]
+    if not buckets:
+        return None
+    lo, hi = min(buckets), max(buckets)
+    if (lo, hi) == (config_min, config_max):
+        return None
+    return {
+        "config": (config_min, config_max),
+        "discovered": (lo, hi),
+        "note": f"registry lists {config_min}-{config_max}°C, discovery recorded {lo}-{hi}°C",
+    }
+
+
 def render_page(sections, warnings):
     """Assemble the full document from (title, caption, body_html) triples.
 

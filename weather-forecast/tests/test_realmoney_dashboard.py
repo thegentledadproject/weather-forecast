@@ -168,3 +168,39 @@ def test_next_entry_boundary_none_when_nothing_accepts_entries():
     gen = load_gen()
     closed_only = [(0, 0, 24, 0, None, "closed", None, "nothing runs")]
     assert gen.next_entry_boundary(6 * 60, closed_only) is None
+
+
+# --- bounds drift ------------------------------------------------------------
+# Reproduces ev_engine's BOUNDS DRIFT warning as page state. That warning is
+# currently a journal line you have to know to grep for.
+
+
+def test_bounds_drift_none_when_ranges_agree():
+    gen = load_gen()
+    assert gen.bounds_drift(28, 38, [30, 31, 32, 38, 28]) is None
+
+
+def test_bounds_drift_none_when_nothing_discovered():
+    """No discovery is not drift -- it is the discovery section's business."""
+    gen = load_gen()
+    assert gen.bounds_drift(28, 38, []) is None
+
+
+def test_bounds_drift_reports_a_wider_live_event():
+    gen = load_gen()
+    d = gen.bounds_drift(28, 38, [26, 30, 40])
+    assert d["config"] == (28, 38)
+    assert d["discovered"] == (26, 40)
+
+
+def test_bounds_drift_reports_a_narrower_live_event():
+    gen = load_gen()
+    d = gen.bounds_drift(28, 38, [30, 31, 32])
+    assert d["config"] == (28, 38)
+    assert d["discovered"] == (30, 32)
+
+
+def test_bounds_drift_ignores_non_integer_buckets():
+    """list_tokens() can hand back a NULL bucket_c on a malformed row."""
+    gen = load_gen()
+    assert gen.bounds_drift(28, 38, [None, 30, 38, 28]) is None
