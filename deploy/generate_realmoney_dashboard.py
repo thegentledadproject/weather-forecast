@@ -164,6 +164,59 @@ def gate2_state(unit="polyweather"):
     return "present" if environ_blob_has_name(blob, GATE2_NAME) else "absent"
 
 
+# --- schedule windows --------------------------------------------------------
+# `windows` is passed in rather than read from config so these stay pure and
+# so the tests pin the ARITHMETIC against a fixed synthetic table. Pinning it
+# against config.SCHEDULE_WINDOWS would mean every future schedule retune
+# breaks tests that are not about the schedule -- and that table has already
+# been retuned once (entries closed at 08:00, 2026-08-17).
+#
+# An ENTRY window is one with a non-None min_net_ev. That is the same
+# discriminator scheduler.run_cycle() uses: a window with no EV bar has no
+# bar to clear because it does not open positions.
+MINUTES_PER_DAY = 24 * 60
+
+
+def active_window(minute_of_day, windows):
+    """The window covering `minute_of_day`, in scheduler.determine_window()'s
+    dict shape, or None if the table has a gap there.
+
+    Half-open [start, end) -- exactly as determine_window(), so 08:00 belongs
+    to the window that STARTS at 08:00, not the one that ends there.
+    """
+    for (sh, sm, eh, em, interval, mode, min_ev, desc) in windows:
+        start, end = sh * 60 + sm, eh * 60 + em
+        if start <= minute_of_day < end:
+            return {
+                "start_minute": start,
+                "end_minute": end,
+                "interval_min": interval,
+                "mode": mode,
+                "min_net_ev": min_ev,
+                "description": desc,
+            }
+    return None
+
+
+def next_entry_boundary(minute_of_day, windows):
+    """("closes", mins) inside an entry window, ("opens", mins) outside one,
+    None if no window in the table accepts entries at all.
+
+    The None case is real, not defensive: a region whose caps are all zero,
+    or a schedule edited down to monitoring, has no next entry.
+    """
+    here = active_window(minute_of_day, windows)
+    if here and here["min_net_ev"] is not None:
+        return ("closes", here["end_minute"] - minute_of_day)
+
+    starts = [sh * 60 + sm for (sh, sm, _eh, _em, _i, _m, min_ev, _d) in windows
+              if min_ev is not None]
+    if not starts:
+        return None
+    # Wrap: the next entry window may be tomorrow's.
+    return ("opens", min((s - minute_of_day) % MINUTES_PER_DAY for s in starts))
+
+
 def render_page(sections, warnings):
     """Assemble the full document from (title, caption, body_html) triples.
 

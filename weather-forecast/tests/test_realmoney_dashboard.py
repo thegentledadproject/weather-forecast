@@ -113,3 +113,58 @@ def test_gate2_state_present_and_absent(monkeypatch):
     assert gen.gate2_state() == "present"
     monkeypatch.setattr(gen, "_read_environ", lambda pid: b"PATH=/usr/bin\x00")
     assert gen.gate2_state() == "absent"
+
+
+# --- schedule windows --------------------------------------------------------
+# A synthetic table in config.SCHEDULE_WINDOWS' shape:
+#   (start_h, start_m, end_h, end_m, interval_min, mode, min_net_ev, description)
+# Entry windows are the ones with a non-None min_net_ev. Deliberately NOT the
+# real table -- these assertions must not move when the schedule is retuned.
+_WINDOWS = [
+    (0, 0, 4, 0, None, "closed", None, "overnight"),
+    (4, 0, 5, 0, 15, "pre_poll", None, "early watch"),
+    (5, 0, 8, 0, 10, "primary", 0.15, "primary edge window"),
+    (8, 0, 24, 0, 30, "monitor_only", None, "exits only"),
+]
+
+
+def test_active_window_inside_primary():
+    gen = load_gen()
+    w = gen.active_window(6 * 60, _WINDOWS)
+    assert w["mode"] == "primary"
+    assert w["min_net_ev"] == 0.15
+    assert w["interval_min"] == 10
+
+
+def test_active_window_is_half_open_at_the_boundary():
+    """08:00 belongs to monitor_only, not primary -- entries close AT 08:00."""
+    gen = load_gen()
+    assert gen.active_window(8 * 60 - 1, _WINDOWS)["mode"] == "primary"
+    assert gen.active_window(8 * 60, _WINDOWS)["mode"] == "monitor_only"
+
+
+def test_active_window_returns_none_on_a_gap():
+    gen = load_gen()
+    assert gen.active_window(6 * 60, [(0, 0, 1, 0, None, "closed", None, "x")]) is None
+
+
+def test_next_entry_boundary_inside_an_entry_window_counts_to_close():
+    gen = load_gen()
+    assert gen.next_entry_boundary(6 * 60, _WINDOWS) == ("closes", 120)
+
+
+def test_next_entry_boundary_before_the_window_counts_to_open():
+    gen = load_gen()
+    assert gen.next_entry_boundary(4 * 60 + 30, _WINDOWS) == ("opens", 30)
+
+
+def test_next_entry_boundary_wraps_past_midnight():
+    """22:00 -> the next entry window is 05:00 tomorrow: 7h."""
+    gen = load_gen()
+    assert gen.next_entry_boundary(22 * 60, _WINDOWS) == ("opens", 420)
+
+
+def test_next_entry_boundary_none_when_nothing_accepts_entries():
+    gen = load_gen()
+    closed_only = [(0, 0, 24, 0, None, "closed", None, "nothing runs")]
+    assert gen.next_entry_boundary(6 * 60, closed_only) is None
