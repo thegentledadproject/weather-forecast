@@ -391,3 +391,67 @@ def test_render_ev_reports_a_missing_snapshot_as_never_computed(monkeypatch, tmp
     monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"nope_{icao}.json")
     out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
     assert "no ev snapshot" in out.lower() or "never" in out.lower()
+
+
+def test_render_ev_reports_unreadable_snapshot_as_a_warning_and_skips_station(monkeypatch, tmp_path):
+    """Missing vs unreadable are different cases: this pins the unreadable half.
+
+    A snapshot that exists but is not valid JSON must not raise, must be
+    reported as a warning (not the 'never computed' message), and must not
+    contribute any rows.
+    """
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"ev_latest_{icao}.json")
+    (tmp_path / "ev_latest_WSSS.json").write_text("{not valid json", encoding="utf-8")
+    warnings = []
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=warnings)
+    assert "no EV data for any real-money station" in out
+    assert any("WSSS" in w for w in warnings)
+
+
+def test_render_ev_one_station_failing_does_not_cost_the_others(monkeypatch, tmp_path):
+    """render_ev degrades per station, like render_readiness -- not all-or-nothing."""
+    import json
+    gen = load_gen()
+    good_path = tmp_path / "ev_latest_WSSS.json"
+    good_path.write_text(json.dumps({
+        "station_icao": "WSSS",
+        "generated_at": "2026-08-26T05:01:00+00:00",
+        "target_date": "2026-08-26",
+        "results": [
+            {"bucket_c": 32, "side": "YES", "model_prob": 0.30, "market_price": 0.28,
+             "raw_edge": 0.02, "slippage_pct": 0.01, "net_ev_per_dollar": 0.02,
+             "spread_source": "measured", "notes": ""},
+        ],
+    }), encoding="utf-8")
+
+    def flaky_path(icao):
+        if icao == "RCSS":
+            raise RuntimeError("boom")
+        return good_path
+
+    monkeypatch.setattr(gen, "_ev_snapshot_path", flaky_path)
+    warnings = []
+    out = gen.render_ev(["RCSS", "WSSS"], bar=0.15, warnings=warnings)
+    assert "WSSS" in out
+    assert "32" in out
+    assert any("RCSS" in w for w in warnings)
+
+
+def test_render_ev_tolerates_a_missing_bucket_like_every_other_numeric_field(monkeypatch, tmp_path):
+    """bucket_c had no None guard while every sibling numeric field did."""
+    import json
+    gen = load_gen()
+    monkeypatch.setattr(gen, "_ev_snapshot_path", lambda icao: tmp_path / f"ev_latest_{icao}.json")
+    (tmp_path / "ev_latest_WSSS.json").write_text(json.dumps({
+        "station_icao": "WSSS",
+        "generated_at": "2026-08-26T05:01:00+00:00",
+        "target_date": "2026-08-26",
+        "results": [
+            {"bucket_c": None, "side": "YES", "model_prob": 0.30, "market_price": 0.28,
+             "raw_edge": 0.02, "slippage_pct": 0.01, "net_ev_per_dollar": 0.02,
+             "spread_source": "measured", "notes": ""},
+        ],
+    }), encoding="utf-8")
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "None" not in out

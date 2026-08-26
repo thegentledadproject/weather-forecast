@@ -490,55 +490,65 @@ def render_ev(icaos, bar, warnings):
 
     blocks = []
     for icao in sorted(icaos):
-        path = _ev_snapshot_path(icao)
+        # Everything for this station -- including resolving its snapshot path --
+        # is inside this guard, matching render_readiness: one bad station costs
+        # you that station, not the whole section. FileNotFoundError and
+        # (OSError, ValueError) below are more specific, expected cases and
+        # `continue` out before ever reaching this outer handler.
         try:
-            with open(path, encoding="utf-8") as fh:
-                snap = json.load(fh)
-        except FileNotFoundError:
-            blocks.append(
-                f"<h3>{html.escape(icao)}</h3><div class='empty'>no EV snapshot yet &mdash; "
-                "the engine writes one every time it computes, including when it finds "
-                "nothing, so this means it has not run.</div>"
-            )
-            continue
-        except (OSError, ValueError) as exc:
-            warnings.append(f"EV snapshot unreadable for {icao}: {exc}")
-            continue
+            path = _ev_snapshot_path(icao)
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    snap = json.load(fh)
+            except FileNotFoundError:
+                blocks.append(
+                    f"<h3>{html.escape(icao)}</h3><div class='empty'>no EV snapshot yet &mdash; "
+                    "the engine writes one every time it computes, including when it finds "
+                    "nothing, so this means it has not run.</div>"
+                )
+                continue
+            except (OSError, ValueError) as exc:
+                warnings.append(f"EV snapshot unreadable for {icao}: {exc}")
+                continue
 
-        rows = []
-        for r in sorted(snap.get("results", []),
-                        key=lambda x: (x.get("net_ev_per_dollar") is None,
-                                       -(x.get("net_ev_per_dollar") or 0))):
-            ev = r.get("net_ev_per_dollar")
-            price = r.get("market_price")
-            over_bar = bar is not None and ev is not None and ev >= bar
-            rows.append(
-                "<tr>"
-                f"<td class='mono'>{r.get('bucket_c')}&deg;C</td>"
-                f"<td class='mono'>{html.escape(str(r.get('side', '')))}</td>"
-                f"<td class='mono num'>{'&mdash;' if r.get('model_prob') is None else format(r['model_prob'], '.1%')}</td>"
-                f"<td class='mono num'>{'&mdash;' if price is None else format(price, '.3f')}</td>"
-                f"<td class='mono num'>{'&mdash;' if r.get('raw_edge') is None else format(r['raw_edge'], '+.1%')}</td>"
-                f"<td class='mono num dim2'>{'&mdash;' if r.get('slippage_pct') is None else format(r['slippage_pct'], '.1%')}</td>"
-                f"<td class='mono num {'pos' if over_bar else 'dim2'}'>"
-                f"{'&mdash;' if ev is None else format(ev, '+.1%')}"
-                f"{ev_row_flags(r, max_entry_price, edge_ceiling_for)}</td>"
-                "</tr>"
+            rows = []
+            for r in sorted(snap.get("results", []),
+                            key=lambda x: (x.get("net_ev_per_dollar") is None,
+                                           -(x.get("net_ev_per_dollar") or 0))):
+                ev = r.get("net_ev_per_dollar")
+                price = r.get("market_price")
+                bucket_c = r.get("bucket_c")
+                over_bar = bar is not None and ev is not None and ev >= bar
+                rows.append(
+                    "<tr>"
+                    f"<td class='mono'>{'&mdash;' if bucket_c is None else str(bucket_c) + '&deg;C'}</td>"
+                    f"<td class='mono'>{html.escape(str(r.get('side', '')))}</td>"
+                    f"<td class='mono num'>{'&mdash;' if r.get('model_prob') is None else format(r['model_prob'], '.1%')}</td>"
+                    f"<td class='mono num'>{'&mdash;' if price is None else format(price, '.3f')}</td>"
+                    f"<td class='mono num'>{'&mdash;' if r.get('raw_edge') is None else format(r['raw_edge'], '+.1%')}</td>"
+                    f"<td class='mono num dim2'>{'&mdash;' if r.get('slippage_pct') is None else format(r['slippage_pct'], '.1%')}</td>"
+                    f"<td class='mono num {'pos' if over_bar else 'dim2'}'>"
+                    f"{'&mdash;' if ev is None else format(ev, '+.1%')}"
+                    f"{ev_row_flags(r, max_entry_price, edge_ceiling_for)}</td>"
+                    "</tr>"
+                )
+            gen_at = str(snap.get("generated_at", ""))[11:16]
+            head = (f"<h3>{html.escape(icao)}</h3><p class='cap'>computed {html.escape(gen_at)} UTC "
+                    f"&middot; target {html.escape(str(snap.get('target_date')))} "
+                    f"&middot; {len(rows)} bucket/side row(s), unfiltered</p>")
+            if not rows:
+                blocks.append(head + "<div class='empty'>the engine computed and produced no rows.</div>")
+                continue
+            blocks.append(
+                head + "<div class='tablewrap'><table class='ptable'>"
+                "<thead><tr><th>Bucket</th><th>Side</th><th class='num'>Model p</th>"
+                "<th class='num'>Mkt price</th><th class='num'>Raw edge</th>"
+                "<th class='num'>Slip</th><th class='num'>Net EV/$</th></tr></thead>"
+                f"<tbody>{''.join(rows)}</tbody></table></div>"
             )
-        gen_at = str(snap.get("generated_at", ""))[11:16]
-        head = (f"<h3>{html.escape(icao)}</h3><p class='cap'>computed {html.escape(gen_at)} UTC "
-                f"&middot; target {html.escape(str(snap.get('target_date')))} "
-                f"&middot; {len(rows)} bucket/side row(s), unfiltered</p>")
-        if not rows:
-            blocks.append(head + "<div class='empty'>the engine computed and produced no rows.</div>")
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"EV section failed for {icao}: {exc}")
             continue
-        blocks.append(
-            head + "<div class='tablewrap'><table class='ptable'>"
-            "<thead><tr><th>Bucket</th><th>Side</th><th class='num'>Model p</th>"
-            "<th class='num'>Mkt price</th><th class='num'>Raw edge</th>"
-            "<th class='num'>Slip</th><th class='num'>Net EV/$</th></tr></thead>"
-            f"<tbody>{''.join(rows)}</tbody></table></div>"
-        )
     return "".join(blocks) or "<div class='empty'>no EV data for any real-money station.</div>"
 
 
