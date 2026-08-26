@@ -549,9 +549,13 @@ STATIONS = {
     #
     # TWO THINGS EVERY ENTRY HERE MUST CARRY, neither of which any Asian
     # entry needs:
-    #   region="europe"       -- draws on a pool funded at $0 (see
-    #                            REGION_BANKROLL_USD below). Collection and
-    #                            scoring only; it cannot size a live order.
+    #   region="europe"       -- draws on its OWN capital pool (see
+    #                            REGION_BANKROLL_USD below), separate from
+    #                            Asia's. That pool is funded for PAPER
+    #                            sizing; the real-money blast radius is a
+    #                            different mechanism (REGION_LIVE_MAX_*,
+    #                            still 0/0.0/0 for europe), so no entry here
+    #                            can size a live order.
     #   iana_timezone=...     -- these cities observe DST. utc_offset_hours
     #                            is ALSO set, to the STANDARD-time value,
     #                            because backtest/engine.py reads it
@@ -576,6 +580,31 @@ STATIONS = {
     # that bucket_min_c/bucket_max_c are CROSS-CHECKS ONLY and go stale within
     # days regardless of source -- the live token map is authoritative at
     # trade time.
+    #
+    # THE MIRROR'S BUCKET WINDOWS HAVE NOW BEEN SCORED AGAINST THE LIVE EVENT
+    # (2026-08-26, Europe's first primary cycle -- the check the deploy note
+    # said to run). Five of seven drifted; EHAM (20-30) and EPWA (17-27) were
+    # exactly right. The five below were updated to the windows the live token
+    # map listed that morning:
+    #     EDDM 13-23 -> 21-31   (+8, the mirror was plainly wrong)
+    #     EGLC 17-27 -> 22-32   (+5)
+    #     LIMC 20-30 -> 22-32   (+2)
+    #     LFPB 22-32 -> 23-33   (+1)
+    #     LEMD 24-34 -> 25-35   (+1)
+    # DO NOT READ THAT AS "the registry is now correct". Polymarket re-centers
+    # these windows CONTINUOUSLY, not just seasonally: over 2026-08-20..26 the
+    # journal shows RKPK listing four distinct windows (26-36, 27-37, 28-38,
+    # 29-39) and ZBAA two 6C apart. A +/-1-2C drift line is that daily
+    # re-centering and means nothing; EDDM's +8 was the signal. Expect BOUNDS
+    # DRIFT to keep firing for Europe -- chase it only when the gap is large
+    # and one-directional across several days.
+    #
+    # long_term_normal_max_c moved WITH the five windows, because the rule
+    # that produced those placeholders is "midpoint of the live bucket window"
+    # (see below) and the inputs changed. They remain placeholders and are
+    # read ONLY when a station has neither a forecast nor an observation --
+    # blend_central_estimate falls back to the normal, it never blends it in
+    # -- so this is a fallback-path change, not a pricing change.
     #
     # RESOLUTION SOURCE: every European market's rules text names NOAA
     # (weather.gov/wrh/timeseries?site=<icao>), not Wunderground, as the cited
@@ -619,8 +648,8 @@ STATIONS = {
         lat=51.50528,
         lon=0.05528,
         wunderground_slug="gb/london/EGLC",
-        long_term_normal_max_c=22.0,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (17-27), NOT a sourced normal. No
+        long_term_normal_max_c=27.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (22-32), NOT a sourced normal. No
                                        # EGLC-specific 1991-2020 Met Office
                                        # normal was found; Heathrow's 23.4C
                                        # is a DIFFERENT station and must not
@@ -636,8 +665,8 @@ STATIONS = {
         region="europe",
         iana_timezone="Europe/London",
         utc_offset_hours=0,
-        bucket_min_c=17,
-        bucket_max_c=27,
+        bucket_min_c=22,
+        bucket_max_c=32,
         metar_ingest_mode="resolution",
         resolution_grade_source="metar_daily_max",
     ),
@@ -648,8 +677,8 @@ STATIONS = {
         lat=48.96000,
         lon=2.43500,
         wunderground_slug="fr/paris/LFPB",
-        long_term_normal_max_c=27.0,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (22-32), NOT a sourced normal.
+        long_term_normal_max_c=28.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (23-33), NOT a sourced normal.
                                        # Meteo-France's 1991-2020 normals
                                        # publication was located but the
                                        # Le Bourget August daily-max figure
@@ -660,8 +689,8 @@ STATIONS = {
         region="europe",
         iana_timezone="Europe/Paris",
         utc_offset_hours=1,
-        bucket_min_c=22,
-        bucket_max_c=32,
+        bucket_min_c=23,
+        bucket_max_c=33,
         metar_ingest_mode="resolution",
         resolution_grade_source="metar_daily_max",
     ),
@@ -672,8 +701,8 @@ STATIONS = {
         lat=40.47222,
         lon=-3.56083,
         wunderground_slug="es/madrid/LEMD",
-        long_term_normal_max_c=29.0,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (24-34), NOT a sourced normal.
+        long_term_normal_max_c=30.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (25-35), NOT a sourced normal.
                                        # AEMET's own "Madrid Aeropuerto"
                                        # (Barajas) normals page gives 32.8C
                                        # for August mean max, but for the
@@ -687,8 +716,8 @@ STATIONS = {
         region="europe",
         iana_timezone="Europe/Madrid",
         utc_offset_hours=1,
-        bucket_min_c=24,
-        bucket_max_c=34,
+        bucket_min_c=25,
+        bucket_max_c=35,
         metar_ingest_mode="resolution",
         resolution_grade_source="metar_daily_max",
     ),
@@ -729,8 +758,8 @@ STATIONS = {
         lat=45.63000,
         lon=8.72306,
         wunderground_slug="it/milan/LIMC",
-        long_term_normal_max_c=25.0,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (20-30), NOT a sourced normal.
+        long_term_normal_max_c=27.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (22-32), NOT a sourced normal.
                                        # Sources disagree by several degrees
                                        # (city-center ~29-30C vs. a
                                        # Malpensa-airport aggregator's
@@ -745,8 +774,8 @@ STATIONS = {
         region="europe",
         iana_timezone="Europe/Rome",
         utc_offset_hours=1,
-        bucket_min_c=20,
-        bucket_max_c=30,
+        bucket_min_c=22,
+        bucket_max_c=32,
         metar_ingest_mode="resolution",
         resolution_grade_source="metar_daily_max",
     ),
@@ -757,8 +786,8 @@ STATIONS = {
         lat=48.35389,
         lon=11.78611,
         wunderground_slug="de/munich/EDDM",
-        long_term_normal_max_c=18.0,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (13-23), NOT a sourced normal. DWD's
+        long_term_normal_max_c=26.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (21-31), NOT a sourced normal. DWD's
                                        # own Munich Airport climate page was
                                        # reached but did not yield an August
                                        # figure in this pass (and states it
@@ -773,8 +802,8 @@ STATIONS = {
         region="europe",
         iana_timezone="Europe/Berlin",
         utc_offset_hours=1,
-        bucket_min_c=13,
-        bucket_max_c=23,
+        bucket_min_c=21,
+        bucket_max_c=31,
         metar_ingest_mode="resolution",
         resolution_grade_source="metar_daily_max",
     ),
@@ -2090,6 +2119,101 @@ def bias_gate_is_overridden(station_icao: str) -> bool:
     if station_icao in LIVE_TRADING_STATIONS:
         return False
     return station_icao in BIAS_GATE_OVERRIDE_STATIONS
+
+
+# --- Per-station override of the WHOLE collection-first gate --------------
+# Stations listed here skip BOTH halves of
+# entry_manager.collection_only_reason(): the
+# MIN_RESOLUTION_OBS_BEFORE_ENTRY observation count AND the bias-quality
+# checks. It is therefore strictly stronger than
+# BIAS_GATE_OVERRIDE_STATIONS above, which deliberately could not touch
+# the observation count.
+#
+# WHAT THIS BUYS AND WHAT IT COSTS. The gate's own docstring is the honest
+# case against it: a station with no settlement-grade history is pricing
+# off a placeholder normal and a fallback spread, and that does not produce
+# absurd edges MAX_PLAUSIBLE_RAW_EDGE would catch -- it produces edges of
+# exactly the tradeable size, on every bucket, every cycle, all wrong in
+# the same direction. That is not a hypothetical here: see
+# BIAS_GATE_OVERRIDE_STATIONS' VHHH paragraph, and the five -100% entries
+# in the lottery band that the same class of unmeasured bias produced.
+# Overriding does not make the numbers better; it makes them BILLED.
+#
+# The reason it is nonetheless defensible for the European cohort, and the
+# reason the guard below is written the way it is: EUROPE CANNOT SPEND
+# MONEY. Its REGION_LIVE_MAX_* entries are 0/0.0/0, so no European station
+# can submit a real order whatever this set says. What an entry costs is a
+# row in `positions` with a model_prob on it -- which is the evidence the
+# maturity gate is waiting for anyway, and which arrives faster and
+# scores better than another week of collection-only rows. A paper loss
+# here is a measurement, not a loss.
+#
+# THE GUARD IS STRUCTURAL, NOT A NAME LIST, and it self-disarms. The
+# override stops working for a station the moment it could reach the real
+# order path -- by joining LIVE_TRADING_STATIONS, or by its REGION_LIVE_MAX_*
+# entries being raised above zero. So funding Europe for real money does
+# not silently inherit permission to trade on unmeasured bias; it re-blocks
+# every station in this set, and the operator has to delete them from here
+# deliberately. That is the safe direction for the one-line edit somebody
+# makes later, and it is the same failure shape bias_gate_is_overridden
+# already uses.
+#
+# ADDED 2026-08-26 at the operator's instruction, after Europe's first
+# primary cycle produced 17 candidates across all seven stations that
+# cleared the 15% net-EV screen and opened nothing (obs 4, need 10). On the
+# unmodified gate the earliest possible first entry was ~2026-09-01.
+COLLECTION_GATE_OVERRIDE_STATIONS = {
+    "EGLC", "LFPB", "LEMD", "EHAM", "LIMC", "EDDM", "EPWA",
+}
+
+
+def region_authorises_live_orders(region: str) -> bool:
+    """
+    Whether `region`'s real-money blast radius is anything but zero.
+
+    True is the SAFE answer for an unknown region: a region missing from
+    the REGION_LIVE_MAX_* dicts is a misconfiguration, and treating it as
+    live-capable makes collection_gate_is_overridden refuse rather than
+    exempt. The trade-time path raises on the same gap (see
+    region_bankroll_usd); this one cannot raise, because it is asked
+    inside a gate whose whole job is to answer "may this station trade?"
+    without blowing up the cycle.
+    """
+    if region not in REGION_LIVE_MAX_CONCURRENT_POSITIONS:
+        return True
+    if region not in REGION_LIVE_MAX_TOTAL_EXPOSURE_USD:
+        return True
+    if region not in REGION_LIVE_MAX_ORDERS_PER_DAY:
+        return True
+    return (
+        REGION_LIVE_MAX_CONCURRENT_POSITIONS[region] > 0
+        or REGION_LIVE_MAX_TOTAL_EXPOSURE_USD[region] > 0.0
+        or REGION_LIVE_MAX_ORDERS_PER_DAY[region] > 0
+    )
+
+
+def collection_gate_is_overridden(station_icao: str) -> bool:
+    """
+    Whether `station_icao` skips the collection-first gate entirely.
+
+    REFUSES TO APPLY TO ANYTHING THAT COULD SPEND MONEY -- see
+    COLLECTION_GATE_OVERRIDE_STATIONS for why that is the whole
+    justification rather than a belt-and-braces extra. Two independent
+    ways to be refused, and either one is enough:
+
+      1. the station is on LIVE_TRADING_STATIONS (the per-station real
+         order-path allowlist), or
+      2. its REGION authorises any live orders at all.
+
+    An unregistered ICAO is refused too: no region, no exemption.
+    """
+    if station_icao in LIVE_TRADING_STATIONS:
+        return False
+    if station_icao not in STATIONS:
+        return False
+    if region_authorises_live_orders(STATIONS[station_icao].region):
+        return False
+    return station_icao in COLLECTION_GATE_OVERRIDE_STATIONS
 
 # Shared budget across ALL approved legs for one station on one day -- e.g.
 # a YES leg on the top bucket plus NO legs hedging tail buckets, opened

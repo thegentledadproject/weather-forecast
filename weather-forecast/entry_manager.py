@@ -405,6 +405,15 @@ def collection_only_reason(
     be the drift this purity was designed to prevent.
     Live always passes True.
 
+    config.COLLECTION_GATE_OVERRIDE_STATIONS is the STRONGER exemption:
+    it skips this function's checks outright, observation count included,
+    and it applies whether or not enforce_bias_quality was asked for. It
+    is refused for anything that can reach the real order path, so what
+    it can produce is paper rows and nothing else -- see that constant for
+    why that is the entire argument for it. Checked before the obs count
+    rather than after, because after is where the bias override sits and
+    the obs count is exactly what this one is for.
+
     Kept pure (registry lookup only, no storage) so backtest/entry_sim.py
     can reuse it verbatim and the two sides cannot drift in wording or in
     the comparison itself.
@@ -419,6 +428,13 @@ def collection_only_reason(
             f"Collection-only: {station_icao}'s stored '{source}' observation count could not be read, "
             f"so the collection-first gate cannot be enforced -- refusing to open blind."
         )
+    # Operator override of the WHOLE gate, per station. Deliberately below
+    # the obs_count-is-None branch above: that branch is a BROKEN READ, not
+    # an immature station, and "refusing to open blind" stays true no matter
+    # what any allowlist says.
+    if config.collection_gate_is_overridden(station_icao):
+        return None
+
     if obs_count < config.MIN_RESOLUTION_OBS_BEFORE_ENTRY:
         return (
             f"Collection-only: {station_icao} has {obs_count} stored '{source}' observation(s), below the "
