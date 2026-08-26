@@ -248,6 +248,201 @@ def bounds_drift(config_min, config_max, discovered):
     }
 
 
+# --- readiness ladder --------------------------------------------------------
+# THE RUNGS ARE IN THE ORDER THE REAL CODE APPLIES THEM, and each carries its
+# actual value rather than a bare tick. A ladder of green ticks tells an
+# operator nothing they can act on; "allowlisted, but maturity is an
+# OVERRIDE" does.
+#
+# WHAT THIS LADDER DOES NOT CLAIM. It says an order COULD open, never that a
+# given candidate WOULD. The per-bucket cap, the stop-out cooldown and the
+# opposite-side lock are per-candidate and live inside evaluate_entry(); none
+# of them is observable here because nothing persists an EntryDecision. That
+# is stage 2. The page says so rather than letting the reader assume this
+# ladder is the whole gate.
+
+
+def _rung(label, value, state, why=""):
+    return {"label": label, "value": value, "state": state, "why": why}
+
+
+def capacity_rung(icao, region, counts):
+    """Today's submitted entries against the cap that actually binds.
+
+    executor.py:238 enforces REGION_LIVE_MAX_ORDERS_PER_DAY[region]. The
+    process-global LIVE_MAX_ORDERS_PER_DAY is merely the value the "asia"
+    entry aliases today, and would be the wrong number to show for any
+    other region.
+
+    UNKNOWN IS NOT ZERO. count_live_order_attempts() returns None when the
+    count cannot be read, and the trading path treats that as "cannot
+    authorise" -- a rate limit that fails open is not a rate limit. Rendering
+    it as 0 would show maximum headroom for the state we know least about.
+    """
+    used, cap = counts.get("orders_today"), counts.get("cap")
+    if used is None:
+        return _rung(
+            "Capacity", "unknown -- order count unreadable", "unknown",
+            f"cap is {cap} entries/day for region {region!r}; the trading path "
+            "treats an unreadable count as 'cannot authorise'",
+        )
+    state = "no" if (cap is not None and used >= cap) else "ok"
+    return _rung(
+        "Capacity", f"{used} of {cap} entries submitted today", state,
+        f"REGION_LIVE_MAX_ORDERS_PER_DAY[{region!r}]",
+    )
+
+
+def readiness_rungs(icao, now_utc):
+    """The full ladder for one station. Reads config, storage and /proc."""
+    import config
+    import storage
+
+    rungs = []
+
+    g2 = gate2_state()
+    rungs.append({
+        "present": _rung("Gate 2 (process)", f"{GATE2_NAME} set on the daemon", "ok",
+                         "read by NAME from the daemon's environ; the value is never read"),
+        "absent": _rung("Gate 2 (process)", f"{GATE2_NAME} NOT set", "no",
+                        "no real order can be submitted by any station"),
+        "unknown": _rung("Gate 2 (process)", "cannot be observed from this process", "unknown",
+                         "the daemon's environ is unreadable here -- this is the normal "
+                         "answer off the box, and is NOT the same as 'off'"),
+    }[g2])
+
+    mode = _read_mode_env().get("POLYWEATHER_MODE")
+    rungs.append(
+        _rung("Mode", mode or "unknown", "ok" if mode == "live" else
+              ("unknown" if mode is None else "no"),
+              "/etc/polyweather/mode.env -- HOST state, not repo state")
+    )
+
+    # live_mode_is_permitted() folds two independent conditions into one
+    # boolean. They have opposite remedies, so both are shown.
+    allowlisted = icao in getattr(config, "LIVE_TRADING_STATIONS", set())
+    maturity = config.station_maturity(icao)
+    permitted = config.live_mode_is_permitted(icao, "live")
+    rungs.append(
+        _rung("Gate 1 (station)", "permitted" if permitted else "refused",
+              "ok" if permitted else "no",
+              f"allowlisted: {'yes' if allowlisted else 'NO'} · "
+              f"maturity: {maturity}")
+    )
+
+    override = getattr(config, "MATURITY_OVERRIDE", {}).get(icao)
+    if override:
+        forced, why = override
+        rungs.append(
+            _rung("Maturity provenance", f"{forced} BY OVERRIDE", "unknown",
+                  f"config.MATURITY_OVERRIDE bypasses the measured criteria: {why}")
+        )
+    else:
+        rungs.append(
+            _rung("Maturity provenance", f"{maturity}, measured", "ok",
+                  "derived from stored evidence, not overridden")
+        )
+
+    region = config.region_of(icao)
+    authorised = config.region_authorises_live_orders(region)
+    rungs.append(
+        _rung("Region", f"{region}: {'authorised' if authorised else 'all caps zero'}",
+              "ok" if authorised else "no",
+              "REGION_LIVE_MAX_CONCURRENT_POSITIONS / _TOTAL_EXPOSURE_USD / _ORDERS_PER_DAY")
+    )
+
+    offset = config.current_utc_offset_hours(icao)
+    local = now_utc.timestamp() + offset * 3600
+    local_dt = datetime.fromtimestamp(local, tz=timezone.utc)
+    mod = local_dt.hour * 60 + local_dt.minute
+    win = active_window(mod, config.SCHEDULE_WINDOWS)
+    boundary = next_entry_boundary(mod, config.SCHEDULE_WINDOWS)
+    if win is None:
+        rungs.append(_rung("Window", "no window covers this minute", "unknown",
+                           "a gap in config.SCHEDULE_WINDOWS"))
+    else:
+        accepts = win["min_net_ev"] is not None
+        detail = f"{win['description']} · local {local_dt:%H:%M} (UTC{offset:+d})"
+        if accepts:
+            detail += f" · EV bar {win['min_net_ev']:.0%} · scan {win['interval_min']}m"
+        if boundary:
+            what, mins = boundary
+            detail += f" · entries {what} in {mins // 60}h{mins % 60:02d}m"
+        rungs.append(
+            _rung("Window", f"{win['mode']}{'' if accepts else ' (no entries)'}",
+                  "ok" if accepts else "no", detail)
+        )
+
+    cap = getattr(config, "REGION_LIVE_MAX_ORDERS_PER_DAY", {}).get(region)
+    day_start = now_utc.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    used = storage.count_live_order_attempts(
+        "entry", day_start, station_icaos=config.stations_in_region(region)
+    )
+    rungs.append(capacity_rung(icao, region, {"orders_today": used, "cap": cap}))
+    return rungs
+
+
+def _read_mode_env(path="/etc/polyweather/mode.env"):
+    """Parse the host's mode file. Holds no secrets -- values are safe to read.
+
+    Returns {} when absent, which is what an un-deployed box looks like.
+    """
+    out = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, v = line.split("=", 1)
+                    out[k.strip()] = v.strip().strip('"')
+    except OSError:
+        return {}
+    return out
+
+
+def render_readiness(icaos, now_utc, warnings):
+    """One card body per station, grouped under a region heading.
+
+    Grouped, and never summed across groups. Both live stations are Asia
+    today so the grouping is invisible -- that is the point. It is here so
+    that arming a European station produces a new group instead of a silent
+    cross-region mix.
+    """
+    import config
+
+    if not icaos:
+        return ("<div class='empty'>No station is in config.LIVE_TRADING_STATIONS &mdash; "
+                "no real order can be submitted by anything.</div>")
+
+    by_region = {}
+    for icao in icaos:
+        try:
+            by_region.setdefault(config.region_of(icao), []).append(icao)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"region lookup failed for {icao}: {exc}")
+
+    blocks = []
+    for region in sorted(by_region):
+        blocks.append(f"<p class='region'>{html.escape(region)}</p>")
+        for icao in sorted(by_region[region]):
+            try:
+                rungs = readiness_rungs(icao, now_utc)
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(f"readiness ladder failed for {icao}: {exc}")
+                blocks.append(f"<div class='empty'>{html.escape(icao)}: ladder unavailable</div>")
+                continue
+            rows = "".join(
+                f"<div class='rung {r['state']}'>"
+                f"<span class='lab'>{html.escape(r['label'])}</span>"
+                f"<span class='val'>{html.escape(r['value'])}</span>"
+                + (f"<span class='why'>{html.escape(r['why'])}</span>" if r["why"] else "")
+                + "</div>"
+                for r in rungs
+            )
+            blocks.append(f"<h3 class='evstation'>{html.escape(icao)}</h3>{rows}")
+    return "".join(blocks)
+
+
 def render_page(sections, warnings):
     """Assemble the full document from (title, caption, body_html) triples.
 

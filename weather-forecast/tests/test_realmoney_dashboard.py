@@ -204,3 +204,98 @@ def test_bounds_drift_ignores_non_integer_buckets():
     """list_tokens() can hand back a NULL bucket_c on a malformed row."""
     gen = load_gen()
     assert gen.bounds_drift(28, 38, [None, 30, 38, 28]) is None
+
+
+# --- readiness ladder --------------------------------------------------------
+# The rung the ladder gets WRONG by default is capacity: count_live_order_attempts
+# returns None when it cannot read, and its callers in the trading path treat
+# that as "cannot authorise" precisely because a rate limit that fails open is
+# not a rate limit. The page must not render that None as 0.
+
+
+@pytest.fixture
+def isolated_stores(monkeypatch):
+    """Keep the suite from touching the real databases.
+
+    storage._db() and price_store._connect() both CREATE their sqlite file
+    lazily. Left alone, merely running these tests would write
+    data/polyweather.sqlite3 and data/market_data.sqlite3 into the checkout
+    -- a test suite with a side effect on the operator's own box. Every test
+    that exercises an impure path takes this fixture.
+    """
+    import storage
+
+    monkeypatch.setattr(storage, "count_live_order_attempts",
+                        lambda kind, since_iso, station_icaos=None: 0)
+    monkeypatch.setattr(storage, "load_live_order_attempts", lambda limit=50: [])
+    return monkeypatch
+
+
+def test_capacity_rung_reports_headroom():
+    gen = load_gen()
+    r = gen.capacity_rung("WSSS", "asia", {"orders_today": 3, "cap": 10})
+    assert r["state"] == "ok"
+    assert "3" in r["value"] and "10" in r["value"]
+
+
+def test_capacity_rung_at_the_cap_is_not_ok():
+    gen = load_gen()
+    r = gen.capacity_rung("WSSS", "asia", {"orders_today": 10, "cap": 10})
+    assert r["state"] == "no"
+
+
+def test_capacity_rung_unknown_is_never_zero():
+    """An unreadable count is 'unknown', not 'plenty of headroom'."""
+    gen = load_gen()
+    r = gen.capacity_rung("WSSS", "asia", {"orders_today": None, "cap": 10})
+    assert r["state"] == "unknown"
+    assert "unknown" in r["value"].lower()
+    assert not r["value"].strip().startswith("0")
+
+
+def test_readiness_rungs_covers_every_gate(monkeypatch, isolated_stores):
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "present")
+    from datetime import datetime, timezone
+
+    rungs = gen.readiness_rungs("WSSS", datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc))
+    labels = [r["label"] for r in rungs]
+    for expected in ("Gate 2", "Mode", "Gate 1", "Maturity", "Region", "Window", "Capacity"):
+        assert any(expected in lab for lab in labels), f"missing rung: {expected}"
+
+
+def test_readiness_gate2_unknown_renders_unknown_not_off(monkeypatch, isolated_stores):
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    from datetime import datetime, timezone
+
+    rungs = gen.readiness_rungs("WSSS", datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc))
+    gate2 = next(r for r in rungs if "Gate 2" in r["label"])
+    assert gate2["state"] == "unknown"
+    assert "cannot" in gate2["value"].lower()
+
+
+def test_readiness_maturity_says_when_it_is_an_override(monkeypatch, isolated_stores):
+    """Both live stations are mature only by MATURITY_OVERRIDE, and RCSS fails
+    the measured beats_market criterion. A bare 'mature' would misreport the
+    single most important caveat on the real-money track."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "present")
+    from datetime import datetime, timezone
+
+    rungs = gen.readiness_rungs("WSSS", datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc))
+    maturity = next(r for r in rungs if "Maturity" in r["label"])
+    assert "override" in (maturity["value"] + maturity["why"]).lower()
+
+
+def test_render_readiness_groups_by_region(monkeypatch, isolated_stores):
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "present")
+    from datetime import datetime, timezone
+
+    warnings = []
+    out = gen.render_readiness(
+        ["WSSS", "RCSS"], datetime(2026, 8, 26, 6, 0, tzinfo=timezone.utc), warnings
+    )
+    assert "asia" in out.lower()
+    assert "WSSS" in out and "RCSS" in out
