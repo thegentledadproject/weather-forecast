@@ -25,7 +25,7 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 # Mirrors generate_dashboard.py: unset, it's the real EC2 path; set, it
 # points at a local checkout so this script can be exercised off the box.
@@ -75,6 +75,7 @@ header .sub { margin:0 0 22px; color:var(--ink-2); font-size:14px; }
          margin-left:5px; border:1px solid var(--line); color:var(--ink-2); }
 .badge.veto { border-color:var(--bad); color:var(--bad); }
 .badge.fallback { border-color:var(--warn); color:var(--warn); }
+.badge.stale { border-color:var(--warn); color:var(--warn); }
 .rung { display:flex; gap:10px; align-items:baseline; padding:6px 0;
         border-bottom:1px solid var(--line); font-size:13px; }
 .rung:last-child { border-bottom:none; }
@@ -544,6 +545,46 @@ def ev_row_flags(row, max_entry_price, edge_ceiling_for):
 EV_DISPLAY_FLOOR = -0.10
 
 
+def age_phrase(seconds):
+    """'4m ago' / '17h ago' / '2d ago' -- coarse on purpose.
+
+    An EV snapshot's age is read to answer "is this still the market?", and
+    that question does not turn on minutes once the answer is hours.
+    """
+    secs = max(0, int(seconds))
+    if secs < 90:
+        return f"{secs}s ago"
+    if secs < 5400:
+        return f"{secs // 60}m ago"
+    if secs < 172800:
+        return f"{secs // 3600}h ago"
+    return f"{secs // 86400}d ago"
+
+
+def snapshot_staleness(target_date_str, local_today):
+    """A note when the snapshot targets a trading day that is no longer today,
+    or None when it is current.
+
+    WHY TARGET DATE RATHER THAN AGE. The engine only computes during entry
+    windows, so a snapshot is routinely many hours old and perfectly current
+    -- an age threshold would cry stale every afternoon. What actually makes
+    it stale is describing a market whose day has passed, and that is a
+    calendar comparison in the STATION's local time, not a duration.
+
+    Fail-soft: an unparseable or missing date yields no note. This decorates
+    a caption; it must never be the thing that costs the page a section.
+    """
+    if not target_date_str or local_today is None:
+        return None
+    try:
+        target = date.fromisoformat(str(target_date_str))
+    except (TypeError, ValueError):
+        return None
+    if target >= local_today:
+        return None
+    return f"targets {target}, but the local trading day is now {local_today}"
+
+
 def render_ev(icaos, bar, warnings):
     import config
 
@@ -608,14 +649,34 @@ def render_ev(icaos, bar, warnings):
                     f"{ev_row_flags(r, max_entry_price, edge_ceiling_for)}</td>"
                     "</tr>"
                 )
-            gen_at = str(snap.get("generated_at", ""))[11:16]
+            # Computed-at, with the DATE and an age. It previously rendered
+            # only "23:54 UTC", which reads as this morning when it is in fact
+            # yesterday -- the exact overclaim-by-omission this page exists to
+            # avoid, committed by the page itself.
+            raw_generated = str(snap.get("generated_at", "") or "")
+            when = html.escape(raw_generated[:16].replace("T", " ")) or "&mdash;"
+            try:
+                gen_dt = datetime.fromisoformat(raw_generated)
+                if gen_dt.tzinfo is None:
+                    gen_dt = gen_dt.replace(tzinfo=timezone.utc)
+                when += f" UTC <span class='sub'>{age_phrase(time.time() - gen_dt.timestamp())}</span>"
+            except (TypeError, ValueError):
+                pass
+
             target_date = snap.get("target_date")
             target_html = "&mdash;" if target_date is None else html.escape(str(target_date))
-            head = (f"<h3>{html.escape(icao)}</h3><p class='cap'>computed {html.escape(gen_at)} UTC "
+            try:
+                stale = snapshot_staleness(target_date, config.local_today(icao))
+            except Exception:  # noqa: BLE001 - a caption decoration, never a gate
+                stale = None
+            if stale:
+                target_html += f" <span class='badge stale'>stale</span>"
+            head = (f"<h3>{html.escape(icao)}</h3><p class='cap'>computed {when} "
                     f"&middot; target {target_html} "
                     f"&middot; {len(rows)} bucket/side row(s)"
                     + (f" &middot; {suppressed} below {EV_DISPLAY_FLOOR:.0%} net EV suppressed"
                        if suppressed else "")
+                    + (f" &middot; <b>{html.escape(stale)}</b>" if stale else "")
                     + "</p>")
             if not rows:
                 blocks.append(head + "<div class='empty'>the engine computed and produced no rows.</div>")

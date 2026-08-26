@@ -171,6 +171,23 @@ near-misses still render; only the noise goes. An UNPRICED row (net EV
 None) is never suppressed: "no quote" is a different fact from "deeply
 negative", and it is one worth seeing here.
 
+**Freshness is stated, not implied** (added 2026-08-27, same review of the
+live page). The caption originally rendered only a time-of-day -- "computed
+23:54 UTC" -- for a snapshot that was seventeen hours old. It reads as this
+morning. That is overclaim by omission, committed by the page whose whole
+argument is refusing to commit it.
+
+The caption now carries the full date and a coarse age ("17h ago"), and a
+snapshot targeting a trading day that has already passed gets a `stale`
+badge plus a sentence naming both dates.
+
+Staleness is judged on the TARGET DATE against the station's own
+`config.local_today()`, NOT on age. The engine only computes during entry
+windows, so a snapshot is routinely many hours old and perfectly current --
+an age threshold would cry stale every afternoon. What makes a snapshot
+stale is describing a market whose day has passed, and that is a calendar
+comparison in the station's local time, not a duration.
+
 The **slippage column was dropped** in the same change. Its value is
 already inside net EV, and once the extreme rows are gone the survivors'
 slippage is uniformly small -- a column of near-identical small numbers

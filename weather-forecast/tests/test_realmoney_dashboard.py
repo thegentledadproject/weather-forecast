@@ -1113,3 +1113,84 @@ def test_render_ev_has_no_slip_column(tmp_path, monkeypatch):
     assert "Slip" not in out
     for kept in ("Bucket", "Side", "Model p", "Mkt price", "Raw edge", "Net EV/$"):
         assert kept in out, f"lost column: {kept}"
+
+
+# --- EV snapshot staleness ---------------------------------------------------
+# The caption used to render only "23:54 UTC", which reads as this morning when
+# it is in fact yesterday. Staleness is judged on the TARGET DATE, not on age:
+# the engine only computes during entry windows, so a snapshot is routinely
+# many hours old and perfectly current.
+
+
+def test_age_phrase_scales_from_seconds_to_days():
+    gen = load_gen()
+    assert gen.age_phrase(30) == "30s ago"
+    assert gen.age_phrase(600) == "10m ago"
+    assert gen.age_phrase(3600 * 17) == "17h ago"
+    assert gen.age_phrase(86400 * 3) == "3d ago"
+
+
+def test_age_phrase_never_reports_the_future_as_negative():
+    """Clock skew between the writer and this process must not print '-3s ago'."""
+    gen = load_gen()
+    assert gen.age_phrase(-42) == "0s ago"
+
+
+def test_snapshot_staleness_none_when_current():
+    import datetime as dt
+    gen = load_gen()
+    assert gen.snapshot_staleness("2026-08-27", dt.date(2026, 8, 27)) is None
+
+
+def test_snapshot_staleness_none_when_target_is_ahead():
+    """A snapshot computed after local midnight targets tomorrow. Not stale."""
+    import datetime as dt
+    gen = load_gen()
+    assert gen.snapshot_staleness("2026-08-28", dt.date(2026, 8, 27)) is None
+
+
+def test_snapshot_staleness_flags_a_past_trading_day():
+    import datetime as dt
+    gen = load_gen()
+    note = gen.snapshot_staleness("2026-08-26", dt.date(2026, 8, 27))
+    assert note is not None
+    assert "2026-08-26" in note and "2026-08-27" in note
+
+
+def test_snapshot_staleness_is_fail_soft_on_bad_input():
+    import datetime as dt
+    gen = load_gen()
+    assert gen.snapshot_staleness(None, dt.date(2026, 8, 27)) is None
+    assert gen.snapshot_staleness("not-a-date", dt.date(2026, 8, 27)) is None
+    assert gen.snapshot_staleness("2026-08-26", None) is None
+
+
+def test_render_ev_caption_carries_the_date_and_age(tmp_path, monkeypatch):
+    """The bug this fixes: a 17-hour-old table captioned '23:54 UTC' reads as
+    this morning."""
+    gen = load_gen()
+    _write(tmp_path, monkeypatch, gen, [_row(32, 0.02)])
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "2026-08-26 05:01" in out      # full date, not a bare time-of-day
+    assert "ago</span>" in out            # and an age
+
+
+def test_render_ev_flags_a_stale_snapshot(tmp_path, monkeypatch):
+    import datetime as dt
+    gen = load_gen()
+    _write(tmp_path, monkeypatch, gen, [_row(32, 0.02)])   # targets 2026-08-26
+    import config
+    monkeypatch.setattr(config, "local_today", lambda station=None: dt.date(2026, 8, 27))
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "badge stale" in out
+    assert "the local trading day is now 2026-08-27" in out
+
+
+def test_render_ev_does_not_flag_a_current_snapshot(tmp_path, monkeypatch):
+    import datetime as dt
+    gen = load_gen()
+    _write(tmp_path, monkeypatch, gen, [_row(32, 0.02)])   # targets 2026-08-26
+    import config
+    monkeypatch.setattr(config, "local_today", lambda station=None: dt.date(2026, 8, 26))
+    out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
+    assert "badge stale" not in out
