@@ -644,4 +644,67 @@ def test_full_render_survives_a_broken_section(tmp_path, monkeypatch, isolated_s
     page = out.read_text(encoding="utf-8")
     assert "Render warnings" in page
     assert "synthetic failure" in page
-    assert "Readiness" in page  # the other sections still rendered
+    # "Readiness" alone proves nothing -- _section's OWN failure branch
+    # renders "<title> unavailable", so the heading is in the page whether
+    # the builder succeeded or failed. Assert on a rung only a successful
+    # render produces, and rule out the failure placeholder by name.
+    assert "Gate 2 (process)" in page  # a real readiness rung actually rendered
+    assert "Readiness unavailable" not in page
+
+
+def test_full_render_survives_a_broken_render_page(tmp_path, monkeypatch, isolated_stores):
+    """render_page() itself is called bare in main() -- nothing may raise out
+    of main(), including from the final assembly step, not just the four
+    section builders."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+
+    def boom(sections, warnings):
+        raise RuntimeError("render_page synthetic failure")
+
+    monkeypatch.setattr(gen, "render_page", boom)
+    out = tmp_path / "realmoney.html"
+    assert gen.main(["--out", str(out)]) == 0
+    page = out.read_text(encoding="utf-8")
+    assert "render_page synthetic failure" in page
+
+
+def test_full_render_survives_a_non_numeric_ev_bar(tmp_path, monkeypatch, isolated_stores):
+    """The EV caption's f-string is built as a call argument, BEFORE
+    _section's try is ever entered -- a non-numeric min_net_ev must not
+    escape through the very mechanism meant to guard sections."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(gen, "active_window", lambda minute, windows: {
+        "start_minute": 0, "end_minute": 1440, "interval_min": 5,
+        "mode": "primary", "min_net_ev": "not-a-number", "description": "test window",
+    })
+    out = tmp_path / "realmoney.html"
+    assert gen.main(["--out", str(out)]) == 0
+    page = out.read_text(encoding="utf-8")
+    assert "Edge and EV" in page
+    assert "no entry window currently open" in page
+    assert "EV bar caption formatting failed" in page  # surfaced via Render warnings
+
+
+def test_full_render_ev_caption_names_the_station_the_bar_came_from(tmp_path, monkeypatch, isolated_stores):
+    """The bar is computed from ONE station's local window (icaos[0]) but
+    captions a table covering every live station. Overclaiming by omission:
+    the caption must name which station's window the number came from."""
+    gen = load_gen()
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(gen, "active_window", lambda minute, windows: {
+        "start_minute": 0, "end_minute": 1440, "interval_min": 5,
+        "mode": "primary", "min_net_ev": 0.08, "description": "test window",
+    })
+    out = tmp_path / "realmoney.html"
+    assert gen.main(["--out", str(out)]) == 0
+    page = out.read_text(encoding="utf-8")
+    assert "8%" in page
+    # sorted(config.LIVE_TRADING_STATIONS) == ["RCSS", "WSSS"], so icaos[0] is RCSS.
+    # Captions are inserted into render_page raw (they already carry HTML
+    # entities like &mdash;), so the apostrophe is not re-escaped.
+    assert "RCSS's active-window bar" in page

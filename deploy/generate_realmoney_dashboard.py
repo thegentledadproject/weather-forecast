@@ -788,6 +788,24 @@ def main(argv=None):
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"EV bar undetermined: {exc}")
 
+    # The dynamic half of this caption is built here, OUTSIDE _section's try,
+    # because it is evaluated as a call argument before _section is ever
+    # entered -- a format failure on `bar` would otherwise kill main() through
+    # the very mechanism meant to prevent that. Guarded and named to the one
+    # station it actually describes: `bar` comes from icaos[0]'s own local
+    # window, not a threshold shared by every live station.
+    ev_caption = ("Every bucket/side the engine computed, unfiltered &mdash; including rows "
+                  "under the bar, with no entry window currently open.")
+    if bar is not None:
+        try:
+            ev_caption = (
+                "Every bucket/side the engine computed, unfiltered &mdash; including rows "
+                f"under the bar, which is {bar:.0%} &mdash; {html.escape(icaos[0])}'s active-window "
+                "bar; another live station in a different timezone may be under a different one."
+            )
+        except (TypeError, ValueError) as exc:
+            warnings.append(f"EV bar caption formatting failed: {exc}")
+
     _section(
         sections, warnings, "Readiness",
         "Could a real order open right now. Rungs are in the order the executor applies them. "
@@ -798,9 +816,7 @@ def main(argv=None):
     )
     _section(
         sections, warnings, "Edge and EV",
-        "Every bucket/side the engine computed, unfiltered &mdash; including rows under the bar, "
-        + (f"which is {bar:.0%} in the active window." if bar is not None
-           else "with no entry window currently open."),
+        ev_caption,
         lambda: render_ev(icaos, bar, warnings),
     )
     _section(
@@ -816,7 +832,19 @@ def main(argv=None):
         lambda: render_orders(args.orders, warnings),
     )
 
-    page = render_page(sections, warnings)
+    try:
+        page = render_page(sections, warnings)
+    except Exception as exc:  # noqa: BLE001 - nothing may raise out of main()
+        warnings.append(f"render_page failed: {exc}")
+        items = "".join(f"<li>{html.escape(str(w))}</li>" for w in warnings)
+        page = (
+            "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+            "<title>polyweather -- real money</title></head><body>"
+            "<h1>Real-money stations</h1>"
+            "<p>The page renderer itself failed; only the warnings below are known.</p>"
+            f"<ul>{items}</ul></body></html>"
+        )
+
     try:
         with open(args.out, "w", encoding="utf-8") as fh:
             fh.write(page)
