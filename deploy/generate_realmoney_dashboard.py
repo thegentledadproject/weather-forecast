@@ -801,7 +801,7 @@ def main(argv=None):
             ev_caption = (
                 "Every bucket/side the engine computed, unfiltered &mdash; including rows "
                 f"under the bar, which is {bar:.0%} &mdash; {html.escape(icaos[0])}'s active-window "
-                "bar; another live station in a different timezone may be under a different one."
+                "bar. Each station's own bar is on its Window rung, on the Readiness card above."
             )
         except (TypeError, ValueError) as exc:
             warnings.append(f"EV bar caption formatting failed: {exc}")

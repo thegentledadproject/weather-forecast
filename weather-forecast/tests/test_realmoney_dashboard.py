@@ -708,3 +708,7 @@ def test_full_render_ev_caption_names_the_station_the_bar_came_from(tmp_path, mo
     # Captions are inserted into render_page raw (they already carry HTML
     # entities like &mdash;), so the apostrophe is not re-escaped.
     assert "RCSS's active-window bar" in page
+    # The caption must not presuppose a timezone spread among live stations
+    # that does not exist -- it points to the per-station rung instead.
+    assert "different timezone" not in page
+    assert "Window rung" in page
