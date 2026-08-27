@@ -73,6 +73,7 @@ from typing import Dict, List, Optional
 from models import CalibratedEstimate, MarketQuote, EVResult
 from probability import bucket_probabilities
 from clients import market_client
+import bucket_axis
 import config
 import market_discovery
 
@@ -228,7 +229,12 @@ def compute_ev_table(
     so callers can see what couldn't be evaluated this cycle.
     """
     if model_probs is None:
-        model_probs = {b.bucket_c: b.probability for b in bucket_probabilities(estimate)}
+        model_probs = {
+            b.bucket_c: b.probability
+            for b in bucket_probabilities(
+                estimate, axis=bucket_axis.for_station(config.get_station(estimate.station_icao))
+            )
+        }
     if quotes is None:
         quotes = fetch_market_quotes(token_map)
 
@@ -438,7 +444,7 @@ def run_for_station_with_map(
     model_probs = {
         b.bucket_c: b.probability
         for b in bucket_probabilities(
-            estimate, bucket_min, bucket_max, edge_mode=station.bucket_edge_mode
+            estimate, bucket_min, bucket_max, axis=bucket_axis.for_station(station)
         )
     }
 

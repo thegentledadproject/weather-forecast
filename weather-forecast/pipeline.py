@@ -29,6 +29,7 @@ clients/* (local)
 
 from datetime import date, datetime, timezone
 
+import bucket_axis
 import config
 from calibration import calibrate
 from probability import bucket_probabilities, most_likely_bucket
@@ -133,7 +134,7 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
         estimate,
         station.bucket_min_c,
         station.bucket_max_c,
-        edge_mode=station.bucket_edge_mode,
+        axis=bucket_axis.for_station(station),
     )
     top_bucket = most_likely_bucket(buckets)
     same_day_signal = gather_same_day_signal(station)

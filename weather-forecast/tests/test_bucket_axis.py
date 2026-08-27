@@ -149,3 +149,68 @@ class TestStationConfigCarriesTheAxis:
         axis = bucket_axis.for_station(st)
         assert axis == BucketAxis(unit="F", step=2, edge_mode="half_up")
         assert not axis.is_default
+
+
+class TestProbabilityIsAxisAware:
+    """
+    The highest-risk failure in this design is a DEFAULTED axis, not a wrong
+    one. A missed call site prices a Fahrenheit market on a Celsius grid:
+    all 11 buckets sit ~40 degrees above the distribution, the tail fold puts
+    ~1.0 on the lowest and ~0.0 on the other ten, and ten model_prob-0.0
+    buckets are ten NO sides at ~0.20 raw edge -- under MAX_PLAUSIBLE_RAW_EDGE,
+    through every gate. It would size ten trades per cycle per station.
+    """
+
+    def _estimate(self, icao, mean=26.1, sd=1.0):
+        from datetime import date
+        from models import CalibratedEstimate
+
+        return CalibratedEstimate(
+            station_icao=icao, target_date=date(2026, 8, 27),
+            central_estimate_c=mean, std_dev_c=sd, monsoon_phase="unknown",
+        )
+
+    def test_celsius_station_is_unchanged_when_no_axis_is_passed(self):
+        import probability
+
+        est = self._estimate("WSSS")
+        got = probability.bucket_probabilities(est, 27, 37)
+        assert [b.bucket_c for b in got] == list(range(27, 38))
+
+    def test_fahrenheit_probabilities_are_computed_on_the_f_grid(self):
+        import probability
+
+        axis = BucketAxis(unit="F", step=2)
+        est = self._estimate("KLGA", mean=26.1, sd=1.0)
+        got = probability.bucket_probabilities(est, 68, 88, axis=axis)
+
+        assert [b.bucket_c for b in got] == [
+            68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88
+        ]
+        assert sum(b.probability for b in got) == pytest.approx(1.0, abs=1e-3)
+        # 26.1C is 78.98F, so the mode must be the "78-79F" bucket.
+        assert max(got, key=lambda b: b.probability).bucket_c == 78
+
+    def test_it_raises_rather_than_pricing_an_f_market_on_a_c_grid(self, monkeypatch):
+        import config
+        import probability
+        from models import StationConfig
+
+        st = StationConfig(
+            icao="KLGA", display_name="LaGuardia", country="United States",
+            lat=40.777, lon=-73.872, wunderground_slug="us/new-york/KLGA",
+            long_term_normal_max_c=28.0, official_client_key="wwis",
+            polymarket_city_slug="nyc", bucket_unit="F", bucket_step=2,
+        )
+        monkeypatch.setitem(config.STATIONS, "KLGA", st)
+
+        with pytest.raises(ValueError, match="axis"):
+            probability.bucket_probabilities(self._estimate("KLGA"), 68, 88)
+
+    def test_an_unregistered_station_still_defaults(self):
+        # Station-agnostic callers and old tests pass estimates for stations
+        # that may not be registered. Those keep the legacy default.
+        import probability
+
+        got = probability.bucket_probabilities(self._estimate("NOPE"), 27, 37)
+        assert len(got) == 11
