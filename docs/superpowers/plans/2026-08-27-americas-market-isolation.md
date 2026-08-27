@@ -990,11 +990,14 @@ _C_UNIT_RE = re.compile(r"°\s*C", re.IGNORECASE)
 _OR_BELOW_RE = re.compile(r"or\s+(below|lower|less)", re.IGNORECASE)
 _OR_ABOVE_RE = re.compile(r"or\s+(above|higher|more)", re.IGNORECASE)
 
-# Plausibility band per unit. The Celsius floor drops to -30 because Toronto
-# and Buenos Aires both run below 5°C, and the old justification ("every
-# registered city's live window sits inside 25..40") stopped being true when
-# Europe was registered.
-_PLAUSIBLE_BAND = {"C": (-30, 55), "F": (-20, 130)}
+# Plausibility band per unit. The Celsius FLOOR drops from 5 to -30 because
+# Toronto and Buenos Aires both run below 5°C, and the old justification
+# ("every registered city's live window sits inside 25..40") stopped being
+# true when Europe was registered. The Celsius CEILING stays at 50, exactly
+# as it was: its job is rejecting a year ("2026°") and it still does that.
+# Widening a guard nobody asked to widen is how a real bucket veto turns
+# into a phantom edge.
+_PLAUSIBLE_BAND = {"C": (-30, 50), "F": (-20, 130)}
 
 # Kept as module-level names because tests and other modules read them.
 MIN_PLAUSIBLE_BUCKET_C, MAX_PLAUSIBLE_BUCKET_C = _PLAUSIBLE_BAND["C"]
@@ -1325,8 +1328,8 @@ class TestSettledBucketsAreSelfDescribing:
         import config
         import storage
 
+        # No init step: storage._connect() creates the schema on first use.
         monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.db"))
-        storage.init_db()
         storage.save_settled_bucket(
             "KLGA", date(2026, 8, 27), 78, 68, 88, "metar_daily_max",
             bucket_unit="F", bucket_step=2,
@@ -1340,7 +1343,6 @@ class TestSettledBucketsAreSelfDescribing:
         import storage
 
         monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.db"))
-        storage.init_db()
         storage.save_settled_bucket(
             "WSSS", date(2026, 8, 27), 31, 27, 37, "metar_daily_max",
         )
