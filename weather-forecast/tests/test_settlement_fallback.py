@@ -370,3 +370,122 @@ def test_the_mechanism_itself_the_clamp_decides_the_winner():
     # RJTT 2026-08-08, 34.0C. Live event 22-32 vs config's stale 26-36.
     assert resolution.bucket_for_temp(34.0, 22, 32, "half_up") == 32
     assert resolution.bucket_for_temp(34.0, 26, 36, "half_up") == 34
+
+
+class TestClosesFromTheRecordedMarketSettlement:
+    """
+    SECOND TIER, added 2026-08-27. VHHH settles on HKO's CLMMAXT extract,
+    which publishes a month at a time weeks late, so a VHHH position whose
+    book is unseeded before a resolved price is read has no settlement
+    reading for ~six weeks. Three such positions ($14.02) sat open for up
+    to six days with the answer already in storage.settled_buckets.
+
+    The tier above still wins where it exists; these only fire when it is
+    absent. THE REFUSAL STILL MUST NOT REGRESS -- when neither tier can
+    say who won, the position stays open.
+    """
+
+    def _no_reading(self, monkeypatch):
+        _observations(monkeypatch, [])
+
+    def _settled(self, monkeypatch, record):
+        monkeypatch.setattr(
+            storage, "load_settled_buckets",
+            lambda icao: {} if record is None else {SETTLED_DAY: record},
+        )
+
+    def test_a_losing_bucket_settles_at_zero(self, monkeypatch):
+        # VHHH 2026-08-21: market settled bucket 31, position held 32 YES.
+        _dead_book(monkeypatch)
+        self._no_reading(monkeypatch)
+        self._settled(monkeypatch, (31, 27, 37))
+        closed = _capture_closes(monkeypatch)
+
+        d = position_manager._close_from_settlement_source(
+            _pos(bucket_c=32, side="YES"), gamma_closed=True)
+        assert d is not None and d.current_price == 0.0
+        assert closed[0][2:] == ("closed_resolution", "market_resolved")
+
+    def test_the_winning_bucket_settles_at_par(self, monkeypatch):
+        _dead_book(monkeypatch)
+        self._no_reading(monkeypatch)
+        self._settled(monkeypatch, (31, 27, 37))
+        closed = _capture_closes(monkeypatch)
+
+        d = position_manager._close_from_settlement_source(
+            _pos(bucket_c=31, side="YES"), gamma_closed=True)
+        assert d is not None and d.current_price == 1.0
+
+    def test_a_NO_leg_inverts(self, monkeypatch):
+        _dead_book(monkeypatch)
+        self._no_reading(monkeypatch)
+        self._settled(monkeypatch, (31, 27, 37))
+        _capture_closes(monkeypatch)
+
+        d = position_manager._close_from_settlement_source(
+            _pos(bucket_c=32, side="NO"), gamma_closed=True)
+        assert d is not None and d.current_price == 1.0
+
+    def test_the_observation_record_still_wins_where_it_exists(self, monkeypatch):
+        # Preference by authority, not by convenience: the reading is the
+        # record the market resolves against, so a station that has one
+        # must not start settling off the exchange instead.
+        _dead_book(monkeypatch)
+        _observations(monkeypatch, [_reading(31.0)])
+        self._settled(monkeypatch, (35, 27, 37))   # would disagree, and must not be consulted
+        _capture_closes(monkeypatch)
+
+        d = position_manager._close_from_settlement_source(
+            _pos(bucket_c=31, side="YES"), gamma_closed=True)
+        assert d is not None and d.current_price == 1.0   # 31.0C -> bucket 31, not 35
+
+    def test_no_reading_and_no_settlement_still_refuses(self, monkeypatch):
+        _dead_book(monkeypatch)
+        self._no_reading(monkeypatch)
+        self._settled(monkeypatch, None)
+        closed = _capture_closes(monkeypatch)
+
+        assert position_manager._close_from_settlement_source(
+            _pos(), gamma_closed=True) is None
+        assert closed == []
+
+    def test_a_bucket_outside_the_recorded_event_refuses(self, monkeypatch):
+        # A recorded settlement describes ONE event. A position whose
+        # bucket falls outside that window is not the same market, and its
+        # payout cannot be read across.
+        _dead_book(monkeypatch)
+        self._no_reading(monkeypatch)
+        self._settled(monkeypatch, (31, 27, 37))
+        closed = _capture_closes(monkeypatch)
+
+        assert position_manager._close_from_settlement_source(
+            _pos(bucket_c=40), gamma_closed=True) is None
+        assert closed == []
+
+    def test_a_storage_failure_settles_nothing(self, monkeypatch):
+        def _boom(icao):
+            raise sqlite_error("database is locked")
+
+        _dead_book(monkeypatch)
+        self._no_reading(monkeypatch)
+        monkeypatch.setattr(storage, "load_settled_buckets", _boom)
+        closed = _capture_closes(monkeypatch)
+
+        assert position_manager._close_from_settlement_source(
+            _pos(), gamma_closed=True) is None
+        assert closed == []
+
+    def test_gamma_saying_OPEN_is_still_never_overridden(self, monkeypatch):
+        # The new tier must not become a way around the one guard that
+        # keeps a tradeable market from being settled on stale evidence.
+        _dead_book(monkeypatch)
+        self._no_reading(monkeypatch)
+        self._settled(monkeypatch, (31, 27, 37))
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: False)
+        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [_pos()])
+        closed = _capture_closes(monkeypatch)
+
+        for _ in range(position_manager.UNMONITORABLE_CYCLES_WARN + 1):
+            position_manager.check_and_exit_positions()
+
+        assert closed == []

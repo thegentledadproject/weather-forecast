@@ -650,6 +650,81 @@ def _event_bounds(position: Position, station) -> Optional[tuple]:
     return market_discovery.derive_bucket_bounds(token_map)
 
 
+def _close_from_recorded_settlement(
+    position: Position, station, gamma_closed: Optional[bool]
+) -> Optional[ExitDecision]:
+    """
+    Close a resolved position from the bucket the MARKET settled into,
+    when no settlement-grade reading exists for its date.
+
+    WHY THIS TIER EXISTS. The reading above is preferred and stays first:
+    it is the record the market resolves against, and for twelve stations
+    it lands the next day. VHHH is the exception that made this necessary.
+    Its resolution_grade_source is HKO's CLMMAXT extract, which publishes a
+    whole month at a time weeks in arrears, so a VHHH position whose book
+    is unseeded before the daemon reads a resolved price has NO settlement
+    reading for roughly six weeks. Measured 2026-08-27: three such
+    positions ($14.02) had been sitting open for up to six days, warning
+    every cycle, with the answer already in the database.
+
+    THIS IS NOT A RELAXATION OF "NEVER GUESS". storage.settled_buckets
+    holds a bucket only where exactly one of the event's YES tokens read
+    >= 0.90 and every other read <= 0.10 -- see bucket_bias.settled_bucket,
+    which refuses anything less and never writes today. That is a recorded
+    observation of what the exchange paid, which is if anything a more
+    direct authority on a position's payout than the thermometer the
+    exchange consulted. The 2026-08-11 WSSS live position was cleared by
+    hand on exactly this reasoning: winner taken from exchange settlement
+    because no settlement-grade reading for the date existed yet.
+
+    NO BOUNDS DERIVATION IS NEEDED, and that is the second thing this
+    fixes. The tier above must map a TEMPERATURE onto a bucket, so it needs
+    the event's bounds and refuses when discovery cannot supply them --
+    itself a way positions strand. A recorded settlement is already
+    expressed in the event's own bucket space, so there is nothing to
+    clamp and nothing to get wrong. The bounds are still checked, but only
+    to confirm this position belongs to the event that was recorded.
+    """
+    if station is None:
+        return None
+    try:
+        record = storage.load_settled_buckets(position.station_icao).get(position.target_date)
+    except Exception as exc:  # noqa: BLE001 - a read failure must not close anything
+        print(
+            f"[position_manager] {position.position_id}: could not read recorded settlements "
+            f"({type(exc).__name__}) -- not settling from the market record this cycle."
+        )
+        return None
+    if record is None:
+        return None
+
+    winning_bucket, bucket_min, bucket_max = record
+
+    # The recorded settlement describes one event. If this position's
+    # bucket is not in that event's window, the two are not about the same
+    # market and the payout cannot be read across -- refuse rather than
+    # settle a position against a stranger's resolution.
+    if not (bucket_min <= position.bucket_c <= bucket_max):
+        print(
+            f"[position_manager] WARNING: {position.position_id} holds bucket "
+            f"{position.bucket_c}C but the recorded settlement for {position.target_date} "
+            f"covers {bucket_min}-{bucket_max}C. These are not the same event -- refusing to "
+            f"settle across them, leaving the position OPEN (${position.size_usd:.2f} at stake)."
+        )
+        return None
+
+    exit_price = settlement.resolution_exit_price(
+        position.side, position.bucket_c, winning_bucket,
+    )
+    basis = (
+        f"no book left to read and no settlement-grade reading for {position.target_date} "
+        f"(source {getattr(station, 'resolution_grade_source', '?')} has not published it); "
+        f"settled from the MARKET's own resolution -> winning bucket {winning_bucket}C, "
+        f"so {position.bucket_c}C {position.side} pays {exit_price:.1f}"
+    )
+    return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)
+
+
 def _close_from_settlement_source(position: Position, gamma_closed: Optional[bool]) -> Optional[ExitDecision]:
     """
     Close a resolved position using the station's own settlement-grade
@@ -669,16 +744,27 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
     on, and the same one Polymarket resolves against.
 
     "NEVER GUESS" IS PRESERVED, and narrowed rather than weakened: this
-    returns None -- leaving the position open and loud -- whenever the
-    settlement-grade observation for that date is missing. A daily maximum
-    only exists once the day is over and the source published it, so the
-    observation's existence is itself the evidence that the day is done.
+    returns None -- leaving the position open and loud -- whenever neither
+    evidence tier can say who won. A daily maximum only exists once the day
+    is over and the source published it, so the observation's existence is
+    itself the evidence that the day is done.
+
+    TWO TIERS, in this order:
+      1. the station's own settlement-grade reading (below), the record the
+         market resolves against;
+      2. failing that, the bucket the market itself settled into
+         (_close_from_recorded_settlement), for stations whose record
+         publishes too late to be useful.
+    Both are recorded facts. Neither is a guess, and if both are absent
+    this still refuses.
     """
+    station = _station_for(position)
     obs = _settlement_grade_reading(position)
     if obs is None:
-        return None
-
-    station = _station_for(position)
+        # SECOND TIER: what the exchange paid, when the record it paid
+        # against has not published yet. Preferred order, not preference
+        # by convenience -- see _close_from_recorded_settlement.
+        return _close_from_recorded_settlement(position, station, gamma_closed)
 
     # BOUNDS COME FROM THE EVENT, NEVER FROM config.STATIONS.
     #
