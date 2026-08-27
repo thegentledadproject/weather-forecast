@@ -1178,12 +1178,29 @@ MAX_ENTRY_PRICE = 0.75
 # its error in either neighbouring band, while the market is only +0.041
 # hot.
 #
-# WHY IT IS STILL OFF. The <0.15 band next door shows what happens when an
-# observational read drives a rule change: the same 2026-08-27 analysis
-# said its take-profit was leaking ~$150 over 38 trades, and the replay
-# that controls for entry selection said REMOVING that take-profit doubles
-# the cohort's loss (-18.6% -> -37.6%). Turn this on only against a replay
-# that shows the same ordering per station and across windows.
+# WHY IT IS STILL OFF -- AND NOW THAT IS A MEASUREMENT, NOT A CAUTION.
+# Replayed 2026-08-06..08-24 across the 9 UTC+8 stations, off versus on:
+#
+#              n    stake      pnl     ret   median
+#   OFF      154  2563.29   -87.78   -3.4%   -42.6%
+#   BLOCK    127  2362.48   -55.44   -2.3%   -55.3%
+#
+# Pooled it looks like a win, and reading only that line is the trap. The
+# blocked band was -$74.26 on its own, but total P&L improved by only
+# $32.34: capital freed by the block flowed into the other bands and lost
+# ~$42 there (<0.15 went +$2.08 -> -$10.46, >=0.25 went -$15.60 ->
+# -$44.98). "This band loses $74 so blocking saves $74" is wrong by more
+# than half. The pooled MEDIAN also gets worse, -42.6% -> -55.3%.
+#
+# THE PER-STATION ORDERING DOES NOT HOLD, which is the project's own bar
+# for acting on a replayed distance: better at WSSS, WMKK, VHHH, ZSPD,
+# ZBAA; WORSE at RCSS, ZGGG (-28.2% -> -65.0%), ZGSZ. Five-three on
+# per-station n of 6-34 is not a result.
+#
+# So the held-to-settlement argument for the band survives as an argument
+# about the TOKENS, and it still does not survive contact with a portfolio
+# that reallocates the freed capital. Do not turn this on without a replay
+# whose ordering holds per station AND across windows.
 ENTRY_PRICE_BLOCK_BAND = None
 
 
