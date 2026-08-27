@@ -2212,6 +2212,87 @@ COLLECTION_GATE_OVERRIDE_STATIONS = {
 }
 
 
+# --- Per-station operator STOP -------------------------------------------
+# The inverse of the two override sets above: a station listed here opens
+# nothing, whatever every gate above it says. It is the only entry in this
+# file that can make a station stop trading on the operator's judgement
+# rather than on a measurement, and it is deliberately the simplest thing
+# in the file -- a name in a set, checked first, with no structural guard
+# and no conditions.
+#
+# NO GUARD, BECAUSE THE FAILURE DIRECTION IS SAFE. Both override sets
+# above needed elaborate self-disarming conditions because they make
+# trading MORE likely, so a stale entry costs money. This one can only
+# make trading less likely, so a stale entry costs a missed trade and
+# nothing else. Guarding it would be strictly worse: every condition is
+# another way for a stop the operator asked for to quietly not apply.
+#
+# CHECKED BEFORE BOTH OVERRIDE SETS, for the same reason. An operator who
+# adds a station here and forgets it is also on
+# COLLECTION_GATE_OVERRIDE_STATIONS should get the stop, not the
+# exemption. Order is the whole mechanism.
+#
+# THIS DOES NOT CLOSE ANYTHING ALREADY OPEN. collection_only_reason() is
+# on the ENTRY path only; position_manager keeps managing open positions,
+# stops and take-profits keep firing, and settlement still resolves. A
+# station added here goes quiet as its book runs off, which is the
+# intended behaviour -- flattening a book is an execution decision and
+# does not belong in a config constant.
+#
+# COLLECTION CONTINUES. Forecasts, observations and settled buckets keep
+# being ingested for a station listed here, so its bias, its error spread
+# and its maturity all keep accruing and the decision stays re-checkable
+# against data gathered after it was made. That is the difference between
+# this and deleting the station from STATIONS.
+#
+# --- RPLL, added 2026-08-27 -------------------------------------------
+# Manila's forecast-error spread is 1.529C (n=20) against a bucket width of
+# 1.0C -- the widest in the registry, and wider than the thing it is being
+# asked to resolve. The consequence is not subtle: over 2026-08-21..26 the
+# model's modal bucket was wrong on 5 of 6 settled days, 9 of 12 entries
+# were on the cool side of the settled bucket, all 9 lost, and the station
+# returned -33.5% on $100.05 -- worst in the book by both measures, against
+# a Brier of 0.303 where the market scored 0.213.
+#
+# A spread sweep over 0.6-2.2C (the full config band and past both ends of
+# it) moved multiclass Brier by 0.023 total and left the modal bucket wrong
+# on 5 of 6 days at EVERY width. Re-screening the twelve real entries at
+# each width never produced a profitable set: the surviving legs settle at
+# -100% for every width from 0.8C up, and only widths above the 2.0C
+# ceiling -- i.e. "do not trade" expressed as a number -- open nothing.
+# So this is NOT a tuning problem with a setting that fixes it. A model
+# whose error distribution is 1.5x the bucket width cannot pick buckets,
+# and no width handed to the probability step changes that.
+#
+# WHY A STOP AND NOT A GATE. RPLL passes every existing gate cleanly: 21
+# bias pairs against a required 5, bias standard error 0.325C against a
+# required 0.50C. The gates measure whether the bias is known WELL, and
+# RPLL's is -- precisely, and it is corrected for. Nothing in the file
+# asks whether the residual after that correction is small enough to
+# resolve a 1C bucket, which is the question RPLL fails. Until there is a
+# measured gate for that (error spread against bucket width is the
+# obvious candidate, and RKSI 1.354 / RJTT 1.414 are the next two names it
+# would catch), the honest thing is a named stop with the number written
+# next to it rather than a threshold reverse-engineered to catch one
+# station.
+FORCE_COLLECTION_ONLY_STATIONS = {
+    "RPLL",
+}
+
+
+def force_collection_only(station_icao: str) -> bool:
+    """
+    Whether the operator has stopped `station_icao` from opening positions.
+
+    Unconditional by design -- see FORCE_COLLECTION_ONLY_STATIONS. There is
+    no registry lookup and no live/paper distinction, because an unknown
+    ICAO in this set should still stop that ICAO: the set is read as "do
+    not trade this name", and a typo that stops nothing would be a silent
+    no-op on a safety control.
+    """
+    return station_icao in FORCE_COLLECTION_ONLY_STATIONS
+
+
 def region_authorises_live_orders(region: str) -> bool:
     """
     Whether `region`'s real-money blast radius is anything but zero.

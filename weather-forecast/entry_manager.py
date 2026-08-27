@@ -413,6 +413,12 @@ def collection_only_reason(
     be the drift this purity was designed to prevent.
     Live always passes True.
 
+    config.FORCE_COLLECTION_ONLY_STATIONS runs in the opposite direction to
+    both override sets below and is checked BEFORE either of them: it is the
+    operator saying a station must not open, and an exemption further down
+    must not be able to answer it. It is also the only branch here that is
+    not a measurement, which is why it names itself in the reason string.
+
     config.COLLECTION_GATE_OVERRIDE_STATIONS is the STRONGER exemption:
     it skips this function's checks outright, observation count included,
     and it applies whether or not enforce_bias_quality was asked for. It
@@ -430,6 +436,20 @@ def collection_only_reason(
         source = config.get_station(station_icao).resolution_grade_source
     except KeyError:
         source = config.RESOLUTION_GRADE_OBSERVATION_SOURCE
+
+    # config.FORCE_COLLECTION_ONLY_STATIONS is the operator STOP, and it is
+    # checked before everything else in this function -- before the broken-read
+    # branch, before both override sets, and regardless of
+    # enforce_bias_quality. It is the one check here that is not a
+    # measurement: a station is listed because the operator decided it should
+    # not trade, so no gate below it can be the reason it trades anyway. See
+    # that constant for why it carries no guard of its own.
+    if config.force_collection_only(station_icao):
+        return (
+            f"Collection-only: {station_icao} is on config.FORCE_COLLECTION_ONLY_STATIONS -- "
+            f"stopped by operator decision, not by a gate. Still collecting forecasts, "
+            f"observations and settled buckets; open positions are unaffected."
+        )
 
     if obs_count is None:
         return (
