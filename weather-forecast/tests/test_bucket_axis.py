@@ -214,3 +214,43 @@ class TestProbabilityIsAxisAware:
 
         got = probability.bucket_probabilities(self._estimate("NOPE"), 27, 37)
         assert len(got) == 11
+
+
+class TestSettlementOnAFahrenheitAxis:
+    AXIS = BucketAxis(unit="F", step=2)
+    LO, HI = 68, 88
+
+    def test_celsius_reading_settles_into_the_right_f_bucket(self):
+        from backtest import resolution
+
+        # 26.1C -> 78.98F -> 79F -> "78-79F"
+        assert resolution.bucket_for_temp(
+            26.1, self.LO, self.HI, axis=self.AXIS
+        ) == 78
+
+    def test_it_never_returns_an_off_grid_key(self):
+        from backtest import resolution
+
+        grid = set(self.AXIS.keys(self.LO, self.HI))
+        t = -10.0
+        while t <= 45.0:
+            key = resolution.bucket_for_temp(t, self.LO, self.HI, axis=self.AXIS)
+            assert key in grid, f"{t}C produced off-grid key {key}"
+            t = round(t + 0.1, 1)
+
+    def test_bankers_rounding_would_disagree_on_the_displayed_degree(self):
+        # 22.5C is exactly 72.5F. floor(x+0.5) displays 73; round() displays
+        # 72. Pinned on the DISPLAYED degree because on the 68..88 window both
+        # land in the same bucket -- shift the window two degrees and they
+        # do not.
+        assert math.floor(72.5 + 0.5) == 73
+        assert round(72.5) == 72
+        assert self.AXIS.key_for_temp_c(22.5, self.LO, self.HI) == 72
+
+    def test_celsius_stations_are_untouched(self):
+        from backtest import resolution
+
+        assert resolution.bucket_for_temp(33.9, 27, 37, "floor") == 33
+        assert resolution.bucket_for_temp(33.9, 27, 37, "half_up") == 34
+        assert resolution.bucket_for_temp(-50.0, 27, 37, "half_up") == 27
+        assert resolution.bucket_for_temp(500.0, 27, 37, "half_up") == 37

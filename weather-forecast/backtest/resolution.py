@@ -40,6 +40,7 @@ import math
 from datetime import date, datetime, timedelta
 
 import config
+from bucket_axis import BucketAxis
 
 from backtest import settings
 
@@ -49,6 +50,8 @@ def bucket_for_temp(
     bucket_min: int = None,
     bucket_max: int = None,
     edge_mode: str = "half_up",
+    *,
+    axis: BucketAxis = None,
 ) -> int:
     """
     The resolution bucket a max temperature of `t` degrees C falls in,
@@ -80,14 +83,16 @@ def bucket_for_temp(
     The clamp mirrors the real market structure in both modes: the edge
     buckets are catch-alls ("25 or below", "35 or above"), which is also
     how probability.bucket_probabilities() folds the distribution's tails.
+
+    axis is the market's bucket axis; passing it supersedes edge_mode and
+    is REQUIRED for any market that is not Celsius whole-degree. `t` is
+    Celsius in every case -- the conversion into the market's unit happens
+    inside the axis, so no caller ever handles a Fahrenheit temperature.
     """
     lo = config.BUCKET_MIN_C if bucket_min is None else bucket_min
     hi = config.BUCKET_MAX_C if bucket_max is None else bucket_max
-    if edge_mode == "floor":
-        bucket = math.floor(t)
-    else:
-        bucket = math.floor(t + 0.5)
-    return max(lo, min(hi, bucket))
+    resolved = BucketAxis(edge_mode=edge_mode) if axis is None else axis
+    return resolved.key_for_temp_c(t, lo, hi)
 
 
 def observation_visible(obs_target_date: date, sim_local_dt: datetime) -> bool:

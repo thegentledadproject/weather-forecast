@@ -98,6 +98,7 @@ import config
 import storage
 import risk_manager
 import market_discovery
+import bucket_axis
 from clients import market_client
 from models import Position, ExitDecision
 import executor
@@ -805,7 +806,7 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
         obs.max_temp_c,
         bucket_min,
         bucket_max,
-        station.bucket_edge_mode,
+        axis=bucket_axis.for_station(station),
     )
     exit_price = settlement.resolution_exit_price(
         position.side, position.bucket_c, winning_bucket,

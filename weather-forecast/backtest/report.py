@@ -69,6 +69,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import bucket_axis
 import config
 import paper_trading_report
 import storage
@@ -221,7 +222,10 @@ def _brier_scores(run) -> Dict[str, Optional[float]]:
             continue  # not yet published (or never recorded) -- unscorable
 
         winning_bucket = resolution.bucket_for_temp(
-            observed_c, station.bucket_min_c, station.bucket_max_c, station.bucket_edge_mode
+            observed_c,
+            station.bucket_min_c,
+            station.bucket_max_c,
+            axis=bucket_axis.for_station(station),
         )
         outcome = resolution.resolution_exit_price(
             position.side, position.bucket_c, winning_bucket

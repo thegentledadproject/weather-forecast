@@ -91,6 +91,7 @@ import re
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
+import bucket_axis
 import config
 import risk_manager
 import storage
@@ -294,7 +295,7 @@ def hold_to_settlement(position: Position, settled: Dict[Tuple[str, str], float]
         return None, None, False
     station = config.STATIONS[position.station_icao]
     bucket = bucket_for_temp(temp, station.bucket_min_c, station.bucket_max_c,
-                             station.bucket_edge_mode)
+                             axis=bucket_axis.for_station(station))
     won = (bucket == position.bucket_c) if position.side == "YES" else (bucket != position.bucket_c)
     clamped = not (station.bucket_min_c < temp < station.bucket_max_c)
     payout = settlement_shares(position) * (1.0 if won else 0.0)
