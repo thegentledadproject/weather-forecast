@@ -682,9 +682,21 @@ Then replace the body's first three lines with:
 
 Leave the rest of the loop body unchanged.
 
-Note the deliberate asymmetry: a REGISTERED station's axis wins over
-`edge_mode`; an UNREGISTERED one falls back to `BucketAxis(edge_mode=edge_mode)`,
-which is exactly today's behaviour for station-agnostic callers and old tests.
+**CORRECTED during execution, 2026-08-27.** An earlier draft of this step said
+"a REGISTERED station's axis wins over `edge_mode`". That is wrong, and it
+breaks `tests/test_bucket_bounds_live.py::test_floor_mode_point_mass_below_half_up_mode`:
+VHHH is registered with `bucket_edge_mode="floor"`, so both of that test's
+calls collapse to the same result and the assertion dies. More importantly it
+violates the byte-for-byte constraint — `edge_mode=` is a parameter callers
+have controlled since before this branch, and redefining it is a behaviour
+change.
+
+The correct rule, and what is implemented: in the fallback branch the station
+supplies `unit` and `step`, and the CALLER's `edge_mode` argument supplies the
+edge mode. Fail-closed is unaffected, because `is_default` tests unit and step
+only — `edge_mode` cannot route around the raise. The four call sites below
+pass a full explicit axis, so they do get the station's own edge mode; the
+fallback never does.
 
 - [ ] **Step 4: Update the four call sites**
 
