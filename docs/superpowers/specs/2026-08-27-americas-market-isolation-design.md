@@ -86,7 +86,7 @@ Clean clone, no new mechanism:
 | Mechanism | Change |
 |---|---|
 | `StationConfig.region` | 15 entries say `"americas"` |
-| Five `REGION_*` dicts (`config.py:1632-1642`, `config.py:2275-2290`) | one new key each |
+| Five `REGION_*` dicts (`REGION_LIVE_MAX_CONCURRENT_POSITIONS`, `REGION_LIVE_MAX_TOTAL_EXPOSURE_USD`, `REGION_LIVE_MAX_ORDERS_PER_DAY`, `REGION_BANKROLL_USD`, `REGION_MAX_DAILY_EXPOSURE_USD`) | one new key each |
 | `region_bankroll_usd()` / `region_max_daily_exposure_usd()` | none -- they read the dicts |
 | `_live_budget_breach()` region filter | none |
 | `pooled_error_spread(region=...)` | none |
@@ -297,8 +297,22 @@ The Fahrenheit branch is new and is deliberately stricter:
   control.
 - An interior label must yield exactly `step` consecutive integers
   (`hi - lo == step - 1`); the key is `lo`. A label yielding a
-  non-consecutive pair is REJECTED, not guessed. This is what makes an
-  off-grid key structurally unconstructible.
+  non-consecutive pair is REJECTED, not guessed.
+
+**CORRECTED 2026-08-27, during implementation review.** An earlier draft
+claimed the consecutive-pair rule makes an off-grid key "structurally
+unconstructible". That is FALSE, and it matters because the claim was doing
+load-bearing work — it was the reason no further validation seemed necessary.
+If Polymarket ever listed odd-anchored pairs (`"69-70°F"`), the rule accepts
+them and returns key 69, which is off the even grid `68,70,…,88`. The parser
+alone does not close this. What closes it is `derive_bucket_bounds`'s
+separate anchor check (`lo % step != 0` → reject), added during
+implementation. The two guards are load-bearing for each other and neither
+is redundant: the parser rejects a mis-WIDTHED label, the anchor check
+rejects a mis-PHASED grid. Note the anchor check is itself an assumption —
+that a Fahrenheit grid is even-anchored, evidenced by one city — whose
+failure mode is fail-closed: an odd-anchored market is vetoed and logged,
+never mis-keyed.
 - `"... or below"` -> `n + 1 - step`. `"... or higher"` -> `n`.
 
 `derive_bucket_bounds(token_map, step=1)` replaces its contiguity test with
@@ -451,7 +465,12 @@ In scope because each fires before any Americas station could trade, and
 three of them fire on the four Celsius cities even if the Fahrenheit work
 were dropped entirely.
 
-**a. `SPREAD_CEILING_C = 2.0` becomes per-region** (`config.py:2413`).
+**a. `SPREAD_CEILING_C = 2.0` becomes per-region.** The constant lives in
+`config.py`, but the single place it is APPLIED is
+`calibration._clamp_spread()`, called from five points inside
+`estimate_std_dev()` -- which already has `station_icao` in scope. That
+makes the change a one-function edit rather than a sweep.
+
 The band is tuned on tropical stations whose day-to-day maximum barely
 moves. Continental North America and Southern-hemisphere winter routinely
 produce forecast-error spreads above 2.0°C, and config.py's own comment
