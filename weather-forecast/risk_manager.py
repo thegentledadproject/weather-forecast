@@ -8,26 +8,38 @@ live price movement -- independent of whether the underlying weather
 outcome has resolved yet.
 
 Two mechanisms, checked in priority order:
-  1. Hard stop-loss from entry. It does NOT always apply: two ENTRY-price
-     bands are exempt from it, config.LOTTERY_PRICE_THRESHOLD below and
-     config.STOP_EXEMPT_ABOVE_PRICE above, and as of 2026-08-24 it is also
-     skipped whenever the CURRENT price has fallen to config.MIN_EXIT_PRICE
-     or below, where selling is weakly dominated by holding. Within what
-     remains, no "let it run" logic overrides cutting a loss past this bar.
+  1. Hard stop-loss from entry. It does NOT always apply: entries below
+     config.LOTTERY_PRICE_THRESHOLD are exempt, and as of 2026-08-24 it is
+     also skipped whenever the CURRENT price has fallen to
+     config.MIN_EXIT_PRICE or below, where selling is weakly dominated by
+     holding. A third exemption for expensive entries
+     (config.STOP_EXEMPT_ABOVE_PRICE) ran 2026-08-20 to 08-27 and is now
+     switched off -- see below. Within what remains, no "let it run" logic
+     overrides cutting a loss past this bar.
   2. Fixed profit-take -- the only upside exit, and the one exit that
      applies at every entry price.
 
-THE STOP NOW COVERS ONE BAND, NOT EVERY POSITION (upper half added
-2026-08-20). Both exemptions come from the same finding read at its two
-ends: the stop is a price-noise filter, and it is only worth having where
-the noise it filters is smaller than the move it reacts to. Below 0.15
-the threshold distance is under Polymarket's 1-cent tick, so it fires on
-book wobble. At 0.45 and above the distance is large in cents but small
-against a bucket's intraday range before the day's maximum is set, so it
-fires on positions that go on to WIN -- measured at 33% precision against
-settlement at WMKK, versus 83% below 0.30, and falling monotonically with
-entry price across all 11 stations. config.STOP_EXEMPT_ABOVE_PRICE carries
-the full measurement, the sizing of what it buys, and its limits.
+THE UPPER CARVE-OUT IS OFF AGAIN (added 2026-08-20, REVERTED 2026-08-27).
+It came from the same finding as the lottery one read at the other end: the
+stop is a price-noise filter, worth having only where the noise it filters
+is smaller than the move it reacts to. Below 0.15 the threshold distance is
+under Polymarket's 1-cent tick, so it fires on book wobble. At 0.45 and
+above the distance is large in cents but small against a bucket's intraday
+range before the day's maximum is set, so it fires on positions that go on
+to WIN -- 45% precision post-deploy against 68-77% below 0.45, replicating
+the pre-deploy measurement.
+
+That argument survived contact with production. The P&L did not: over 21
+exempt positions and $255.95 of stake, restoring the stop was worth +$0.44.
+Its savings on correct fires almost exactly cancelled its cost on false
+ones. What decided the revert was variance -- the band's worst loss went
+from -$4.80 with the stop to -$16.76 without, and Kelly sizes UP exactly
+where the carve-out switched the stop off, so the coin-flip band held the
+biggest positions and none of the protection. config.STOP_EXEMPT_ABOVE_PRICE
+carries both measurements and what would justify turning it back on.
+
+The code path below is intact and reads the constant at call time, so
+re-enabling is a one-value change rather than a revert of a revert.
 
 Both tighten after the edge-decay hour (config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL,
 10:00 local) -- consistent with the edge-decay analysis: once the morning's
@@ -249,18 +261,17 @@ def evaluate_exit(
     is_lottery = position.entry_price < config.LOTTERY_PRICE_THRESHOLD
 
     # The mirror carve-out (config.STOP_EXEMPT_ABOVE_PRICE, 2026-08-20).
-    # Expensive entries skip the stop too, for the opposite reason: not
+    # Expensive entries skipped the stop too, for the opposite reason: not
     # that its distance is too small to mean anything, but that it is
     # large enough to be triggered by an ordinary intraday swing on a day
-    # whose maximum has not been set yet. Scored against settlement on
-    # the paper book, the stop's precision falls monotonically with entry
-    # price -- 83% below 0.30, 33% at or above 0.45 at WMKK -- so up here
-    # it fires on eventual WINNERS two times in three. The numbers, the
-    # mechanism and the limits are all in config.py above the constant.
+    # whose maximum has not been set yet. Up there the stop fires on
+    # eventual WINNERS more often than not -- 45% precision post-deploy.
     #
-    # Downside protection for these is unchanged in kind from the lottery
-    # case: resolution detection in position_manager still closes them,
-    # and MAX_ENTRY_PRICE still caps how much stake can be at risk.
+    # DORMANT since 2026-08-27: the constant is 1.01, above MAX_ENTRY_PRICE,
+    # so this evaluates False for every entry that can exist. It stays here
+    # rather than being deleted because the precision finding replicated and
+    # only the EXPOSURE half is missing; config.py above the constant has
+    # both measurements and the condition for turning it back on.
     is_stop_exempt_high = position.entry_price >= config.STOP_EXEMPT_ABOVE_PRICE
 
     # The third carve-out, and the ONLY one keyed on the CURRENT price rather

@@ -1,34 +1,44 @@
 """
 tests/test_stop_exempt_high.py
 
-The stop-loss carve-out's UPPER half (config.STOP_EXEMPT_ABOVE_PRICE).
+The stop-loss carve-out's UPPER half (config.STOP_EXEMPT_ABOVE_PRICE), which
+is currently DORMANT.
 
-risk_manager.evaluate_exit() has always exempted sub-LOTTERY_PRICE_THRESHOLD
-entries from the percentage stop. As of 2026-08-20 it also exempts entries at
-or above STOP_EXEMPT_ABOVE_PRICE, on a different and directly measured
-argument: scored against settlement on the paper book, the stop's precision
-falls monotonically with entry price -- 83% below 0.30 against 33% at or
-above 0.45 at WMKK -- so up there it fires on eventual winners two times in
-three. config.py carries the full measurement.
+It ran 2026-08-20 to 08-27: entries at or above 0.45 skipped the percentage
+stop, on stop precision measured against settlement -- 33% at or above 0.45
+versus 83% below 0.30 at WMKK, and the same monotone fall across all stations.
+Post-deploy the precision finding REPLICATED (45% against 68-77%) but the P&L
+did not follow: restoring the stop over 21 exempt positions and $255.95 of
+stake was worth +$0.44. It was reverted on variance -- the band's worst loss
+was -$16.76 without the stop against -$4.80 with it, and Kelly sizes up exactly
+where the carve-out switched protection off. config.py carries both numbers.
 
-Unlike the lottery take-profit knob, THIS ONE IS NOT A NO-OP: it changes live
-exits for every entry at or above 0.45, which on the WMKK book is nine of
-eighteen stops. These tests pin what changed, what deliberately did not, and
-the boundary -- 0.45 exempt, 0.44 not -- because a carve-out that is off by
-one tick is a different policy from the one that was measured.
+So these tests are in two halves, and the split is the point:
+
+  - THE MECHANISM, exercised at an explicitly-set threshold. It has to keep
+    working, because re-enabling is meant to be a one-value change and the
+    exposure work that would justify that is still open.
+  - THE SHIPPED DEFAULT, pinned separately as OFF. A revert that silently
+    stopped being a revert is exactly the failure worth a test.
+
+Never assert mechanism behaviour against the live constant: that is what tied
+this module to the shipped value the first time and broke it on the revert.
 """
 
-from contextlib import contextmanager
 import math
+from contextlib import contextmanager
 from datetime import date
 
 import config
 import risk_manager
 from models import Position
 
+# The value the carve-out shipped with, used explicitly by every mechanism
+# test below rather than read from config.
+ARMED = 0.45
+
 # Evaluated before config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL unless a test says
-# otherwise, so the loose thresholds apply and the numbers below are the
-# ones in config's comments rather than their tightened halves.
+# otherwise, so the loose thresholds apply.
 LOOSE_HOUR = 6
 TIGHT_HOUR = 14
 
@@ -59,144 +69,129 @@ def _stopped_out_price(entry_price: float, pct: float = None) -> float:
     A real quote at which the stop would fire, were it armed: the trigger
     distance below entry, snapped DOWN to Polymarket's 1-cent grid.
 
-    Snapping matters twice. The grid is what a book can actually print, so
-    a test asserting "this stops" should assert it about a price that can
-    exist. And it keeps the assertion off the float boundary -- entry minus
-    pct * unit lands a fraction of an ulp on either side of the threshold
+    Snapping matters twice. The grid is what a book can actually print, so a
+    test asserting "this stops" should assert it about a price that can exist.
+    And it keeps the assertion off the float boundary -- entry minus
+    pct * unit lands a fraction of an ulp either side of the threshold
     depending on the entry price, which makes an exact-trigger test pass or
     fail for reasons that have nothing to do with the carve-out.
+
+    Callers must also keep the result above config.MIN_EXIT_PRICE, or the
+    2026-08-24 worthless-bid carve-out answers instead of this one.
     """
     pct = config.STOP_LOSS_PCT if pct is None else pct
     exact = entry_price - pct * risk_manager.risk_unit(entry_price)
     return math.floor(exact * 100) / 100
 
 
-# --- the change itself ----------------------------------------------------
+# --- the shipped default: OFF ---------------------------------------------
 
-def test_expensive_entry_does_not_stop():
+def test_shipped_default_leaves_the_carve_out_off():
     """
-    WMKK 2026-08-12, NO on bucket 33 entered at 0.57 -- one of the nine
-    stops the measurement is about. Its risk unit is 0.43, so the stop sat
-    at 0.441 and it was cut at 0.43. Bucket 33 did not settle: held, it
-    was worth par.
+    1.01 is above MAX_ENTRY_PRICE (0.75), so no entry that can exist reaches
+    it. This is the revert, pinned: if someone sets the constant back to a
+    reachable value without meaning to, this fails.
     """
-    pos = _position(0.57)
-    decision = risk_manager.evaluate_exit(pos, 0.43, local_hour=LOOSE_HOUR)
+    assert config.STOP_EXEMPT_ABOVE_PRICE > config.MAX_ENTRY_PRICE
+
+
+def test_expensive_entries_stop_normally_on_the_shipped_config():
+    """The behaviour the revert restored, read through the live constant."""
+    for entry in (0.45, 0.57, 0.71, 0.75):
+        decision = risk_manager.evaluate_exit(
+            _position(entry), _stopped_out_price(entry), local_hour=LOOSE_HOUR
+        )
+        assert decision.should_exit is True, entry
+        assert decision.reason == "stop_loss", entry
+
+
+# --- the mechanism, at an explicitly-set threshold -------------------------
+
+def test_expensive_entry_does_not_stop_when_armed():
+    """
+    WMKK 2026-08-12, NO on bucket 33 entered at 0.57 -- one of the nine stops
+    the original measurement was about. Risk unit 0.43, so the stop sat at
+    0.441 and it was cut at 0.43. Bucket 33 did not settle: held, it was
+    worth par.
+    """
+    with _with_stop_exempt_above(ARMED):
+        decision = risk_manager.evaluate_exit(_position(0.57), 0.43, local_hour=LOOSE_HOUR)
     assert decision.should_exit is False
     assert decision.reason == "hold"
 
 
-def test_expensive_entry_does_not_stop_however_far_it_falls():
+def test_exemption_is_no_stop_not_a_wider_one():
     """
-    The exemption is not a wider stop, it is no stop. A position at 0.55
-    quoted at a penny still holds -- the only downside close left for it is
-    resolution detection in position_manager.
+    0.10 is chosen to sit well below the stop trigger for a 0.55 entry and
+    still ABOVE config.MIN_EXIT_PRICE, so this exercises the entry-price
+    carve-out rather than the worthless-bid one.
     """
-    decision = risk_manager.evaluate_exit(_position(0.55), 0.01, local_hour=LOOSE_HOUR)
+    assert 0.10 > config.MIN_EXIT_PRICE
+    with _with_stop_exempt_above(ARMED):
+        decision = risk_manager.evaluate_exit(_position(0.55), 0.10, local_hour=LOOSE_HOUR)
     assert decision.should_exit is False
 
 
-def test_expensive_entry_still_takes_profit():
+def test_exemption_survives_the_edge_decay_hour():
     """
-    Only the stop is exempted. The take-profit is untouched, and remains
-    the one exit that applies at every entry price.
+    The tightening moves threshold DISTANCES; it does not re-arm an exit that
+    is switched off. A 0.57 entry is exempt at 14:00 as at 06:00.
     """
-    pos = _position(0.55)
-    unit = risk_manager.risk_unit(0.55)          # 0.45
-    target = 0.55 + config.PROFIT_TAKE_PCT * unit  # 0.775
-    decision = risk_manager.evaluate_exit(pos, target, local_hour=LOOSE_HOUR)
+    trigger = _stopped_out_price(0.57, config.TIGHTENED_STOP_LOSS_PCT)
+    with _with_stop_exempt_above(ARMED):
+        decision = risk_manager.evaluate_exit(_position(0.57), trigger, local_hour=TIGHT_HOUR)
+    assert decision.should_exit is False
+
+
+def test_take_profit_is_untouched_by_the_exemption():
+    """Only the stop is exempted; the take-profit applies at every price."""
+    target = 0.55 + config.PROFIT_TAKE_PCT * risk_manager.risk_unit(0.55)
+    with _with_stop_exempt_above(ARMED):
+        decision = risk_manager.evaluate_exit(_position(0.55), target, local_hour=LOOSE_HOUR)
     assert decision.should_exit is True
     assert decision.reason == "take_profit"
 
 
-def test_exemption_holds_after_the_edge_decay_hour():
+def test_boundary_is_inclusive_and_one_cent_below_is_not():
     """
-    The tightening moves threshold DISTANCES; it does not re-arm an exit
-    that is switched off. A 0.57 entry is exempt at 14:00 as at 06:00.
+    `>=`, not `>`. WMKK 2026-08-07 entered a NO at exactly 0.45 and was
+    stopped for -13.94 on a position that settled a winner, so this tick is
+    not hypothetical.
     """
-    pos = _position(0.57)
-    tight_trigger = _stopped_out_price(0.57, config.TIGHTENED_STOP_LOSS_PCT)
-    decision = risk_manager.evaluate_exit(pos, tight_trigger, local_hour=TIGHT_HOUR)
-    assert decision.should_exit is False
+    with _with_stop_exempt_above(ARMED):
+        assert risk_manager.evaluate_exit(
+            _position(ARMED), _stopped_out_price(ARMED), local_hour=LOOSE_HOUR
+        ).should_exit is False
+        under = round(ARMED - 0.01, 2)
+        assert risk_manager.evaluate_exit(
+            _position(under), _stopped_out_price(under), local_hour=LOOSE_HOUR
+        ).reason == "stop_loss"
 
 
-# --- what deliberately did NOT change -------------------------------------
-
-def test_midband_entry_still_stops():
+def test_threshold_is_read_at_call_time_not_import_time():
     """
-    0.44 is below the boundary, so the stop is unchanged there. This is
-    the band where the measurement says the stop is worth keeping (62%
-    precise at 0.30-0.45), and the whole point of siting a boundary is
-    that one side of it keeps its old behaviour.
+    backtest/stop_sweep.py rebinds config constants between runs, so this one
+    has to be read per evaluation -- and the revert itself depends on it, since
+    the code path stays in place and only the value changes.
     """
-    pos = _position(0.44)
-    decision = risk_manager.evaluate_exit(pos, _stopped_out_price(0.44), local_hour=LOOSE_HOUR)
-    assert decision.should_exit is True
-    assert decision.reason == "stop_loss"
-
-
-def test_cheap_entry_still_stops():
-    """The 0.15-0.30 band, where the stop measured 78% precise."""
-    pos = _position(0.24, side="YES")
-    decision = risk_manager.evaluate_exit(pos, _stopped_out_price(0.24), local_hour=LOOSE_HOUR)
-    assert decision.should_exit is True
-    assert decision.reason == "stop_loss"
-
-
-def test_lottery_exemption_intact():
-    """The lower carve-out is untouched by the upper one."""
-    pos = _position(0.08, side="YES")
-    decision = risk_manager.evaluate_exit(pos, 0.01, local_hour=LOOSE_HOUR)
-    assert decision.should_exit is False
-
-
-# --- the boundary ---------------------------------------------------------
-
-def test_boundary_is_inclusive_at_the_threshold():
-    """
-    `>=`, not `>`. An entry exactly at STOP_EXEMPT_ABOVE_PRICE is exempt.
-    WMKK 2026-08-07 entered a NO at exactly 0.45 and was stopped for
-    -13.94 on a position that settled a winner, so this tick is not
-    hypothetical.
-    """
-    at = config.STOP_EXEMPT_ABOVE_PRICE
-    assert risk_manager.evaluate_exit(
-        _position(at), _stopped_out_price(at), local_hour=LOOSE_HOUR
-    ).should_exit is False
-    # ...and one cent below it is not exempt, which is what makes the
-    # assertion above about the boundary rather than about the price.
-    just_under = round(at - 0.01, 2)
-    assert risk_manager.evaluate_exit(
-        _position(just_under), _stopped_out_price(just_under), local_hour=LOOSE_HOUR
-    ).reason == "stop_loss"
-
-
-def test_boundary_is_read_at_call_time_not_import_time():
-    """
-    backtest/stop_sweep.py rebinds config constants between runs, so this
-    one has to be read per evaluation. It is NOT written as an alias of
-    another constant -- see THE ALIAS GOTCHA in stop_sweep.py -- but a
-    module-level capture in risk_manager would break sweeping it just the
-    same.
-    """
-    pos = _position(0.57)
     trigger = _stopped_out_price(0.57)
     with _with_stop_exempt_above(0.60):
-        armed = risk_manager.evaluate_exit(pos, trigger, local_hour=LOOSE_HOUR)
-    assert armed.should_exit is True
+        armed = risk_manager.evaluate_exit(_position(0.57), trigger, local_hour=LOOSE_HOUR)
     assert armed.reason == "stop_loss"
 
 
-def test_carve_out_can_be_disabled_entirely():
-    """
-    1.01 restores the pre-2026-08-20 behaviour, since MAX_ENTRY_PRICE caps
-    entries at 0.75. That is the documented off switch and it needs to work
-    -- it is how this change gets reverted without a deploy.
-    """
-    with _with_stop_exempt_above(1.01):
-        for entry in (0.45, 0.57, 0.71, 0.75):
-            decision = risk_manager.evaluate_exit(
-                _position(entry), _stopped_out_price(entry), local_hour=LOOSE_HOUR
-            )
-            assert decision.should_exit is True, entry
-            assert decision.reason == "stop_loss", entry
+# --- what the carve-out never touched -------------------------------------
+
+def test_lottery_exemption_intact():
+    with _with_stop_exempt_above(ARMED):
+        decision = risk_manager.evaluate_exit(_position(0.08, side="YES"), 0.05,
+                                              local_hour=LOOSE_HOUR)
+    assert decision.should_exit is False
+
+
+def test_cheap_entry_still_stops():
+    """The 0.15-0.30 band, which measured 77% precise post-deploy."""
+    with _with_stop_exempt_above(ARMED):
+        decision = risk_manager.evaluate_exit(_position(0.24, side="YES"),
+                                              _stopped_out_price(0.24), local_hour=LOOSE_HOUR)
+    assert decision.reason == "stop_loss"

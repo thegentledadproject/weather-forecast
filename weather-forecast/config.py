@@ -1059,9 +1059,54 @@ TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = TIGHTENED_PROFIT_TAKE_PCT
 # THE HONEST LIMITS: nine stops over seven days at WMKK, eighteen at
 # 0.45-0.60 book-wide. A day-level bootstrap of the held delta on the
 # WMKK cut is positive in every resample, but that interval is over the
-# upper bound, not over what the change actually buys. Set this to 1.01
-# to disable the carve-out entirely and restore the old behaviour.
-STOP_EXEMPT_ABOVE_PRICE = 0.45
+# upper bound, not over what the change actually buys.
+#
+# ===========================================================================
+# REVERTED 2026-08-27. THE PRECISION FINDING HELD UP; IT JUST DOES NOT PAY.
+# ===========================================================================
+# 1.01 is above MAX_ENTRY_PRICE, so no entry can reach it and the carve-out
+# is OFF. Everything above is kept because it is still true -- set this back
+# to 0.45 to re-enable.
+#
+# Post-deploy measurement, target_date >= 2026-08-20, all stations, 112
+# closed positions scored against METAR settlement. In the exempt band the
+# stop was RECONSTRUCTED from the recorded price path (fires if the token's
+# minimum over the actual holding window crossed entry - 0.30*risk_unit; a
+# position that resolved to 0.0 counts as a certain fire, since a token
+# going to zero must cross the stop). Precision, i.e. the share of fires on
+# positions that went on to LOSE:
+#
+#     0.00-0.15   18 fires   72%        0.45-0.60    5 fires   40%
+#     0.15-0.30   22 fires   77%        0.60-1.00    6 fires   50%
+#     0.30-0.45   19 fires   68%        >=0.45      11 fires   45%
+#
+# The monotone fall REPLICATED on fresh data, and the side confound could
+# finally be partly cut: NO below 0.45 scores 80% against NO at or above
+# 0.45 at 45% -- same side, opposite verdict.
+#
+# AND THE P&L IS A WASH. Those 21 exempt positions, $255.95 of stake: -$0.29
+# as traded, +$0.15 with the stop restored. A delta of +$0.44. The stop's
+# savings on its 5 correct fires (+$42.55) almost exactly cancel what it
+# costs on its 6 false positives (-$42.11). Being wrong 55% of the time is
+# survivable when the 45% it gets right are the -100%s. The +$48 to +$71
+# projected for WMKK above did NOT generalise across stations.
+#
+# WHAT DECIDED IT IS VARIANCE. Worst single loss in the band without the
+# stop was -$16.76 (WMKK 2026-08-26); with it, -$4.80. Four losses of
+# $7.73-$16.76 become four of $2.14-$4.80. Same EV, far fatter left tail,
+# against live collateral of about $15. And the band is 18% of closed
+# positions but 39% of stake (avg $12.50 against $4.45), because Kelly
+# sizes UP exactly where this switched the stop off -- so the coin-flip
+# band was holding the biggest positions and none of the protection.
+#
+# Coverage is not the explanation (median 21 snapshots per position over a
+# median 5.0h hold, ~1 every 14 min), and the bias runs the safe way: a
+# missed dip removes a false positive, so 45% is an upper bound.
+#
+# WHAT WOULD JUSTIFY TURNING IT BACK ON: sizing that comes down inside the
+# band, so the unprotected positions are not also the largest. The precision
+# argument was never an argument about money; it needs the exposure half.
+STOP_EXEMPT_ABOVE_PRICE = 1.01
 
 # Hard ceiling on entry price. Above this, a bought bucket stops behaving
 # like a position and starts behaving like a bond with a stop-loss on it:
