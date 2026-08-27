@@ -207,6 +207,15 @@ def test_derived_stats_on_nothing_is_unmeasured_not_zero(monkeypatch):
     assert (bias, n, stderr) == (None, 0, None)
 
 
+def test_an_implausible_bias_raises_rather_than_graduating_a_station(monkeypatch):
+    monkeypatch.setattr(
+        bba, "bucket_bias_samples",
+        lambda icao, dates=None: ([59.5, 60.5, 61.0], [], []),
+    )
+    with pytest.raises(ValueError, match="plausible"):
+        bba.derived_bias_stats("WSSS")
+
+
 # --- the ingest -------------------------------------------------------------
 
 def test_ingest_records_settled_days_and_skips_unresolved(monkeypatch, tmp_path):

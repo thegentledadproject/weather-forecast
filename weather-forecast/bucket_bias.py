@@ -99,10 +99,12 @@ import sqlite3
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 
+import bucket_axis
 import calibration
 import config
 import storage
 from backtest import price_history_client, settings as bt_settings
+from bucket_axis import BucketAxis
 
 # A resolved YES token pays 1.0 and the losers pay 0.0, but the book is
 # quoted in ticks and the observed terminal values are 0.999/0.001 rather
@@ -256,18 +258,27 @@ def settled_bucket(
 
 
 def bucket_midpoint_c(
-    bucket_c: int, bounds: Tuple[int, int], edge_mode: str
+    bucket_c: int,
+    bounds: Tuple[int, int],
+    edge_mode: str,
+    *,
+    axis: BucketAxis = None,
 ) -> Optional[float]:
     """
-    The midpoint temperature of a settled bucket, or None if the bucket is
-    one of the event's CENSORED edge catch-alls.
+    The midpoint temperature of a settled bucket IN DEGREES CELSIUS, or None
+    if the bucket is one of the event's CENSORED edge catch-alls.
 
-    Interval semantics mirror backtest.resolution.bucket_for_temp exactly,
-    because a midpoint taken under the other convention is off by half a
-    bucket -- half the effect being measured:
+    THE RETURN UNIT IS LOAD-BEARING. bucket_bias_samples() subtracts this
+    from a Celsius forecast mean, and the result flows to
+    calibration.blend_central_estimate() via the entry_manager bias gate. A
+    Fahrenheit midpoint here makes the "bias" roughly 0.8*T + 32 -- order 60
+    -- subtracted from a Celsius forecast, on a station with no error record
+    of its own. That is why this converts rather than returning the key.
 
-      "floor"   bucket b covers [b, b + 1)      -> midpoint b + 0.5
-      "half_up" bucket b covers [b - 0.5, b + 0.5) -> midpoint b
+    Interval semantics come from the axis, and mirror
+    backtest.resolution.bucket_for_temp exactly, because a midpoint taken
+    under the other convention is off by half a bucket -- half the effect
+    being measured.
 
     None for the edges is the honest answer, not a limitation to work
     around. "37 or above" has no midpoint; substituting 37.5 would invent a
@@ -277,7 +288,9 @@ def bucket_midpoint_c(
     bucket_min, bucket_max = bounds
     if bucket_c <= bucket_min or bucket_c >= bucket_max:
         return None
-    return bucket_c + 0.5 if edge_mode == "floor" else float(bucket_c)
+    resolved = BucketAxis(edge_mode=edge_mode) if axis is None else axis
+    lower_c, upper_c = resolved.interval_c(bucket_c)
+    return (lower_c + upper_c) / 2
 
 
 def bucket_bias_samples(
@@ -326,7 +339,10 @@ def bucket_bias_samples(
             continue
 
         bucket_c, bucket_min, bucket_max = record
-        midpoint = bucket_midpoint_c(bucket_c, (bucket_min, bucket_max), edge_mode)
+        midpoint = bucket_midpoint_c(
+            bucket_c, (bucket_min, bucket_max), edge_mode,
+            axis=bucket_axis.for_station(station),
+        )
         if midpoint is None:
             skipped.append((
                 target_date,
@@ -357,8 +373,22 @@ def derived_bias_stats(station_icao: str) -> tuple:
     must not become the third implementation.
     """
     errors, _, detail = bucket_bias_samples(station_icao)
+    bias, n, stderr = calibration.bias_stats(errors)
+
+    # A bias is a Celsius forecast error. Anything outside this band means a
+    # unit leaked in -- most likely a bucket key that never got converted --
+    # and a silent order-60 "bias" would graduate a station through the bias
+    # gate and then be subtracted from every forecast. Fail loudly.
+    if bias is not None and abs(bias) > 10.0:
+        raise ValueError(
+            f"{station_icao}: derived bias {bias:.2f} is not a plausible "
+            f"Celsius forecast error. This almost certainly means a bucket "
+            f"key reached the bias path without unit conversion -- see "
+            f"bucket_bias.bucket_midpoint_c."
+        )
+
     if not errors:
-        return calibration.bias_stats(errors)
+        return bias, n, stderr
     # Same recency weighting as the preferred path in
     # entry_manager.forecast_bias_stats. The two estimators already differ
     # in their TRUTH (a reading versus a settled bucket); letting them also
@@ -465,6 +495,10 @@ def quantization_stderr_c(n: int, bucket_width_c: float = 1.0) -> Optional[float
     instead of readings, over n samples. Independent of the forecast error,
     so it adds in quadrature rather than linearly -- reported separately so
     the reader can see how much of the total precision is method noise.
+
+    bucket_width_c is the bucket width IN DEGREES CELSIUS, from
+    BucketAxis.width_c() -- never the raw market step, which may be in
+    Fahrenheit.
     """
     if n < 1:
         return None
@@ -486,16 +520,19 @@ def print_report(
     print(f"    bucket edge mode: {getattr(station, 'bucket_edge_mode', 'half_up')}\n")
 
     if detail and rows:
-        print(f"    {'date':<12}{'bucket':>7}{'midpoint':>10}{'forecast':>10}{'error':>9}")
+        axis = bucket_axis.for_station(station)
+        print(f"    {'date':<12}{'bucket':>14}{'midpoint':>10}{'forecast':>10}{'error':>9}")
         for target_date, bucket_c, midpoint, forecast_mean in rows:
-            print(f"    {target_date.isoformat():<12}{bucket_c:>7}{midpoint:>10.1f}"
-                  f"{forecast_mean:>10.2f}{forecast_mean - midpoint:>+9.2f}")
+            print(f"    {target_date.isoformat():<12}"
+                  f"{axis.label(bucket_c, station.bucket_min_c, station.bucket_max_c):>14}"
+                  f"{midpoint:>10.1f}{forecast_mean:>10.2f}"
+                  f"{forecast_mean - midpoint:>+9.2f}")
         print()
 
     if n == 0:
         print("    NO SAMPLES. Nothing was measured.")
     else:
-        q = quantization_stderr_c(n)
+        q = quantization_stderr_c(n, bucket_axis.for_station(station).width_c())
         print(f"    bias      {bias:+.3f} C over n={n}  "
               f"({'forecasts run WARM' if bias > 0 else 'forecasts run COOL'} of settlement)")
         if stderr is None:

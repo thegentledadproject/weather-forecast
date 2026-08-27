@@ -510,3 +510,41 @@ class TestDeriveBucketBoundsReachesStepFromTheCallSites:
         position_manager._event_bounds(position, station)
 
         assert captured["step"] == 1
+
+
+class TestBiasMidpointStaysCelsius:
+    """
+    The _c suffix on a RETURN VALUE is a promise. bucket_bias_samples
+    subtracts this from a Celsius forecast mean and the result reaches
+    calibration.blend_central_estimate, so a Fahrenheit number here is a
+    live mispricing, not a display bug.
+    """
+
+    def test_a_fahrenheit_midpoint_is_returned_in_celsius(self):
+        import bucket_bias
+
+        axis = BucketAxis(unit="F", step=2)
+        # Bucket "78-79F" spans 77.5F..79.5F, midpoint 78.5F = 25.833C
+        got = bucket_bias.bucket_midpoint_c(78, (68, 88), "half_up", axis=axis)
+        assert got == pytest.approx((78.5 - 32) * 5 / 9, abs=1e-6)
+
+    def test_a_fahrenheit_midpoint_is_a_plausible_celsius_temperature(self):
+        import bucket_bias
+
+        axis = BucketAxis(unit="F", step=2)
+        for key in axis.keys(70, 86):
+            got = bucket_bias.bucket_midpoint_c(key, (68, 88), "half_up", axis=axis)
+            assert -60.0 < got < 60.0, f"bucket {key} midpoint {got} is not Celsius"
+
+    def test_celsius_midpoints_are_unchanged(self):
+        import bucket_bias
+
+        assert bucket_bias.bucket_midpoint_c(31, (27, 37), "half_up") == 31.0
+        assert bucket_bias.bucket_midpoint_c(31, (27, 37), "floor") == 31.5
+
+    def test_edge_buckets_are_still_censored(self):
+        import bucket_bias
+
+        axis = BucketAxis(unit="F", step=2)
+        assert bucket_bias.bucket_midpoint_c(68, (68, 88), "half_up", axis=axis) is None
+        assert bucket_bias.bucket_midpoint_c(88, (68, 88), "half_up", axis=axis) is None
