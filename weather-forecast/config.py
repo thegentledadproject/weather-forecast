@@ -2043,6 +2043,51 @@ ENABLE_FORECAST_BIAS_CORRECTION = True
 # cheap hedge for cycles where the forecast set is thin or stale.
 FORECAST_BLEND_WEIGHT_DEFAULT = 0.85
 
+# How far back the OBSERVED term of the blend looks, in days.
+#
+# THIS REPLACES `target_date.replace(day=1)` (fixed 2026-08-28), which was
+# never a lookback: it is days-since-the-1st, so the observed sample ran
+# ~30 days on the 31st and ZERO on the 1st. Measured on the live database,
+# WSSS held 26 readings as-of 2026-08-27 (mean 32.538) and NONE as-of
+# 2026-09-01 or 09-02. climate_monitor_client.load_recent_observations()
+# returns 0 rows for WSSS, so nothing else was holding the term up.
+#
+# The consequence was not a slightly noisier estimate. With no
+# observations, calibration.blend_central_estimate() falls through to
+# `return round(forecast_mean, 1)` -- so on the 1st of every month a
+# station weighted 60% observed silently became 100% FORECAST, on sources
+# that run 1.0-1.2C cold at WSSS, then climbed back over the following week
+# on a sample of 1, 2, 3 readings each carrying 60% of the estimate. WSSS
+# trades real money.
+#
+# 30 matches backtest/engine.OBSERVATION_WINDOW_DAYS, whose comment already
+# claimed to mirror the live call sites -- it did not, and most extremely
+# on the 1st, where the replay had 30 days and live had none. A test now
+# pins the two together, because any recency half-life scored in the replay
+# against a window live does not use would be measuring the wrong thing.
+# See docs/superpowers/specs/2026-08-28-recency-weighted-observed-term-design.md.
+#
+# THIS IS NOT ONLY A MONTH-BOUNDARY FIX, AND SAYING SO WOULD BE WRONG.
+# The old window was days-since-the-1st, so mid-month it was SHORTER than
+# 30, not equal to it -- 26 days on the 27th. Replacing it lengthens the
+# sample on every day of the month except the 31st, which moves the
+# observed term slightly further toward climatology. Measured on the live
+# database as-of 2026-08-27: 28 observations mean 32.49 under the old
+# query, 36 observations mean 32.25 under this one, against a recent truth
+# of 33.0.
+#
+# That direction is mildly UNhelpful for regime tracking, and it is
+# accepted here deliberately. This constant's job is to make the window a
+# stated quantity instead of a calendar accident; making the term track a
+# regime is the recency half-life's job, and that one is settled by
+# measurement. Shipping a longer, honest, fixed window first is what makes
+# that measurement possible -- see OBSERVED_HALF_LIFE_DAYS and the spec.
+#
+# 30 rather than any other depth is chosen for parity with the replay, not
+# because it has been measured to be best. Whether 30 is the right depth is
+# the same open question as the half-life.
+OBSERVATION_LOOKBACK_DAYS = 30
+
 # Per-station overrides. WSSS is the one station that genuinely wants a
 # persistence-heavy blend, and that part is not a fitting artifact:
 # equatorial Singapore's daily max barely moves, so yesterday really does

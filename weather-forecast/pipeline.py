@@ -27,7 +27,7 @@ config.py, models.py, calibration.py, probability.py, storage.py (local)
 clients/* (local)
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import config
 from calibration import calibrate
@@ -92,13 +92,24 @@ def gather_observations(station, target_date: date) -> list:
     two sources reporting the same day cannot double-count in the 60/40
     blend -- settlement-grade rows win per config.observation_source_rank.
 
+    BOTH HALVES LOOK BACK config.OBSERVATION_LOOKBACK_DAYS. The stored half
+    used to start at `target_date.replace(day=1)`, which is not a lookback
+    but days-since-the-1st -- ~30 days on the 31st and ZERO on the 1st, at
+    which point calibration.blend_central_estimate() has no observed term
+    and falls through to forecast-only. See OBSERVATION_LOOKBACK_DAYS in
+    config.py for the measurement and what it cost.
+
     Shared by pipeline.run() and scheduler._run_full_cycle() so the
     live trading path and manual pipeline runs calibrate on the SAME
     inputs -- the trading path previously used seeds only, leaving it
     blind to every reading the system had actually collected.
     """
-    observations = climate_monitor_client.load_recent_observations(station, days=30)
-    observations += storage.load_observations_since(station.icao, target_date.replace(day=1))
+    observations = climate_monitor_client.load_recent_observations(
+        station, days=config.OBSERVATION_LOOKBACK_DAYS
+    )
+    observations += storage.load_observations_since(
+        station.icao, target_date - timedelta(days=config.OBSERVATION_LOOKBACK_DAYS)
+    )
     return storage.dedupe_observations(observations)
 
 
