@@ -701,7 +701,7 @@ def _close_from_recorded_settlement(
     if record is None:
         return None
 
-    winning_bucket, bucket_min, bucket_max = record
+    winning_bucket, bucket_min, bucket_max, *_ = record
 
     # The recorded settlement describes one event. If this position's
     # bucket is not in that event's window, the two are not about the same

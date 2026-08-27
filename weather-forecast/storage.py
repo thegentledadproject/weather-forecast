@@ -280,10 +280,26 @@ def _connect() -> sqlite3.Connection:
             bucket_max_c INTEGER NOT NULL,
             source TEXT NOT NULL,
             recorded_at TEXT NOT NULL,
+            bucket_unit TEXT NOT NULL DEFAULT 'C',
+            bucket_step INTEGER NOT NULL DEFAULT 1,
             PRIMARY KEY (station_icao, target_date)
         )
         """
     )
+
+    # bucket_unit/bucket_step: added after the table already existed in
+    # deployed databases. DEFAULT 'C' / DEFAULT 1 is what makes every row
+    # recorded before this migration correct with no backfill -- every
+    # settlement recorded before today WAS on the Celsius whole-degree axis.
+    existing_settled_bucket_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(settled_buckets)").fetchall()
+    }
+    for column_name, column_ddl in (
+        ("bucket_unit", "bucket_unit TEXT NOT NULL DEFAULT 'C'"),
+        ("bucket_step", "bucket_step INTEGER NOT NULL DEFAULT 1"),
+    ):
+        if column_name not in existing_settled_bucket_columns:
+            conn.execute(f"ALTER TABLE settled_buckets ADD COLUMN {column_ddl}")
 
     # After the ALTER TABLE migration above, so the view is defined against
     # the migrated `positions` shape rather than a short one.
@@ -588,6 +604,8 @@ def save_settled_bucket(
     bucket_min_c: int,
     bucket_max_c: int,
     source: str,
+    bucket_unit: str = "C",
+    bucket_step: int = 1,
 ) -> None:
     """
     Record which bucket one station-day's market settled into.
@@ -596,27 +614,43 @@ def save_settled_bucket(
     re-running the ingest must not multiply rows. REPLACE rather than
     IGNORE so a bounds correction can be re-recorded, since the bounds come
     from a discovered token map that a later sweep may read more completely.
+
+    bucket_unit/bucket_step record the axis this settlement was scored on,
+    so a later re-score of an old day uses the axis that day actually
+    settled on rather than today's registry.
     """
     with _db() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO settled_buckets "
-            "(station_icao, target_date, bucket_c, bucket_min_c, bucket_max_c, source, recorded_at) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "(station_icao, target_date, bucket_c, bucket_min_c, bucket_max_c, source, recorded_at, "
+            "bucket_unit, bucket_step) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (station_icao, target_date.isoformat(), int(bucket_c), int(bucket_min_c),
-             int(bucket_max_c), source, datetime.now(timezone.utc).isoformat()),
+             int(bucket_max_c), source, datetime.now(timezone.utc).isoformat(),
+             bucket_unit, int(bucket_step)),
         )
 
 
-def load_settled_buckets(station_icao: str) -> Dict[date, Tuple[int, int, int]]:
-    """{target_date: (bucket_c, bucket_min_c, bucket_max_c)} for one station."""
+def load_settled_buckets(station_icao: str) -> Dict[date, Tuple[int, int, int, str, int]]:
+    """
+    {target_date: (bucket_c, bucket_min_c, bucket_max_c, bucket_unit, bucket_step)}
+    for one station.
+
+    The unit and step are stored per ROW, not read from the registry,
+    because a settlement is immutable history: if a market's axis ever
+    changes, the old rows must keep describing themselves.
+    """
     with _db() as conn:
         rows = conn.execute(
-            "SELECT target_date, bucket_c, bucket_min_c, bucket_max_c "
+            "SELECT target_date, bucket_c, bucket_min_c, bucket_max_c, "
+            "bucket_unit, bucket_step "
             "FROM settled_buckets WHERE station_icao = ?",
             (station_icao,),
         ).fetchall()
     return {
-        date.fromisoformat(str(r[0])): (int(r[1]), int(r[2]), int(r[3]))
+        date.fromisoformat(str(r[0])): (
+            int(r[1]), int(r[2]), int(r[3]), str(r[4]), int(r[5])
+        )
         for r in rows
     }
 

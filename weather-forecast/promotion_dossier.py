@@ -144,7 +144,7 @@ GAP_SIGMAS = 2.0
 
 def score_entries(
     positions: List[Position],
-    settled: Dict[date, Tuple[int, int, int]],
+    settled: Dict[date, Tuple[int, int, int, str, int]],
     since: Optional[date] = None,
     until: Optional[date] = None,
 ) -> Tuple[List[dict], Dict[str, int]]:
@@ -197,7 +197,7 @@ def score_entries(
         if row is None:
             skip("target date not settled yet")
             continue
-        winning_bucket, bounds_min, bounds_max = row
+        winning_bucket, bounds_min, bounds_max, *_ = row
 
         # NULL is the honest value on rows written before the column existed
         # and on manual_trigger rows that bypassed the model -- storage.py

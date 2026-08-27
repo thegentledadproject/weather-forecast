@@ -338,10 +338,10 @@ def bucket_bias_samples(
             skipped.append((target_date, "no settled bucket recorded yet"))
             continue
 
-        bucket_c, bucket_min, bucket_max = record
+        bucket_c, bucket_min, bucket_max, row_unit, row_step = record
         midpoint = bucket_midpoint_c(
             bucket_c, (bucket_min, bucket_max), edge_mode,
-            axis=bucket_axis.for_station(station),
+            axis=BucketAxis(unit=row_unit, step=row_step, edge_mode=edge_mode),
         )
         if midpoint is None:
             skipped.append((
@@ -464,9 +464,11 @@ def ingest_settled_buckets(
                     except UnresolvedDate:
                         unresolved += 1
                         continue
+                    _axis = bucket_axis.for_station(station)
                     storage.save_settled_bucket(
                         icao, target_date, bucket_c, bounds[0], bounds[1],
-                        source=SETTLEMENT_SOURCE)
+                        source=SETTLEMENT_SOURCE,
+                        bucket_unit=_axis.unit, bucket_step=_axis.step)
                     recorded += 1
                     saved += 1
 

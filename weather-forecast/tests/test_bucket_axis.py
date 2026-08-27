@@ -548,3 +548,32 @@ class TestBiasMidpointStaysCelsius:
         axis = BucketAxis(unit="F", step=2)
         assert bucket_bias.bucket_midpoint_c(68, (68, 88), "half_up", axis=axis) is None
         assert bucket_bias.bucket_midpoint_c(88, (68, 88), "half_up", axis=axis) is None
+
+
+class TestSettledBucketsAreSelfDescribing:
+    def test_a_saved_row_round_trips_its_units(self, tmp_path, monkeypatch):
+        from datetime import date
+        import config
+        import storage
+
+        # No init step: storage._connect() creates the schema on first use.
+        monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.db"))
+        storage.save_settled_bucket(
+            "KLGA", date(2026, 8, 27), 78, 68, 88, "metar_daily_max",
+            bucket_unit="F", bucket_step=2,
+        )
+        got = storage.load_settled_buckets("KLGA")
+        assert got[date(2026, 8, 27)] == (78, 68, 88, "F", 2)
+
+    def test_legacy_rows_default_to_celsius_whole_degree(self, tmp_path, monkeypatch):
+        from datetime import date
+        import config
+        import storage
+
+        monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.db"))
+        storage.save_settled_bucket(
+            "WSSS", date(2026, 8, 27), 31, 27, 37, "metar_daily_max",
+        )
+        assert storage.load_settled_buckets("WSSS")[date(2026, 8, 27)] == (
+            31, 27, 37, "C", 1
+        )
