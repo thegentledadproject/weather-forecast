@@ -80,7 +80,11 @@ class StationConfig:
     # STANDARD-time (winter) offset.
     iana_timezone: Optional[str] = None
 
-    # Sanity CROSS-CHECK bounds for this station's Polymarket bucket range.
+    # Sanity CROSS-CHECK bounds for this station's Polymarket bucket range,
+    # EXPRESSED IN bucket_unit (below) -- the `_c` suffix is historical and
+    # is NOT a claim that these are Celsius. bucket_axis.for_station() is
+    # authoritative for what a bucket number means; the field name never is.
+    #
     # NOT the source of truth on the trading path: Polymarket shifts a city's
     # 11-bucket window seasonally (Singapore moved 25-35 -> 27-37 between July
     # and August 2026), so live trading derives the real bounds from the
@@ -95,6 +99,19 @@ class StationConfig:
     #                the range that CONTAINS the reading (Hong Kong Observatory);
     #                bucket = floor(temp), intervals [b, b+1).
     bucket_edge_mode: str = "half_up"
+
+    # The MARKET's bucket axis. See bucket_axis.BucketAxis.
+    #
+    # bucket_unit is the unit of the market's bucket LABELS -- and therefore
+    # of bucket_min_c/bucket_max_c above and of every bucket_c key. It is NOT
+    # the unit of any temperature: forecasts, std_dev, observations, midpoints
+    # and bias are Celsius everywhere, always.
+    #
+    # Defaults reproduce every market registered before 2026-08. The American
+    # cities are the first exception: 11 of the 15 list Fahrenheit in
+    # two-degree buckets ("70-71°F"), so they set ("F", 2).
+    bucket_unit: str = "C"
+    bucket_step: int = 1
 
     # City name in the WMO WWIS index (worldweather.wmo.int) for the generic
     # "wwis" official client. Empty string = city not listed there (e.g.

@@ -112,3 +112,40 @@ class TestForStation:
             bucket_edge_mode = "half_up"
 
         assert bucket_axis.for_station(Legacy()) == AXIS_C1
+
+
+class TestStationConfigCarriesTheAxis:
+    def test_defaults_are_the_celsius_whole_degree_axis(self):
+        from models import StationConfig
+
+        st = StationConfig(
+            icao="TEST", display_name="Test", country="Testland",
+            lat=0.0, lon=0.0, wunderground_slug="x/y/TEST",
+            long_term_normal_max_c=30.0, official_client_key="wwis",
+            polymarket_city_slug="test",
+        )
+        assert st.bucket_unit == "C"
+        assert st.bucket_step == 1
+        assert bucket_axis.for_station(st) == AXIS_C1
+
+    def test_every_registered_station_is_on_the_default_axis_today(self):
+        # Phase 1 registers no new station. This test is the tripwire that
+        # says so, and Task 16 is where it is deliberately narrowed.
+        import config
+
+        for icao, st in config.STATIONS.items():
+            assert bucket_axis.for_station(st).is_default, icao
+
+    def test_a_fahrenheit_station_declares_it(self):
+        from models import StationConfig
+
+        st = StationConfig(
+            icao="KLGA", display_name="LaGuardia", country="United States",
+            lat=40.777, lon=-73.872, wunderground_slug="us/new-york/KLGA",
+            long_term_normal_max_c=28.0, official_client_key="wwis",
+            polymarket_city_slug="nyc",
+            bucket_unit="F", bucket_step=2, bucket_min_c=68, bucket_max_c=88,
+        )
+        axis = bucket_axis.for_station(st)
+        assert axis == BucketAxis(unit="F", step=2, edge_mode="half_up")
+        assert not axis.is_default
