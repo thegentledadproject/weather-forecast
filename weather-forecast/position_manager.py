@@ -648,7 +648,9 @@ def _event_bounds(position: Position, station) -> Optional[tuple]:
 
     if not token_map:
         return None
-    return market_discovery.derive_bucket_bounds(token_map)
+    return market_discovery.derive_bucket_bounds(
+        token_map, step=bucket_axis.for_station(station).step
+    )
 
 
 def _close_from_recorded_settlement(

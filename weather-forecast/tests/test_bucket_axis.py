@@ -339,3 +339,174 @@ class TestDeriveBucketBoundsIsStepAware:
 
         assert md.derive_bucket_bounds({k: {} for k in range(27, 38)}) == (27, 37)
         assert md.derive_bucket_bounds({k: {} for k in range(27, 37)}) is None
+
+
+class TestDeriveBucketBoundsReachesStepFromTheCallSites:
+    """
+    derive_bucket_bounds() defaults to step=1. Two callers outside
+    market_discovery.py -- ev_engine.run_for_station_with_map() and
+    position_manager._event_bounds() -- used to call it with no step at
+    all, so on a Fahrenheit station the 11 real keys were checked against
+    a 21-element step-1 range and vetoed EVERY cycle: the station would
+    never trade, silently, because nothing raises -- derive_bucket_bounds
+    is designed to fail closed. These pin that the station's own axis
+    step actually reaches the call, not just that derive_bucket_bounds()
+    accepts a step argument when given one directly.
+
+    Driven with SPIES on derive_bucket_bounds rather than a real EV/quote
+    pass: the property under test is narrowly "what step value reaches
+    this one call", and going through fetch_market_quotes for real pulls
+    in 22 live per-bucket lookups (both sides of 11 buckets, plus depth
+    and slippage paths a couple of targeted mocks don't cover) for a fact
+    that has nothing to do with quotes at all.
+    """
+
+    F_TOKEN_MAP = {
+        b: {"yes_token_id": f"y{b}", "no_token_id": f"n{b}"}
+        for b in [68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88]
+    }
+    C_TOKEN_MAP = {b: {"yes_token_id": f"y{b}", "no_token_id": f"n{b}"} for b in range(27, 38)}
+
+    def _f_station(self):
+        from models import StationConfig
+
+        return StationConfig(
+            icao="KLGA", display_name="LaGuardia", country="United States",
+            lat=40.777, lon=-73.872, wunderground_slug="us/new-york/KLGA",
+            long_term_normal_max_c=28.0, official_client_key="wwis",
+            polymarket_city_slug="nyc",
+            bucket_unit="F", bucket_step=2, bucket_min_c=68, bucket_max_c=88,
+        )
+
+    def _step_spy(self, monkeypatch, target):
+        """Patches target.derive_bucket_bounds with a recorder that always
+        succeeds -- returning the token map's own (min, max) so the bounds
+        stay consistent with whichever map the test passed in -- and
+        returns the dict the captured step lands in."""
+        captured = {}
+
+        def _spy(token_map, step=1):
+            captured["step"] = step
+            return (min(token_map), max(token_map))
+
+        monkeypatch.setattr(target.market_discovery, "derive_bucket_bounds", _spy)
+        return captured
+
+    @staticmethod
+    def _empty_quotes(token_map):
+        """fetch_market_quotes()'s real contract: one entry per token_map
+        key, price fields None rather than the key simply being absent --
+        compute_ev_table indexes quotes[bucket_c] directly."""
+        from models import MarketQuote
+
+        return {b: MarketQuote(bucket_c=b, yes_price=None, no_price=None) for b in token_map}
+
+    def test_ev_engine_passes_the_fahrenheit_stations_step(self, monkeypatch):
+        from datetime import date
+
+        import config
+        import ev_engine
+        from models import CalibratedEstimate
+
+        station = self._f_station()
+        monkeypatch.setitem(config.STATIONS, "KLGA", station)
+        captured = self._step_spy(monkeypatch, ev_engine)
+        monkeypatch.setattr(
+            ev_engine.market_discovery, "discover_token_map",
+            lambda st, d, lo=None, hi=None: self.F_TOKEN_MAP,
+        )
+        # The one stub at the boundary: what quotes come back is irrelevant
+        # to this test, only that fetching them is never attempted for real.
+        monkeypatch.setattr(ev_engine, "fetch_market_quotes", self._empty_quotes)
+
+        estimate = CalibratedEstimate(
+            station_icao="KLGA", target_date=date(2026, 8, 27),
+            central_estimate_c=26.1, std_dev_c=1.0, monsoon_phase="unknown",
+        )
+        result = ev_engine.run_for_station_with_map(estimate)
+
+        assert captured["step"] == 2
+        assert not result.veto_reason, result.veto_reason
+
+    def test_ev_engine_passes_one_for_a_celsius_station(self, monkeypatch):
+        from datetime import date
+
+        import config
+        import ev_engine
+        from models import CalibratedEstimate
+
+        station = config.get_station("WSSS")
+        captured = self._step_spy(monkeypatch, ev_engine)
+        monkeypatch.setattr(
+            ev_engine.market_discovery, "discover_token_map",
+            lambda st, d, lo=None, hi=None: self.C_TOKEN_MAP,
+        )
+        monkeypatch.setattr(ev_engine, "fetch_market_quotes", self._empty_quotes)
+
+        estimate = CalibratedEstimate(
+            station_icao=station.icao, target_date=date(2026, 8, 27),
+            central_estimate_c=32.0, std_dev_c=1.0, monsoon_phase="unknown",
+        )
+        ev_engine.run_for_station_with_map(estimate)
+
+        assert captured["step"] == 1
+
+    def test_position_manager_passes_the_fahrenheit_stations_step(self, monkeypatch):
+        from datetime import date
+
+        import position_manager
+        from models import Position
+
+        station = self._f_station()
+        captured = self._step_spy(monkeypatch, position_manager)
+        monkeypatch.setattr(
+            position_manager.market_discovery, "discover_token_map",
+            lambda st, d, lo=None, hi=None: self.F_TOKEN_MAP,
+        )
+
+        position = Position(
+            position_id="KLGA:2026-08-27:70:YES:x",
+            station_icao="KLGA",
+            target_date=date(2026, 8, 27),
+            bucket_c=70,
+            side="YES",
+            entry_price=0.30,
+            size_usd=10.0,
+            entry_time="2026-08-27T14:00:00",
+            status="open",
+            token_id="tok",
+        )
+        bounds = position_manager._event_bounds(position, station)
+
+        assert captured["step"] == 2
+        assert bounds == (68, 88)
+
+    def test_position_manager_passes_one_for_a_celsius_station(self, monkeypatch):
+        from datetime import date
+
+        import config
+        import position_manager
+        from models import Position
+
+        station = config.get_station("WSSS")
+        captured = self._step_spy(monkeypatch, position_manager)
+        monkeypatch.setattr(
+            position_manager.market_discovery, "discover_token_map",
+            lambda st, d, lo=None, hi=None: self.C_TOKEN_MAP,
+        )
+
+        position = Position(
+            position_id="WSSS:2026-08-27:32:YES:x",
+            station_icao="WSSS",
+            target_date=date(2026, 8, 27),
+            bucket_c=32,
+            side="YES",
+            entry_price=0.30,
+            size_usd=10.0,
+            entry_time="2026-08-27T14:00:00",
+            status="open",
+            token_id="tok",
+        )
+        position_manager._event_bounds(position, station)
+
+        assert captured["step"] == 1

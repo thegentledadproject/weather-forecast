@@ -251,9 +251,15 @@ def derive_bucket_bounds(
     if len(keys) != config.EXPECTED_BUCKET_COUNT:
         return None  # short or long: not the 11-outcome event we know how to price
     lo, hi = keys[0], keys[-1]
-    # Every listed bucket's lower edge is a multiple of step. A uniformly
-    # shifted grid (e.g. 69,71,..,89 instead of 68,70,..,88) is arithmetically
-    # contiguous too, but it is not this station's grid.
+    # The grid must be anchored on a multiple of step. This is an
+    # ASSUMPTION about how Polymarket formats a Fahrenheit event, evidenced
+    # by exactly one city (NYC, 68..88, interior ranges starting even), not
+    # a law. A legitimately odd-anchored market would be vetoed here rather
+    # than mis-keyed -- that city simply never trades, and says so in the
+    # log. That is the trade this file already makes everywhere else: a
+    # partial or shifted map is worse than no map, because a half-bucket
+    # shift mis-prices the two buckets either side of the mode on every
+    # cycle, in the same direction.
     if lo % step != 0:
         return None
     if keys != list(range(lo, hi + step, step)):

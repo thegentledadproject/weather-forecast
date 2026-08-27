@@ -414,7 +414,9 @@ def run_for_station_with_map(
             veto_reason="no token map discovered",
         )
 
-    bounds = market_discovery.derive_bucket_bounds(token_map)
+    bounds = market_discovery.derive_bucket_bounds(
+        token_map, step=bucket_axis.for_station(station).step
+    )
     if bounds is None:
         discovered = sorted(token_map)
         print(
