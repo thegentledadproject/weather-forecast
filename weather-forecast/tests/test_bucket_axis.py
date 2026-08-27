@@ -577,3 +577,106 @@ class TestSettledBucketsAreSelfDescribing:
         assert storage.load_settled_buckets("WSSS")[date(2026, 8, 27)] == (
             31, 27, 37, "C", 1
         )
+
+
+def _all_axes_under_test():
+    """Every registered station, plus the two axes no station has YET."""
+    import config
+
+    cases = [
+        (icao, bucket_axis.for_station(st), st.bucket_min_c, st.bucket_max_c)
+        for icao, st in config.STATIONS.items()
+    ]
+    cases.append(("SYNTH-F2", BucketAxis(unit="F", step=2), 68, 88))
+    cases.append(("SYNTH-F2-COLD", BucketAxis(unit="F", step=2), 8, 28))
+    return cases
+
+
+@pytest.mark.parametrize("icao,axis,lo,hi", _all_axes_under_test())
+class TestAxisPropertiesHoldForEveryStation:
+
+    def test_the_key_a_reading_settles_into_contains_that_reading(
+        self, icao, axis, lo, hi
+    ):
+        from backtest import resolution
+
+        lo_c, _ = axis.interval_c(lo)
+        _, hi_c = axis.interval_c(hi)
+        t = round(lo_c - 3.0, 1)
+        while t <= hi_c + 3.0:
+            key = resolution.bucket_for_temp(t, lo, hi, axis=axis)
+            k_lo, k_hi = axis.interval_c(key)
+            if key == lo:
+                assert t < k_hi, f"{icao}: {t}C clamped to {key}, above its top edge"
+            elif key == hi:
+                assert t >= k_lo, f"{icao}: {t}C clamped to {key}, below its low edge"
+            else:
+                assert k_lo <= t < k_hi, (
+                    f"{icao}: {t}C settled into bucket {key} = [{k_lo}, {k_hi})"
+                )
+            t = round(t + 0.1, 1)
+
+    def test_the_listed_buckets_tile_the_line(self, icao, axis, lo, hi):
+        keys = axis.keys(lo, hi)
+        assert len(keys) == 11, f"{icao}: {len(keys)} buckets, expected 11"
+        for left, right in zip(keys, keys[1:]):
+            _, left_top = axis.interval_c(left)
+            right_bottom, _ = axis.interval_c(right)
+            assert left_top == pytest.approx(right_bottom, abs=1e-9), (
+                f"{icao}: gap or overlap between bucket {left} and {right}"
+            )
+
+    def test_the_probabilities_sum_to_one_and_the_mode_is_where_it_should_be(
+        self, icao, axis, lo, hi
+    ):
+        from datetime import date
+
+        import probability
+        from models import CalibratedEstimate
+
+        lo_c, _ = axis.interval_c(lo)
+        _, hi_c = axis.interval_c(hi)
+        centre = (lo_c + hi_c) / 2
+        est = CalibratedEstimate(
+            station_icao=icao, target_date=date(2026, 8, 27),
+            central_estimate_c=centre, std_dev_c=1.0, monsoon_phase="unknown",
+        )
+        got = probability.bucket_probabilities(est, lo, hi, axis=axis)
+
+        assert sum(b.probability for b in got) == pytest.approx(1.0, abs=1e-3)
+        mode = max(got, key=lambda b: b.probability)
+        m_lo, m_hi = axis.interval_c(mode.bucket_c)
+        assert m_lo <= centre < m_hi, (
+            f"{icao}: mode bucket {mode.bucket_c} = [{m_lo}, {m_hi}) "
+            f"does not contain the central estimate {centre}"
+        )
+
+
+class TestPhaseOneChangedNothing:
+    """
+    The byte-for-byte constraint, asserted directly. Every existing station
+    is on the default axis, and on the default axis the new code path must
+    reproduce the old formulas exactly.
+    """
+
+    def test_every_registered_station_is_still_on_the_default_axis(self):
+        import config
+
+        for icao, st in config.STATIONS.items():
+            assert bucket_axis.for_station(st).is_default, icao
+
+    def test_the_default_axis_reproduces_the_historical_interval_formulas(self):
+        for b in range(-30, 56):
+            assert AXIS_C1.interval_c(b) == (b - 0.5, b + 0.5)
+            assert BucketAxis(edge_mode="floor").interval_c(b) == (
+                float(b), float(b + 1)
+            )
+
+    def test_the_default_axis_reproduces_the_historical_rounding(self):
+        t = -20.0
+        while t <= 60.0:
+            assert AXIS_C1.key_for_temp_c(t, -100, 100) == math.floor(t + 0.5), t
+            assert BucketAxis(edge_mode="floor").key_for_temp_c(
+                t, -100, 100
+            ) == math.floor(t), t
+            t = round(t + 0.1, 1)
