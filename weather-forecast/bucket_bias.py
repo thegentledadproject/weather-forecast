@@ -356,8 +356,18 @@ def derived_bias_stats(station_icao: str) -> tuple:
     backtest cannot compute it differently; this is the third caller and
     must not become the third implementation.
     """
-    errors, _, _ = bucket_bias_samples(station_icao)
-    return calibration.bias_stats(errors)
+    errors, _, detail = bucket_bias_samples(station_icao)
+    if not errors:
+        return calibration.bias_stats(errors)
+    # Same recency weighting as the preferred path in
+    # entry_manager.forecast_bias_stats. The two estimators already differ
+    # in their TRUTH (a reading versus a settled bucket); letting them also
+    # differ in how they age samples would make the fallback incomparable
+    # to the thing it stands in for.
+    dated = [(row[0], err) for row, err in zip(detail, errors)]
+    return calibration.bias_stats_weighted(
+        dated, config.local_today(config.get_station(station_icao)),
+        config.BIAS_HALF_LIFE_DAYS)
 
 
 def ingest_settled_buckets(

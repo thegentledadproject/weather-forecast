@@ -339,9 +339,11 @@ def forecast_bias_stats(station_icao: str) -> tuple:
     """
     try:
         station = config.get_station(station_icao)
-        errors = storage.forecast_error_samples(station_icao, station.resolution_grade_source)
-        if errors:
-            return calibration.bias_stats(errors)
+        dated = storage.forecast_error_samples_dated(
+            station_icao, station.resolution_grade_source)
+        if dated:
+            return calibration.bias_stats_weighted(
+                dated, config.local_today(station), config.BIAS_HALF_LIFE_DAYS)
     except Exception as exc:  # noqa: BLE001 - KeyError (unregistered) or any storage failure
         print(f"[entry_manager] could not measure forecast bias for {station_icao}: {exc}")
         return None, None, None

@@ -192,7 +192,13 @@ def test_statistic_is_calibrations_not_a_local_copy(monkeypatch):
     _stub_storage(monkeypatch,
                   {date(2026, 8, 13): 30.0, date(2026, 8, 15): 32.0},
                   {date(2026, 8, 13): (31, 27, 37), date(2026, 8, 15): (31, 27, 37)})
-    assert bba.derived_bias_stats("VHHH") == calibration.bias_stats([-1.5, 0.5])
+    # derived_bias_stats now recency-weights, so the comparison is against
+    # the weighted statistic -- still calibration's, still not a local copy.
+    import config as _cfg
+    as_of = _cfg.local_today(_cfg.get_station("VHHH"))
+    assert bba.derived_bias_stats("VHHH") == calibration.bias_stats_weighted(
+        [(date(2026, 8, 13), -1.5), (date(2026, 8, 15), 0.5)],
+        as_of, _cfg.BIAS_HALF_LIFE_DAYS)
 
 
 def test_derived_stats_on_nothing_is_unmeasured_not_zero(monkeypatch):

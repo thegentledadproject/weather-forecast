@@ -415,7 +415,7 @@ def test_both_paths_that_build_a_forecast_term_consult_the_exclusion():
 def test_forecast_bias_stats_fails_closed(monkeypatch):
     def _boom(icao, source):
         raise RuntimeError("db down")
-    monkeypatch.setattr(storage, "forecast_error_samples", _boom)
+    monkeypatch.setattr(storage, "forecast_error_samples_dated", _boom)
     assert entry_manager.forecast_bias_stats("WSSS") == (None, None, None)
     # ... and that unknown must keep the station out of the market.
     assert entry_manager.collection_only_reason(
@@ -492,7 +492,11 @@ def test_vhhh_is_paper_only():
 def test_settlement_grade_pairs_win_when_they_exist(monkeypatch):
     # A temperature from the record the market settles on beats a
     # 1-degree bucket, so a station with both must keep using the former.
-    monkeypatch.setattr(storage, "forecast_error_samples", lambda i, s: [-1.0, -1.4, -1.2])
+    # Three same-day errors so the recency weighting is a no-op and the
+    # assertion stays about WHICH sample won, not about the weighting.
+    day = date(2026, 8, 20)
+    monkeypatch.setattr(storage, "forecast_error_samples_dated",
+                        lambda i, s: [(day, -1.0), (day, -1.4), (day, -1.2)])
     import bucket_bias
     monkeypatch.setattr(bucket_bias, "derived_bias_stats",
                         lambda i: (99.0, 500, 0.001))
@@ -503,7 +507,7 @@ def test_settlement_grade_pairs_win_when_they_exist(monkeypatch):
 def test_an_empty_settlement_grade_sample_falls_back(monkeypatch):
     # VHHH's real situation: forecast_error_samples returns [] because its
     # observations and its forecasts cover disjoint date ranges.
-    monkeypatch.setattr(storage, "forecast_error_samples", lambda i, s: [])
+    monkeypatch.setattr(storage, "forecast_error_samples_dated", lambda i, s: [])
     import bucket_bias
     monkeypatch.setattr(bucket_bias, "derived_bias_stats", lambda i: (-1.027, 15, 0.232))
     assert entry_manager.forecast_bias_stats("VHHH") == (-1.027, 15, 0.232)
@@ -512,7 +516,7 @@ def test_an_empty_settlement_grade_sample_falls_back(monkeypatch):
 def test_the_fallback_still_gates_when_it_measures_nothing(monkeypatch):
     # No settlement-grade pairs AND no recorded settlements is "unmeasured",
     # and must reach the gate as such rather than as an unbiased zero.
-    monkeypatch.setattr(storage, "forecast_error_samples", lambda i, s: [])
+    monkeypatch.setattr(storage, "forecast_error_samples_dated", lambda i, s: [])
     import bucket_bias
     monkeypatch.setattr(bucket_bias, "derived_bias_stats", lambda i: (None, 0, None))
     bias, n, stderr = entry_manager.forecast_bias_stats("VHHH")
@@ -523,7 +527,7 @@ def test_the_fallback_still_gates_when_it_measures_nothing(monkeypatch):
 
 
 def test_a_broken_fallback_reads_as_unknown_not_zero(monkeypatch):
-    monkeypatch.setattr(storage, "forecast_error_samples", lambda i, s: [])
+    monkeypatch.setattr(storage, "forecast_error_samples_dated", lambda i, s: [])
     import bucket_bias
 
     def boom(icao):
@@ -531,3 +535,59 @@ def test_a_broken_fallback_reads_as_unknown_not_zero(monkeypatch):
 
     monkeypatch.setattr(bucket_bias, "derived_bias_stats", boom)
     assert entry_manager.forecast_bias_stats("VHHH") == (None, None, None)
+
+
+# --- recency weighting (2026-08-27) ----------------------------------------
+#
+# The estimator was a flat mean over all history, so a stale sample kept
+# full weight forever. These pin the properties that make the weighted form
+# safe to swap in, not the particular half-life.
+
+from datetime import timedelta as _td
+
+
+def test_equal_ages_reproduce_the_unweighted_statistic():
+    # If every sample is the same age the weighting must be a no-op --
+    # otherwise swapping estimators would move every station's bias for no
+    # reason. n must come back as the ROW COUNT here, which is the case
+    # floating point quietly broke first time round.
+    day = date(2026, 8, 20)
+    errs = [-1.0, -1.4, -1.2, -0.8]
+    w = calibration.bias_stats_weighted([(day, e) for e in errs], day, 14.0)
+    u = calibration.bias_stats(errs)
+    assert w[0] == u[0]
+    assert w[1] == u[1] == 4
+    assert w[2] == pytest.approx(u[2], abs=0.06)   # /n vs /(n-1) in the sd
+
+
+def test_a_recent_sample_outweighs_an_old_one():
+    as_of = date(2026, 8, 27)
+    dated = [(as_of, 0.0), (as_of - _td(days=28), -2.0)]
+    bias, _, _ = calibration.bias_stats_weighted(dated, as_of, 14.0)
+    # 28 days is two half-lives, so the old sample carries 1/4 the weight:
+    # (0*1 + -2*0.25) / 1.25 = -0.4, against an unweighted -1.0.
+    assert bias == pytest.approx(-0.4, abs=0.001)
+    assert calibration.bias_stats([0.0, -2.0])[0] == pytest.approx(-1.0)
+
+
+def test_effective_n_falls_as_the_sample_ages():
+    # The gate reads this n. A sample dominated by one recent day carries
+    # less information than its row count claims, and must say so.
+    as_of = date(2026, 8, 27)
+    fresh = [(as_of - _td(days=i), 0.2) for i in range(10)]
+    stale = [(as_of, 0.2)] + [(as_of - _td(days=90), 0.2) for _ in range(9)]
+    assert calibration.bias_stats_weighted(fresh, as_of, 14.0)[1] == 9
+    assert calibration.bias_stats_weighted(stale, as_of, 14.0)[1] <= 2
+
+
+def test_a_future_dated_sample_is_not_weighted_up():
+    # 0.5 ** negative is > 1, which would hand a bad row more influence
+    # than any real observation. Clamp to today instead.
+    as_of = date(2026, 8, 27)
+    dated = [(as_of + _td(days=30), 5.0), (as_of, 0.0)]
+    bias, _, _ = calibration.bias_stats_weighted(dated, as_of, 14.0)
+    assert bias == pytest.approx(2.5)
+
+
+def test_an_empty_sample_is_unmeasured_not_zero():
+    assert calibration.bias_stats_weighted([], date(2026, 8, 27), 14.0) == (None, 0, None)

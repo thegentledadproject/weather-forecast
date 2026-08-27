@@ -482,6 +482,21 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
     on the live path: no blended forecast that day, so no error to measure.
     The pair stays consistent in both directions.
     """
+    return [err for _, err in forecast_error_samples_dated(station_icao, source)]
+
+
+def forecast_error_samples_dated(station_icao: str, source: str) -> List[Tuple[date, float]]:
+    """
+    forecast_error_samples() with each error's target date kept alongside it,
+    so calibration.bias_stats_weighted() can age the sample.
+
+    THE DEFINITION LIVES HERE AND forecast_error_samples() WRAPS IT. Both
+    used to carry their own copy of the pairing rule, which is the drift
+    _forecast_means_in_local_day()'s docstring is about: when that window
+    moved from a UTC date comparison to the station's own local day, a
+    second copy would have kept the old rule and quietly measured the bias
+    over a forecast set nobody trades on.
+    """
     with _db() as conn:
         rows = conn.execute(
             "SELECT target_date, max_temp_c FROM observations "
@@ -492,7 +507,7 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
 
     means = _forecast_means_in_local_day(station_icao)
     return [
-        mean - truth[target_date.isoformat()]
+        (target_date, mean - truth[target_date.isoformat()])
         for target_date, mean in means.items()
         if target_date.isoformat() in truth
     ]

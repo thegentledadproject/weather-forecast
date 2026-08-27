@@ -54,6 +54,83 @@ def bias_stats(errors: List[float]) -> tuple:
     return round(mean, 3), n, round(statistics.stdev(errors) / math.sqrt(n), 3)
 
 
+def bias_stats_weighted(
+    dated_errors,
+    as_of,
+    half_life_days: float,
+) -> tuple:
+    """
+    bias_stats() with exponential recency weighting: the same
+    (bias_c, n, standard_error_c) triple, over the same signed
+    (forecast - settled truth) errors, with a sample from `half_life_days`
+    ago counting half as much as today's.
+
+    dated_errors is [(target_date, error_c), ...]; `as_of` is the date ages
+    are measured from.
+
+    WHY THIS IS A SEPARATE FUNCTION AND NOT A FLAG ON bias_stats().
+    bias_stats() is documented as shared ON PURPOSE so that live and the
+    backtest cannot compute the statistic differently. Adding a mode to it
+    would put a knob inside the one thing that is supposed to be identical
+    on both sides, and every replay's meaning would then depend on how the
+    knob happened to be set. This is a different estimator with a different
+    name; the backtest keeps calling the unweighted one and its history
+    keeps meaning what it meant.
+
+    WHY DECAY RATHER THAN A ROLLING WINDOW. A hard window drops samples,
+    and dropping samples can push a station under
+    MIN_BIAS_PAIRS_BEFORE_ENTRY -- so a change meant to keep the bias
+    HONEST would instead stop stations trading. Decay keeps every sample
+    and merely discounts it, so the sample count degrades smoothly instead
+    of falling off a cliff.
+
+    n IS THE EFFECTIVE SAMPLE SIZE, NOT THE ROW COUNT -- Kish's
+    (sum w)^2 / sum(w^2), rounded down. That is the honest answer to the
+    question the gate actually asks ("is this measured well enough?"): 20
+    rows of which 15 are heavily discounted do not carry 20 rows of
+    information, and reporting 20 there would let a stale sample hold a
+    station's certification open. It is always <= the row count, and equals
+    it exactly when every weight is equal.
+
+    Returns (None, 0, None) for an empty sample, and (bias, n, None) when
+    n_eff < 2 -- matching bias_stats() so callers need no new branch.
+    """
+    if not dated_errors:
+        return None, 0, None
+
+    weights = []
+    errors = []
+    for target_date, err in dated_errors:
+        age = (as_of - target_date).days
+        if age < 0:
+            # A sample from the future is a bug upstream, not something to
+            # weight up. Treat it as today rather than letting 0.5**negative
+            # hand it more influence than any real observation.
+            age = 0
+        weights.append(0.5 ** (age / half_life_days))
+        errors.append(float(err))
+
+    total_w = sum(weights)
+    if total_w <= 0:
+        return None, 0, None
+
+    mean = sum(w * e for w, e in zip(weights, errors)) / total_w
+    # Floor, not round: a fractional effective size should read as the
+    # smaller integer, because overstating it is the direction that lets a
+    # thin sample hold a station's certification open. The epsilon is for
+    # floating point only -- equal weights must give the row count back
+    # exactly, and (3w)^2/(3w^2) lands on 2.9999999999999996 without it.
+    n_eff = int((total_w ** 2) / sum(w * w for w in weights) + 1e-9)
+    if n_eff < 2:
+        return round(mean, 3), n_eff, None
+
+    # Weighted variance about the weighted mean, then the standard error at
+    # the EFFECTIVE size -- the same sd/sqrt(n) shape bias_stats() uses.
+    var = sum(w * (e - mean) ** 2 for w, e in zip(weights, errors)) / total_w
+    stderr = math.sqrt(var) / math.sqrt(n_eff)
+    return round(mean, 3), n_eff, round(stderr, 3)
+
+
 def blend_central_estimate(
     forecasts: List[PointForecast],
     observations: List[ObservedReading],

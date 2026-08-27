@@ -20,6 +20,8 @@ Regression tests for the 2026-08-05 station-expansion risk additions
 
 from datetime import date
 
+import datetime
+
 import config
 import entry_manager
 import storage
@@ -160,8 +162,8 @@ class TestCollectionFirstGate:
         # Same-sized errors so stdev/sqrt(n) lands comfortably inside
         # MAX_BIAS_STANDARD_ERROR_C.
         monkeypatch.setattr(
-            storage, "forecast_error_samples",
-            lambda icao, source: [0.2] * config.MIN_BIAS_PAIRS_BEFORE_ENTRY,
+            storage, "forecast_error_samples_dated",
+            lambda icao, source: [(date(2026, 8, 20), 0.2)] * config.MIN_BIAS_PAIRS_BEFORE_ENTRY,
         )
         monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [])
         monkeypatch.setattr(storage, "load_position_history", lambda *a, **kw: [])

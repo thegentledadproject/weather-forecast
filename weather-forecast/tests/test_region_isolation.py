@@ -22,6 +22,8 @@ whose clock moves twice a year.
 
 import pytest
 
+import datetime
+
 import config
 import scheduler
 from models import StationConfig
@@ -441,8 +443,8 @@ class TestPortfolioCapArgumentIsActuallyApplied:
         # test_portfolio_caps.py uses to graduate a station.
         monkeypatch.setattr(storage, "count_observations_from_source",
                             lambda icao, source: config.MIN_RESOLUTION_OBS_BEFORE_ENTRY)
-        monkeypatch.setattr(storage, "forecast_error_samples",
-                            lambda icao, source: [0.2] * config.MIN_BIAS_PAIRS_BEFORE_ENTRY)
+        monkeypatch.setattr(storage, "forecast_error_samples_dated",
+                            lambda icao, source: [(date(2026, 8, 20), 0.2)] * config.MIN_BIAS_PAIRS_BEFORE_ENTRY)
 
         # Bypass decide_entries()/Kelly sizing: this region's $0 bankroll
         # would already zero recommended_size_usd on its own, which would
