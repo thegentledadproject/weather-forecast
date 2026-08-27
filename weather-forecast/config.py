@@ -2088,6 +2088,62 @@ FORECAST_BLEND_WEIGHT_DEFAULT = 0.85
 # the same open question as the half-life.
 OBSERVATION_LOOKBACK_DAYS = 30
 
+# Exponential recency half-life for the OBSERVED term, in days. None = no
+# decay, i.e. the plain unweighted mean, bit-for-bit.
+#
+# SHIPS INERT AT None. The knob is not the fix; the measured value is, and
+# until the measurement clears its bar this changes nothing. Same pattern as
+# LOTTERY_PROFIT_TAKE_PCT.
+#
+# The problem it exists to solve: the observed term carries 60% of the blend
+# for WSSS and an unweighted mean over ~30 days cannot track a regime. WSSS
+# settled 33.0 on each of 2026-08-19..25 while the term sat at 32.538; the
+# estimate stayed pinned near 32.5, bucket 32 stayed "most likely" every day,
+# and the book bought 32:YES and 33:NO against the run -- -45.2% over nine
+# positions, 8 of them losers, with the MARKET on the correct side
+# throughout.
+#
+# Chosen on multi-class Brier, NEVER on RMSE: the 2026-08-10 blend-weight
+# measurement found RMSE overstated that gain roughly fourfold (-39.2% RMSE
+# against -10.9% Brier). See backtest/observed_half_life.py, which is the
+# measurement, and the spec at
+# docs/superpowers/specs/2026-08-28-recency-weighted-observed-term-design.md.
+#
+# MEASURED 2026-08-28. IT STAYS None: NOTHING CLEARED THE BAR.
+# Pooled over 20 stations, 246 scorable station-days, bias leave-one-out:
+#
+#   half-life   Brier    vs none   hit rate   P(better)
+#   none        0.6898   +0.0000     43.5%    baseline
+#   14          0.6882   -0.0016     43.1%      0.860
+#   7           0.6885   -0.0013     41.9%      0.719
+#   5           0.6856   -0.0041     42.7%      0.928
+#   3           0.6851   -0.0047     42.7%      0.897
+#   2           0.6836   -0.0062     43.9%      0.901
+#
+# No candidate reaches P >= 0.95, the best effect is -0.9% of Brier against
+# the -10.3% the spread change delivered, and the ordering is NOT monotone
+# (7 scores worse than 14). Per station it does not hold either: at the
+# best pooled candidate 7 stations improve and 4 worsen.
+#
+# WSSS ALONE -- the only station with real leverage here, since its 0.40
+# blend weight puts 60% on the observed term against 15% everywhere else --
+# looks better and still does not earn it: none 0.5449, 14 -> 0.5333
+# (P=0.953), 7 -> 0.5335, 5 -> 0.5295 (the BEST Brier, at P=0.842), 3 ->
+# 0.5308, 2 -> 0.5342. The one cell above 0.95 is not the best point
+# estimate, the ordering is non-monotone, and it is a subgroup of n=27
+# examined only after the pooled test failed. Twelve cells were looked at;
+# one crossing 0.95 is what chance produces. The 2026-08-19 scan-schedule
+# review killed a finding for exactly this (p=0.029 uncorrected -> 0.522
+# corrected across 5 candidate hours).
+#
+# The mechanism is still real -- an unweighted mean provably cannot track a
+# regime, and that is what the 2026-08-21..27 losses were. What is missing
+# is EVIDENCE THAT DECAY IS THE RIGHT FIX AT A PARTICULAR DEPTH. Re-run when
+# WSSS has materially more than 27 settled days; a directional prior plus a
+# 0.9% pooled effect is not a reason to move a constant that feeds real
+# orders.
+OBSERVED_HALF_LIFE_DAYS = None
+
 # Per-station overrides. WSSS is the one station that genuinely wants a
 # persistence-heavy blend, and that part is not a fitting artifact:
 # equatorial Singapore's daily max barely moves, so yesterday really does
