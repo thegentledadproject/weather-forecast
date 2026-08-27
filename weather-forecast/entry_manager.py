@@ -576,6 +576,22 @@ def evaluate_entry(
             f"({config.MAX_ENTRY_PRICE:.2f}) -- too little upside left to justify the stake."
         )
 
+    # Veto 00b: the blocked price band. A property of the instrument, like
+    # the ceiling above, so it sits beside it rather than among the
+    # edge-quality gates -- nothing about the signal rescues a token in a
+    # band that loses money held to settlement.
+    if config.entry_price_is_blocked(ev_result.market_price):
+        low, high = config.ENTRY_PRICE_BLOCK_BAND
+        print(
+            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: entry price "
+            f"{ev_result.market_price:.3f} is inside the blocked {low:.2f}-{high:.2f} band "
+            f"(config.ENTRY_PRICE_BLOCK_BAND)."
+        )
+        return _rejected(
+            f"Entry price {ev_result.market_price:.3f} is inside the blocked "
+            f"{low:.2f}-{high:.2f} band (ENTRY_PRICE_BLOCK_BAND)."
+        )
+
     # Veto 0a: edge plausibility. An edge this large on a liquid weather
     # market is bad data, not alpha -- reject before it can be sized.
     raw_edge = ev_result.raw_edge

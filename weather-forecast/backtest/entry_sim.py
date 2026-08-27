@@ -40,6 +40,7 @@ one's, so a reordered replica would produce EntryDecisions that differ
 from live even when the approve/reject verdict matched.
 
   0. Veto 00   market_price > config.MAX_ENTRY_PRICE      -> reject
+  0b. Veto 00b config.entry_price_is_blocked(price)       -> reject
   1. Veto 0a   |raw edge| > entry_manager.max_plausible_edge_for(price)
                (the flat MAX_PLAUSIBLE_RAW_EDGE below price 0.50, the
                price-relative headroom ceiling above it)  -> reject
@@ -121,7 +122,8 @@ from ev_engine import best_opportunities  # noqa: F401  (re-exported for tests)
 # one, so it lives in decide_portfolio_entries()/_sim() beside the
 # portfolio budget rather than inside evaluate_entry(). Nothing was added
 # to or removed from the per-candidate sequence below.
-GATE_COUNT = 15  # 12 until 2026-08-09 (Veto 00, MAX_ENTRY_PRICE);
+GATE_COUNT = 16  # 12 until 2026-08-09 (Veto 00, MAX_ENTRY_PRICE);
+                 # 16 from 2026-08-27 (Veto 00b, ENTRY_PRICE_BLOCK_BAND);
                  # 13 -> 15 on 2026-08-25 (Veto 0b2, the opposite-side lock)
 
 
@@ -204,6 +206,18 @@ def evaluate_entry_sim(
         return _rejected(
             f"Entry price {ev.market_price:.3f} above MAX_ENTRY_PRICE "
             f"({config.MAX_ENTRY_PRICE:.2f}) -- too little upside left to justify the stake."
+        )
+
+    # --- Gate 0b: Veto 00b, blocked entry-price band ---------------------
+    # config.entry_price_is_blocked() rather than a restated comparison,
+    # for the same reason max_plausible_edge_for() is imported below: the
+    # boundary semantics (half-open) must not be able to differ between
+    # live and replay.
+    if config.entry_price_is_blocked(ev.market_price):
+        low, high = config.ENTRY_PRICE_BLOCK_BAND
+        return _rejected(
+            f"Entry price {ev.market_price:.3f} is inside the blocked "
+            f"{low:.2f}-{high:.2f} band (ENTRY_PRICE_BLOCK_BAND)."
         )
 
     # --- Gate 1: Veto 0a, edge plausibility ------------------------------

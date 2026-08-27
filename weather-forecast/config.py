@@ -1151,6 +1151,63 @@ STOP_EXEMPT_ABOVE_PRICE = 1.01
 # a risk control, and it evaporates the moment min_net_ev is lowered.
 MAX_ENTRY_PRICE = 0.75
 
+# A price band this system refuses to buy in, as (low, high) with the high
+# EXCLUSIVE -- or None for "buy at any price under the ceiling above".
+#
+# DEFAULT None. The measurement that motivates it is below; the decision to
+# act on it is not made here, because a band gate deletes a large slice of
+# the book and the observational case for one is exactly the kind that
+# backtest/take_sweep.py has already embarrassed once this week.
+#
+# THE CASE FOR 0.15-0.25, scored 2026-08-27 over 331 truth-matched closed
+# positions (targets 08-06..26, $2,816 staked), band by entry price:
+#
+#   band        n   stake  realized     held   model-truth
+#   <0.15      77     216    -12.5%   +53.8%        +0.039
+#   0.15-0.25  64     261    -19.7%   -25.4%        +0.221
+#   0.25-0.40  70     412     -9.2%   +24.1%        +0.043
+#   0.40-0.60  64     817     +2.3%   +52.3%        -0.072
+#   0.60+      56    1111     -3.0%    +0.5%        +0.134
+#
+# 0.15-0.25 is THE ONLY BAND NEGATIVE ON THE HELD-TO-SETTLEMENT
+# COUNTERFACTUAL, and that counterfactual is an UPPER bound (a winner exits
+# at the take-profit, not at 1.00 -- see stop_loss_audit's 2026-08-24
+# correction). A band that loses at its upper bound loses under every
+# honest counterfactual, so no exit tuning rescues it: the tokens are
+# wrong. The model runs +0.221 above the realized rate there, five times
+# its error in either neighbouring band, while the market is only +0.041
+# hot.
+#
+# WHY IT IS STILL OFF. The <0.15 band next door shows what happens when an
+# observational read drives a rule change: the same 2026-08-27 analysis
+# said its take-profit was leaking ~$150 over 38 trades, and the replay
+# that controls for entry selection said REMOVING that take-profit doubles
+# the cohort's loss (-18.6% -> -37.6%). Turn this on only against a replay
+# that shows the same ordering per station and across windows.
+ENTRY_PRICE_BLOCK_BAND = None
+
+
+def entry_price_is_blocked(price) -> bool:
+    """
+    Whether ENTRY_PRICE_BLOCK_BAND forbids buying at `price`.
+
+    Half-open [low, high) so the band boundaries mean what they meant when
+    the bands were scored: a 0.25 print belongs to the 0.25-0.40 row, not
+    to the band being blocked.
+
+    An unknown price is NOT blocked. This gate exists to remove a
+    measured-bad band, and every other price gate here already fails
+    closed on its own terms -- MAX_ENTRY_PRICE rejects an unpriceable
+    candidate, sizing refuses it. Failing closed twice would turn one
+    missing quote into a silent second veto whose reason names the wrong
+    thing.
+    """
+    band = ENTRY_PRICE_BLOCK_BAND
+    if band is None or price is None:
+        return False
+    low, high = band
+    return low <= price < high
+
 # After this many stop-loss exits on the same (station, date, bucket, side),
 # entries there are blocked for the rest of the day. The per-bucket open-
 # position cap stops STACKING but has no memory of exits, so on 2026-08-03
