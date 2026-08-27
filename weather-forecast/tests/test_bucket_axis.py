@@ -254,3 +254,88 @@ class TestSettlementOnAFahrenheitAxis:
         assert resolution.bucket_for_temp(33.9, 27, 37, "half_up") == 34
         assert resolution.bucket_for_temp(-50.0, 27, 37, "half_up") == 27
         assert resolution.bucket_for_temp(500.0, 27, 37, "half_up") == 37
+
+
+class TestDiscoveryParsesTheMarketsAxis:
+    F_AXIS = BucketAxis(unit="F", step=2)
+    NYC_LABELS = [
+        "69°F or below", "70-71°F", "72-73°F", "74-75°F",
+        "76-77°F", "78-79°F", "80-81°F", "82-83°F",
+        "84-85°F", "86-87°F", "88°F or higher",
+    ]
+
+    def test_every_real_nyc_label_parses_onto_the_grid(self):
+        import market_discovery as md
+
+        got = [
+            md.parse_bucket_label({"groupItemTitle": lab}, axis=self.F_AXIS)
+            for lab in self.NYC_LABELS
+        ]
+        assert got == [68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88]
+
+    def test_a_non_consecutive_pair_is_rejected_not_guessed(self):
+        import market_discovery as md
+
+        assert md.parse_bucket_label(
+            {"groupItemTitle": "70-73°F"}, axis=self.F_AXIS
+        ) is None
+
+    def test_a_celsius_label_is_not_parsed_by_the_f_branch(self):
+        import market_discovery as md
+
+        assert md.parse_bucket_label(
+            {"groupItemTitle": "31°C"}, axis=self.F_AXIS
+        ) is None
+
+    def test_the_date_in_a_question_is_still_thrown_out(self):
+        import market_discovery as md
+
+        q = ("Will the highest temperature in NYC on August 27, 2026 be "
+             "80-81°F?")
+        assert md.parse_bucket_label({"question": q}, axis=self.F_AXIS) == 80
+
+    def test_sub_zero_celsius_keeps_its_sign(self):
+        # Toronto and Buenos Aires. Today "-2C" parses as 2.
+        import market_discovery as md
+
+        assert md.parse_bucket_label({"groupItemTitle": "-2°C"}) == -2
+
+    def test_celsius_parsing_is_otherwise_unchanged(self):
+        import market_discovery as md
+
+        assert md.parse_bucket_label({"groupItemTitle": "31°C"}) == 31
+        assert md.parse_bucket_label(
+            {"groupItemTitle": "27°C or below"}
+        ) == 27
+
+
+class TestDeriveBucketBoundsIsStepAware:
+    def test_a_step_two_grid_is_accepted(self):
+        import market_discovery as md
+
+        tm = {k: {} for k in [68, 70, 72, 74, 76, 78, 80, 82, 84, 86, 88]}
+        assert md.derive_bucket_bounds(tm, step=2) == (68, 88)
+
+    def test_a_step_one_map_at_a_step_two_station_is_rejected(self):
+        import market_discovery as md
+
+        tm = {k: {} for k in range(78, 89)}
+        assert md.derive_bucket_bounds(tm, step=2) is None
+
+    def test_a_uniformly_shifted_odd_grid_is_rejected(self):
+        import market_discovery as md
+
+        tm = {k: {} for k in [69, 71, 73, 75, 77, 79, 81, 83, 85, 87, 89]}
+        assert md.derive_bucket_bounds(tm, step=2) is None
+
+    def test_a_short_map_is_still_rejected(self):
+        import market_discovery as md
+
+        tm = {k: {} for k in [68, 70, 72, 74, 76, 78, 80, 82, 84]}
+        assert md.derive_bucket_bounds(tm, step=2) is None
+
+    def test_celsius_behaviour_is_unchanged(self):
+        import market_discovery as md
+
+        assert md.derive_bucket_bounds({k: {} for k in range(27, 38)}) == (27, 37)
+        assert md.derive_bucket_bounds({k: {} for k in range(27, 37)}) is None

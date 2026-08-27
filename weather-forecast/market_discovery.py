@@ -53,7 +53,9 @@ from typing import Dict, Optional, Tuple
 
 import requests
 
+import bucket_axis
 import config
+from bucket_axis import AXIS_C1, BucketAxis, UNIT_F
 from models import StationConfig
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"
@@ -94,32 +96,43 @@ def fetch_event(slug: str, timeout: int = 10) -> Optional[dict]:
         return None
 
 
-# A bucket number, and ONLY a number that is explicitly marked as degrees:
-# "31°C", "31 °C", "36°". The degree marker is not decoration here, it is
-# the entire guard. The old pattern made the marker optional and took the
-# FIRST match, which is catastrophic on the question-text fallback: "Will
-# the highest temperature in Tokyo on August 6, 2026 be 27°C or below?"
-# parsed as bucket 6 (the calendar day). Requiring "°" throws out dates,
-# years and stray digits; taking the LAST match throws out anything that
-# still sneaks past (a label that mentions the date after the degrees).
-_BUCKET_NUM_RE = re.compile(r"(\d+)\s*°")
+# Celsius: unchanged. Requiring "°" throws out dates, years and stray
+# digits; taking the LAST match throws out anything that still sneaks past.
+# The sign IS captured -- Toronto and Buenos Aires have sub-zero windows,
+# and "-2°C" parsed as 2 is a wrong key, not a missed one.
+_BUCKET_NUM_RE = re.compile(r"(-?\d+)\s*°")
+
+# Fahrenheit: the unit letter is REQUIRED, and the range form must be
+# matched as a range. This is not fussiness -- the Celsius plausibility band
+# below cannot police an F axis at all (a real "9°F or below" bucket
+# overlaps the day-of-month range 1-31), so the "°F" letter is what replaces
+# the band as the guard against parsing a date.
+_F_RANGE_RE = re.compile(r"(-?\d+)\s*-\s*(\d+)\s*°\s*F", re.IGNORECASE)
+_F_SINGLE_RE = re.compile(r"(-?\d+)\s*°\s*F", re.IGNORECASE)
+_C_UNIT_RE = re.compile(r"°\s*C", re.IGNORECASE)
+
 _OR_BELOW_RE = re.compile(r"or\s+(below|lower|less)", re.IGNORECASE)
 _OR_ABOVE_RE = re.compile(r"or\s+(above|higher|more)", re.IGNORECASE)
 
-# Plausibility band for a parsed bucket, in whole degrees C. Every
-# registered city's live window sits inside 25..40, and Polymarket only
-# drifts it a few degrees seasonally, so 5..50 never vetoes a real bucket
-# while still rejecting a year ("2026°"? never seen, but the cost of
-# allowing it is a silently wrong map) or any other numeric artifact.
-MIN_PLAUSIBLE_BUCKET_C = 5
-MAX_PLAUSIBLE_BUCKET_C = 50
+# Plausibility band per unit. The Celsius FLOOR drops from 5 to -30 because
+# Toronto and Buenos Aires both run below 5°C, and the old justification
+# ("every registered city's live window sits inside 25..40") stopped being
+# true when Europe was registered. The Celsius CEILING stays at 50, exactly
+# as it was: its job is rejecting a year ("2026°") and it still does that.
+# Widening a guard nobody asked to widen is how a real bucket veto turns
+# into a phantom edge.
+_PLAUSIBLE_BAND = {"C": (-30, 50), "F": (-20, 130)}
+
+# Kept as module-level names because tests and other modules read them.
+MIN_PLAUSIBLE_BUCKET_C, MAX_PLAUSIBLE_BUCKET_C = _PLAUSIBLE_BAND["C"]
 
 
-def _degree_numbers(label: str) -> list:
+def _degree_numbers(label: str, unit: str = "C") -> list:
     """Every plausible degree-marked number in a label, in order of appearance."""
+    lo, hi = _PLAUSIBLE_BAND[unit]
     return [
         n for n in (int(m) for m in _BUCKET_NUM_RE.findall(label))
-        if MIN_PLAUSIBLE_BUCKET_C <= n <= MAX_PLAUSIBLE_BUCKET_C
+        if lo <= n <= hi
     ]
 
 
@@ -127,6 +140,8 @@ def parse_bucket_label(
     market: dict,
     bucket_min: Optional[int] = None,
     bucket_max: Optional[int] = None,
+    *,
+    axis: BucketAxis = AXIS_C1,
 ) -> Optional[int]:
     """
     Extract the whole-degree-C bucket this market represents, from
@@ -153,10 +168,38 @@ def parse_bucket_label(
     the system confidently sizes a "20-cent edge" that exists only
     because a regex read a date. Discovery correctness is a risk
     control, not a convenience.
+
+    RETURNS THE BUCKET'S LOWER EDGE, in the axis's own unit. On the Celsius
+    whole-degree axis that is the printed number, unchanged. On a step-2
+    Fahrenheit axis, "70-71°F" is key 70 and "69°F or below" is key 68
+    (= printed_top + 1 - step), so the keys form a uniform grid. See
+    bucket_axis.BucketAxis.label() for the inverse.
     """
     # groupItemTitle first (the short, authoritative label); the question
     # text is a fallback because it is prose and prose contains dates.
     labels = [market.get("groupItemTitle") or "", market.get("question") or ""]
+
+    if axis.unit == UNIT_F:
+        for label in labels:
+            if _C_UNIT_RE.search(label):
+                continue  # a Celsius label on an F station is not ours to guess
+            m = _F_RANGE_RE.search(label)
+            if m:
+                low, high = int(m.group(1)), int(m.group(2))
+                if high - low != axis.step - 1:
+                    continue  # not this axis's width -- reject, never guess
+                return low
+            m = _F_SINGLE_RE.search(label)
+            if not m:
+                continue
+            n = int(m.group(1))
+            lo_band, hi_band = _PLAUSIBLE_BAND[UNIT_F]
+            if not lo_band <= n <= hi_band:
+                continue
+            if _OR_BELOW_RE.search(label):
+                return n + 1 - axis.step
+            return n
+        return None
 
     for label in labels:
         numbers = _degree_numbers(label)
@@ -175,7 +218,9 @@ def parse_bucket_label(
     return None
 
 
-def derive_bucket_bounds(token_map: Dict[int, dict]) -> Optional[Tuple[int, int]]:
+def derive_bucket_bounds(
+    token_map: Dict[int, dict], step: int = 1
+) -> Optional[Tuple[int, int]]:
     """
     The (min, max) bucket bounds implied by a DISCOVERED token map --
     the authoritative bounds for the trading path, since Polymarket
@@ -192,16 +237,27 @@ def derive_bucket_bounds(token_map: Dict[int, dict]) -> Optional[Tuple[int, int]
     bucket becomes a phantom ~0.20 NO-side edge that clears every risk
     gate (see parse_bucket_label). A partial map is worse than no map,
     because no map merely skips the cycle.
+
+    step is the market's bucket width in its own unit. At step=1 this is
+    provably the same predicate as the contiguity test it replaces. At
+    step=2 it additionally rejects the failure today's regex actually
+    produces on an American event: "70-71°F" yields only 71, giving a
+    step-1 map whose span is 10 rather than 20.
     """
     if not token_map:
         return None
 
     keys = sorted(token_map)
-    lo, hi = keys[0], keys[-1]
-    if len(keys) != hi - lo + 1:
-        return None  # non-contiguous: at least one bucket is missing from the middle
     if len(keys) != config.EXPECTED_BUCKET_COUNT:
-        return None  # right shape, wrong size: not the 11-outcome event we know how to price
+        return None  # short or long: not the 11-outcome event we know how to price
+    lo, hi = keys[0], keys[-1]
+    # Every listed bucket's lower edge is a multiple of step. A uniformly
+    # shifted grid (e.g. 69,71,..,89 instead of 68,70,..,88) is arithmetically
+    # contiguous too, but it is not this station's grid.
+    if lo % step != 0:
+        return None
+    if keys != list(range(lo, hi + step, step)):
+        return None  # gap, off-grid key, or the wrong step for this station
     return lo, hi
 
 
@@ -283,6 +339,7 @@ def get_market_state(
     as grounds to close a position as resolved, and never raises out of
     here on a network failure (fetch_event already fails soft).
     """
+    axis = bucket_axis.for_station(station)
     slug = build_event_slug(station, target_date)
     event = fetch_event(slug, timeout=timeout)
     if event is None:
@@ -293,7 +350,7 @@ def get_market_state(
         markets = event.get("markets", []) or []
         source = None
         for market in markets:
-            if parse_bucket_label(market, bucket_min, bucket_max) == bucket_c:
+            if parse_bucket_label(market, bucket_min, bucket_max, axis=axis) == bucket_c:
                 source = market
                 break
         if source is None:
@@ -335,6 +392,7 @@ def discover_token_map(
     the bounds mismatch is what derive_bucket_bounds surfaces to the
     caller as config drift.
     """
+    axis = bucket_axis.for_station(station)
     slug = build_event_slug(station, target_date)
     event = fetch_event(slug)
     if event is None:
@@ -344,7 +402,7 @@ def discover_token_map(
     token_map = {}
 
     for market in markets:
-        bucket_c = parse_bucket_label(market, bucket_min, bucket_max)
+        bucket_c = parse_bucket_label(market, bucket_min, bucket_max, axis=axis)
         if bucket_c is None:
             print(f"[market_discovery] could not parse bucket label from market: {market.get('question', '?')}")
             continue
