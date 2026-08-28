@@ -82,12 +82,23 @@ class TestPerStationCoverageFloor:
         assert metar_client.min_reports_for_station(_station(24)) == 12
 
     def test_registered_station_floor_is_still_24(self):
-        # No US station is registered yet -- every station in the live
-        # registry still expects half-hourly filing (48/day) and must still
-        # be held to a floor of 24.
-        for icao in config.STATIONS:
-            station = config.get_station(icao)
+        # NOT every station any more -- Task 17 registered eleven US
+        # Fahrenheit cities that file hourly (expected_metar_reports_per_day
+        # =24, floor 12), the exact defect this class exists to fix. Every
+        # pre-existing station still expects half-hourly filing (48/day) and
+        # must still be held to a floor of 24.
+        for icao, station in config.STATIONS.items():
+            if station.expected_metar_reports_per_day != 48:
+                continue
             assert metar_client.min_reports_for_station(station) == 24, icao
+
+    def test_the_eleven_hourly_us_stations_get_a_floor_of_12(self):
+        # The positive half of the same narrowing: Task 17's US cohort
+        # declares expected_metar_reports_per_day=24 (hourly ASOS filing),
+        # which must derive a floor of 12, not the half-hourly 24.
+        for icao, station in config.STATIONS.items():
+            if station.expected_metar_reports_per_day == 24:
+                assert metar_client.min_reports_for_station(station) == 12, icao
 
     def test_23_of_48_expected_still_declined(self):
         # Regression for the defect: a half-hourly station with 23 reports
@@ -138,13 +149,15 @@ class TestExpectedReportsValidation:
         assert metar_client.min_reports_for_station(station) == 1
 
     def test_registered_stations_pass_validation(self):
-        # Confirms the guard doesn't disturb the default path: every
-        # already-registered station still constructs cleanly (config.py
-        # importing STATIONS already proves this, but assert it directly)
-        # and still derives exactly today's floor of 24.
-        for icao in config.STATIONS:
-            station = config.get_station(icao)
-            assert station.expected_metar_reports_per_day == 48, icao
+        # Confirms the guard doesn't disturb the default path: every station
+        # still constructs cleanly (config.py importing STATIONS already
+        # proves this, but assert it directly). expected_metar_reports_per_day
+        # is no longer uniformly 48 -- Task 17's eleven US cities declare 24
+        # (hourly filing) -- so this only pins the pre-Task-17 stations to
+        # their historical default and floor.
+        for icao, station in config.STATIONS.items():
+            if station.expected_metar_reports_per_day != 48:
+                continue
             assert metar_client.min_reports_for_station(station) == 24, icao
 
 

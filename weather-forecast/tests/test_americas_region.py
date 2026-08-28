@@ -222,3 +222,53 @@ class TestTheFourCelsiusCities:
                     f"offset {offset} mixes an Americas station with "
                     f"another region's"
                 )
+
+
+AMERICAS_FAHRENHEIT = (
+    "KLGA", "KATL", "KMIA", "KORD", "KHOU", "KDAL",
+    "KAUS", "KBKF", "KLAX", "KSFO", "KSEA",
+)
+
+
+class TestTheElevenFahrenheitCities:
+    def test_they_declare_a_fahrenheit_step_two_axis(self):
+        import bucket_axis
+
+        for icao in AMERICAS_FAHRENHEIT:
+            axis = bucket_axis.for_station(config.STATIONS[icao])
+            assert axis.unit == "F", icao
+            assert axis.step == 2, icao
+
+    def test_their_windows_are_eleven_buckets_on_a_step_two_grid(self):
+        for icao in AMERICAS_FAHRENHEIT:
+            st = config.STATIONS[icao]
+            assert (st.bucket_max_c - st.bucket_min_c) % 2 == 0, icao
+            assert (st.bucket_max_c - st.bucket_min_c) // 2 + 1 == 11, icao
+
+    def test_none_of_them_may_trade_real_money(self):
+        for icao in AMERICAS_FAHRENHEIT:
+            assert icao not in config.LIVE_TRADING_STATIONS, icao
+            assert not config.live_mode_is_permitted(icao, "live"), icao
+
+    def test_pricing_one_of_them_without_an_axis_raises(self):
+        from datetime import date
+
+        import probability
+        from models import CalibratedEstimate
+
+        est = CalibratedEstimate(
+            station_icao=AMERICAS_FAHRENHEIT[0], target_date=date(2026, 8, 27),
+            central_estimate_c=26.0, std_dev_c=1.0, monsoon_phase="unknown",
+        )
+        with pytest.raises(ValueError, match="axis"):
+            probability.bucket_probabilities(est, 68, 88)
+
+    def test_their_labels_read_back_as_the_market_prints_them(self):
+        import bucket_axis
+
+        st = config.STATIONS[AMERICAS_FAHRENHEIT[0]]
+        axis = bucket_axis.for_station(st)
+        lo, hi = st.bucket_min_c, st.bucket_max_c
+        assert axis.label(lo, lo, hi).endswith("°F or below")
+        assert axis.label(hi, lo, hi).endswith("°F or higher")
+        assert "-" in axis.label(lo + 2, lo, hi)

@@ -840,9 +840,9 @@ STATIONS = {
     # --- Americas --------------------------------------------------------
     # Registered 2026-08-28. Confirmed facts in
     # docs/superpowers/research/2026-08-27-americas-station-facts.md. Four
-    # Celsius, 1-degree-bucket cities out of the Americas cohort -- the
-    # region's Fahrenheit/2-degree US cities are a separate, later task and
-    # are NOT registered here.
+    # Celsius, 1-degree-bucket cities out of the Americas cohort. The
+    # region's eleven Fahrenheit/2-degree US cities (Task 17) are
+    # registered separately, below the four Celsius entries.
     #
     # region="americas" draws on its OWN capital pool, already wired (see
     # REGION_BANKROLL_USD etc. below) with a real-money blast radius locked
@@ -997,6 +997,327 @@ STATIONS = {
         bucket_max_c=24,
         bucket_unit="C",
         bucket_step=1,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    # --- Americas: US Fahrenheit cohort (Task 17) -------------------------
+    # Registered 2026-08-28. Confirmed facts in
+    # docs/superpowers/research/2026-08-27-americas-station-facts.md
+    # ("Task 17a"). These eleven are Fahrenheit, 2-degree-step markets --
+    # the whole reason the bucket-axis subsystem was built. Like the four
+    # Celsius Americas cities above, they draw on the "americas" capital
+    # pool (locked at 0/0.0/0 real-money blast radius) and are NOT on
+    # LIVE_TRADING_STATIONS -- collection-only, structurally cannot trade
+    # real money regardless of anything else in this file.
+    #
+    # bucket_min_c/bucket_max_c are LOWER-EDGE keys, not the printed catch-
+    # all numbers: for a ladder printed "X or below, (X+1)-(X+2), ...,
+    # Y or higher" with step 2, the bottom key is X+1-2, i.e. one step below
+    # the first interior bucket's own lower edge. Each city's arithmetic is
+    # shown in the research doc; e.g. NYC's printed "71 or below" ->
+    # bucket_min_c=70 (71+1-2), not 71.
+    #
+    # expected_metar_reports_per_day=24 for all eleven -- confirmed by
+    # direct count of scheduled hourly METAR lines per station (SPECI
+    # excluded). US ASOS files hourly, not the ~48/day default this
+    # dataclass assumes for a tropical half-hourly station.
+    #
+    # Four of the eleven ICAOs are deliberately NOT the "obvious" airport --
+    # each is read from that city's own rules-text site= URL, not inferred:
+    # New York -> KLGA (La Guardia, not KJFK/KNYC), Houston -> KHOU (Hobby,
+    # not KIAH), Dallas -> KDAL (Love Field, not KDFW), Denver -> KBKF
+    # (Buckley Space Force Base in Aurora CO, not KDEN -- a different city
+    # from the market's own name). Registering the "obvious" airport instead
+    # would point the system at the wrong thermometer and mis-settle every
+    # day.
+    #
+    # long_term_normal_max_c is, per the same convention as every prior
+    # region, the MIDPOINT of each city's live bucket window at
+    # registration time (August 2026) -- an honestly-labeled placeholder,
+    # not a sourced climatological normal. Dallas/Austin's window reflects a
+    # live Texas heat event and San Francisco's reflects its ordinary cool
+    # marine-layer summer, per the research doc -- neither should be reused
+    # as a stable seasonal figure once conditions change.
+    "KLGA": StationConfig(
+        icao="KLGA",
+        display_name="LaGuardia Airport",
+        country="United States",
+        lat=40.775,
+        lon=-73.875,
+        wunderground_slug="us/ny/east-elmhurst/KLGA",
+        long_term_normal_max_c=26.7,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (70-90F = 80F) as read in AUGUST
+                                       # 2026, NOT a sourced NWS 1991-2020
+                                       # normal (the CLI report for this
+                                       # exact station/date gives 83F/28.3C
+                                       # as a cross-check only).
+        official_client_key="wwis",
+        wwis_city_name="New York City, New York",
+        polymarket_city_slug="nyc",
+        region="americas",
+        iana_timezone="America/New_York",
+        utc_offset_hours=-5,
+        bucket_min_c=70,
+        bucket_max_c=90,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KATL": StationConfig(
+        icao="KATL",
+        display_name="Hartsfield-Jackson Atlanta International Airport",
+        country="United States",
+        lat=33.63667,
+        lon=-84.42806,
+        wunderground_slug="us/ga/atlanta/KATL",
+        long_term_normal_max_c=32.2,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (80-100F = 90F) as read in AUGUST
+                                       # 2026, NOT a sourced normal.
+        official_client_key="wwis",
+        wwis_city_name="Atlanta, Georgia",
+        polymarket_city_slug="atlanta",
+        region="americas",
+        iana_timezone="America/New_York",
+        utc_offset_hours=-5,
+        bucket_min_c=80,
+        bucket_max_c=100,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KMIA": StationConfig(
+        icao="KMIA",
+        display_name="Miami International Airport",
+        country="United States",
+        lat=25.79333,
+        lon=-80.29056,
+        wunderground_slug="us/fl/miami/KMIA",
+        long_term_normal_max_c=32.2,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (80-100F = 90F) as read in AUGUST
+                                       # 2026, NOT a sourced normal.
+        official_client_key="wwis",
+        wwis_city_name="Miami, Florida",
+        polymarket_city_slug="miami",
+        region="americas",
+        iana_timezone="America/New_York",
+        utc_offset_hours=-5,
+        bucket_min_c=80,
+        bucket_max_c=100,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KORD": StationConfig(
+        icao="KORD",
+        display_name="O'Hare International Airport",
+        country="United States",
+        lat=41.97861,
+        lon=-87.90472,
+        wunderground_slug="us/il/chicago/KORD",
+        long_term_normal_max_c=28.9,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (74-94F = 84F) as read in AUGUST
+                                       # 2026, NOT a sourced normal.
+        official_client_key="wwis",
+        wwis_city_name="Chicago, Illinois",
+        polymarket_city_slug="chicago",
+        region="americas",
+        iana_timezone="America/Chicago",
+        utc_offset_hours=-6,
+        bucket_min_c=74,
+        bucket_max_c=94,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KHOU": StationConfig(
+        icao="KHOU",
+        display_name="William P. Hobby Airport",
+        country="United States",
+        lat=29.64556,
+        lon=-95.27889,
+        wunderground_slug="us/tx/houston/KHOU",
+        long_term_normal_max_c=32.2,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (80-100F = 90F) as read in AUGUST
+                                       # 2026, NOT a sourced normal.
+        official_client_key="wwis",
+        wwis_city_name="Houston, Texas",
+        polymarket_city_slug="houston",
+        region="americas",
+        iana_timezone="America/Chicago",
+        utc_offset_hours=-6,
+        bucket_min_c=80,
+        bucket_max_c=100,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KDAL": StationConfig(
+        icao="KDAL",
+        display_name="Dallas Love Field",
+        country="United States",
+        lat=32.84722,
+        lon=-96.85167,
+        wunderground_slug="us/tx/dallas/KDAL",
+        long_term_normal_max_c=37.8,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (90-110F = 100F) as read in AUGUST
+                                       # 2026 DURING A LIVE TEXAS HEAT EVENT
+                                       # -- not a stable seasonal normal, do
+                                       # not reuse once the event passes.
+        official_client_key="wwis",
+        # WWIS lists this city as "Dallas Ft Worth, Texas" -- no bare
+        # "Dallas, Texas" entry exists. This is independent of, and does
+        # not need to match, the settlement airport (KDAL/Love Field).
+        wwis_city_name="Dallas Ft Worth, Texas",
+        polymarket_city_slug="dallas",
+        region="americas",
+        iana_timezone="America/Chicago",
+        utc_offset_hours=-6,
+        bucket_min_c=90,
+        bucket_max_c=110,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KAUS": StationConfig(
+        icao="KAUS",
+        display_name="Austin-Bergstrom International Airport",
+        country="United States",
+        lat=30.19444,
+        lon=-97.67000,
+        wunderground_slug="us/tx/austin/KAUS",
+        long_term_normal_max_c=37.8,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (90-110F = 100F) as read in AUGUST
+                                       # 2026 DURING A LIVE TEXAS HEAT EVENT
+                                       # -- not a stable seasonal normal, do
+                                       # not reuse once the event passes.
+        official_client_key="wwis",
+        wwis_city_name="Austin, Texas",
+        polymarket_city_slug="austin",
+        region="americas",
+        iana_timezone="America/Chicago",
+        utc_offset_hours=-6,
+        bucket_min_c=90,
+        bucket_max_c=110,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KBKF": StationConfig(
+        icao="KBKF",
+        display_name="Buckley Space Force Base",
+        country="United States",
+        lat=39.70167,
+        lon=-104.75167,
+        wunderground_slug="us/co/aurora/KBKF",
+        long_term_normal_max_c=33.3,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (82-102F = 92F) as read in AUGUST
+                                       # 2026, NOT a sourced normal.
+        official_client_key="wwis",
+        # WWIS lists this city as "Denver, Colorado" -- the market's own
+        # branding, NOT the settlement station's actual location (Aurora,
+        # CO / Buckley Space Force Base). Both are correct for their own
+        # purpose; do not "fix" one to match the other.
+        wwis_city_name="Denver, Colorado",
+        polymarket_city_slug="denver",
+        region="americas",
+        iana_timezone="America/Denver",
+        utc_offset_hours=-7,
+        bucket_min_c=82,
+        bucket_max_c=102,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KLAX": StationConfig(
+        icao="KLAX",
+        display_name="Los Angeles International Airport",
+        country="United States",
+        lat=33.94250,
+        lon=-118.40806,
+        wunderground_slug="us/ca/los-angeles/KLAX",
+        long_term_normal_max_c=31.1,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (78-98F = 88F) as read in AUGUST
+                                       # 2026, NOT a sourced normal.
+        official_client_key="wwis",
+        wwis_city_name="Los Angeles, California",
+        polymarket_city_slug="los-angeles",
+        region="americas",
+        iana_timezone="America/Los_Angeles",
+        utc_offset_hours=-8,
+        bucket_min_c=78,
+        bucket_max_c=98,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KSFO": StationConfig(
+        icao="KSFO",
+        display_name="San Francisco International Airport",
+        country="United States",
+        lat=37.61889,
+        lon=-122.37500,
+        wunderground_slug="us/ca/san-francisco/KSFO",
+        long_term_normal_max_c=18.9,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (56-76F = 66F) as read in AUGUST
+                                       # 2026 -- San Francisco's ordinary
+                                       # cool marine-layer summer, not an
+                                       # anomaly.
+        official_client_key="wwis",
+        wwis_city_name="San Francisco, California",
+        polymarket_city_slug="san-francisco",
+        region="americas",
+        iana_timezone="America/Los_Angeles",
+        utc_offset_hours=-8,
+        bucket_min_c=56,
+        bucket_max_c=76,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "KSEA": StationConfig(
+        icao="KSEA",
+        display_name="Seattle-Tacoma International Airport",
+        country="United States",
+        lat=47.44889,
+        lon=-122.30944,
+        wunderground_slug="us/wa/seattle/KSEA",
+        long_term_normal_max_c=22.2,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (62-82F = 72F) as read in AUGUST
+                                       # 2026, NOT a sourced normal.
+        official_client_key="wwis",
+        wwis_city_name="Seattle, Washington",
+        polymarket_city_slug="seattle",
+        region="americas",
+        # IANA has no separate America/Seattle zone -- Washington's
+        # Pacific-time area uses the same canonical zone as
+        # California/Oregon.
+        iana_timezone="America/Los_Angeles",
+        utc_offset_hours=-8,
+        bucket_min_c=62,
+        bucket_max_c=82,
+        bucket_unit="F",
+        bucket_step=2,
+        expected_metar_reports_per_day=24,
         metar_ingest_mode="resolution",
         resolution_grade_source="metar_daily_max",
     ),
@@ -3223,6 +3544,17 @@ MATURITY_SNAPSHOT = {
     "MMMX": "exploratory",
     "SBGR": "exploratory",
     "SAEZ": "exploratory",
+    "KLGA": "exploratory",
+    "KATL": "exploratory",
+    "KMIA": "exploratory",
+    "KORD": "exploratory",
+    "KHOU": "exploratory",
+    "KDAL": "exploratory",
+    "KAUS": "exploratory",
+    "KBKF": "exploratory",
+    "KLAX": "exploratory",
+    "KSFO": "exploratory",
+    "KSEA": "exploratory",
 }
 
 _maturity_cache: dict = {}

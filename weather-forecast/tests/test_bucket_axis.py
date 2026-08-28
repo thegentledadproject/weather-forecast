@@ -128,13 +128,15 @@ class TestStationConfigCarriesTheAxis:
         assert st.bucket_step == 1
         assert bucket_axis.for_station(st) == AXIS_C1
 
-    def test_every_registered_station_is_on_the_default_axis_today(self):
-        # Phase 1 registers no new station. This test is the tripwire that
-        # says so, and Task 16 is where it is deliberately narrowed.
+    def test_every_asia_and_europe_station_is_still_on_the_default_axis(self):
+        # NOT every station any more -- the Americas Fahrenheit cohort
+        # (Task 17) is the whole point of the axis. This still pins the
+        # byte-for-byte constraint for the stations that predate it.
         import config
 
         for icao, st in config.STATIONS.items():
-            assert bucket_axis.for_station(st).is_default, icao
+            if st.region in ("asia", "europe"):
+                assert bucket_axis.for_station(st).is_default, icao
 
     def test_a_fahrenheit_station_declares_it(self):
         from models import StationConfig
@@ -659,11 +661,15 @@ class TestPhaseOneChangedNothing:
     reproduce the old formulas exactly.
     """
 
-    def test_every_registered_station_is_still_on_the_default_axis(self):
+    def test_every_asia_and_europe_station_is_still_on_the_default_axis(self):
+        # NOT every station any more -- the Americas Fahrenheit cohort
+        # (Task 17) is the whole point of the axis. This still pins the
+        # byte-for-byte constraint for the stations that predate it.
         import config
 
         for icao, st in config.STATIONS.items():
-            assert bucket_axis.for_station(st).is_default, icao
+            if st.region in ("asia", "europe"):
+                assert bucket_axis.for_station(st).is_default, icao
 
     def test_the_default_axis_reproduces_the_historical_interval_formulas(self):
         for b in range(-30, 56):
