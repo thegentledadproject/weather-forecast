@@ -26,6 +26,7 @@ sys.path.insert(0, PKG)
 os.chdir(PKG)
 
 import config  # noqa: E402 -- needed up front to validate --region and scope every station loop
+import bucket_axis  # noqa: E402
 
 # --- region selection ---------------------------------------------------------
 # One page per region: Asia and Europe draw on separate capital pools and
@@ -418,6 +419,8 @@ def _ev_rows(snap):
     priced = [r for r in snap.get("results", []) if r.get("net_ev_per_dollar") is not None]
     unpriced = len(snap.get("results", [])) - len(priced)
     suppressed = 0
+    station = config.STATIONS.get(snap.get("station_icao"))
+    axis = bucket_axis.for_station(station)
     # Only rows that clear the entry screen are shown -- the sub-screen rows
     # are noise on a page whose question is "is there anything to take", and
     # at 13 stations they dominated the table.
@@ -446,10 +449,15 @@ def _ev_rows(snap):
             cls = ""
         if r.get("spread_source") == "fallback_default":
             flags += " <span class='badge fallback'>fallback est</span>"
+        bucket_min = getattr(station, "bucket_min_c", 25)
+        bucket_max = getattr(station, "bucket_max_c", 35)
+        # Entity form, not the literal degree sign: matches the &deg;C this
+        # replaces everywhere else on this page.
+        bucket_label = axis.label(r["bucket_c"], bucket_min, bucket_max).replace("°", "&deg;")
         rows.append(
             "<tr>"
             f"<td class='mono'>{html.escape(snap['station_icao'])}</td>"
-            f"<td class='mono'>{r['bucket_c']}&deg;C</td>"
+            f"<td class='mono'>{bucket_label}</td>"
             f"<td class='mono'>{html.escape(r['side'])}</td>"
             f"<td class='mono num'>{r['model_prob']:.1%}</td>"
             f"<td class='mono num'>{r['market_price']:.3f}</td>"
@@ -664,9 +672,16 @@ def _pos_row(p, live=False):
     # config.local_today) exists to avoid. Falls back to the legacy +8 if
     # the station isn't (or is no longer) registered.
     try:
-        station_offset = config.get_station(p.station_icao).utc_offset_hours
+        pos_station = config.get_station(p.station_icao)
+        station_offset = pos_station.utc_offset_hours
     except KeyError:
+        pos_station = None
         station_offset = 8
+    bucket_label = bucket_axis.for_station(pos_station).label(
+        p.bucket_c,
+        getattr(pos_station, "bucket_min_c", 25),
+        getattr(pos_station, "bucket_max_c", 35),
+    ).replace("°", "&deg;")
     entered = _hm(p.entry_time, station_offset)
     exited = _hm(p.exit_time, station_offset) if not is_open else "&mdash;"
 
@@ -695,7 +710,7 @@ def _pos_row(p, live=False):
         "<tr>"
         f"<td class='mono'>{html.escape(p.station_icao)}</td>"
         f"<td class='mono'>{html.escape(str(p.target_date))}</td>"
-        f"<td class='mono'>{p.bucket_c}&deg;C</td>"
+        f"<td class='mono'>{bucket_label}</td>"
         f"<td class='mono'>{html.escape(p.side)}</td>"
         f"<td class='mono num'>{size}</td>"
         f"<td class='mono num'>{p.entry_price:.2f}</td>"

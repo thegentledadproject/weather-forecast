@@ -680,3 +680,39 @@ class TestPhaseOneChangedNothing:
                 t, -100, 100
             ) == math.floor(t), t
             t = round(t + 0.1, 1)
+
+
+class TestNothingRendersAHardcodedDegreeSuffix:
+    """
+    A key rendered with a hardcoded suffix is how a human ends up told to
+    buy the wrong contract: "KLGA 78°C (YES)" for a bucket the market
+    prints as "78-79°F".
+    """
+
+    PRODUCTION_FILES = [
+        "executor.py", "ev_engine.py", "pipeline.py",
+        "../deploy/generate_dashboard.py",
+        "../deploy/generate_realmoney_dashboard.py",
+    ]
+
+    def test_no_bucket_value_is_formatted_with_a_literal_degree_c(self):
+        import pathlib
+        import re
+
+        here = pathlib.Path(__file__).resolve().parent.parent
+        offenders = []
+        # An f-string interpolation of anything bucket-shaped immediately
+        # followed by a literal degree suffix.
+        pat = re.compile(r"\{[^{}]*bucket[^{}]*\}\s*(°C|&deg;C)", re.IGNORECASE)
+        for rel in self.PRODUCTION_FILES:
+            path = (here / rel).resolve()
+            if not path.exists():
+                continue
+            for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+                if pat.search(line):
+                    offenders.append(f"{rel}:{i}: {line.strip()}")
+        assert not offenders, (
+            "these render a bucket key with a hardcoded unit; use "
+            "bucket_axis.for_station(station).label(key, lo, hi):\n  "
+            + "\n  ".join(offenders)
+        )
