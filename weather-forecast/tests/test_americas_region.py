@@ -5,6 +5,8 @@ The americas region draws on its own capital and its own real-money blast
 radius. Mirrors tests/test_region_isolation.py, which does the same job for
 europe -- see docs/superpowers/specs/2026-08-27-americas-market-isolation-design.md.
 """
+from datetime import date, datetime, timezone
+
 import pytest
 
 import config
@@ -95,33 +97,87 @@ class TestSpreadCeilingIsPerRegion:
 
 
 class TestMetarDayWindowFollowsDst:
-    def test_the_window_uses_the_live_offset_not_the_static_field(self, monkeypatch):
-        """
-        EGLC is utc_offset_hours=0 (GMT, the STANDARD-time field) but
-        Europe/London in August is BST, +1. A day window built on 0 is
-        shifted an hour and mis-attributes the last hour of the previous
-        local day.
-        """
+    """
+    EGLC is utc_offset_hours=0 (GMT, the STANDARD-time field) but
+    Europe/London observes BST, +1, roughly late March to late October. A
+    day window built on the static field is shifted an hour and
+    mis-attributes the last hour of the previous local day for most of the
+    year.
+
+    Every case here freezes config._now_utc() to a fixed instant and
+    asserts a LITERAL expected offset -- not one re-derived from
+    config.current_utc_offset_hours(), which would make the test pass or
+    fail in lockstep with the code under test rather than against a known
+    answer. A live "now" also self-passes roughly five months a year (GMT
+    season, when the static field and the live offset agree), which is
+    exactly when a regression would go undetected.
+    """
+
+    def _wire_ingest(self, monkeypatch):
+        """Common stubs so ingest_missing_recent never touches the real DB
+        or network, and isn't skipped by the per-day throttle cache."""
         import storage
         from clients import metar_client
-
-        st = config.get_station("EGLC")
-        assert st.utc_offset_hours == 0
-        assert st.iana_timezone == "Europe/London"
 
         monkeypatch.setattr(metar_client, "_last_ingest_by_station", {})
         monkeypatch.setattr(storage, "load_observations_since", lambda icao, cutoff: [])
         monkeypatch.setattr(storage, "save_observation", lambda o: None)
+        monkeypatch.setattr(metar_client, "fetch_metars", lambda icao, hours, timeout=15: [])
+        return metar_client
+
+    def _freeze_now(self, monkeypatch, iso_utc):
+        instant = datetime.fromisoformat(iso_utc).replace(tzinfo=timezone.utc)
+        monkeypatch.setattr(config, "_now_utc", lambda: instant)
+
+    def test_summer_instant_resolves_bst_not_static_gmt(self, monkeypatch):
+        metar_client = self._wire_ingest(monkeypatch)
+        self._freeze_now(monkeypatch, "2026-08-15T12:00:00")
 
         seen = []
         monkeypatch.setattr(
             metar_client, "_local_day_window_utc",
             lambda day, offset: (seen.append(offset) or (0, 0)),
         )
-        monkeypatch.setattr(metar_client, "fetch_metars", lambda icao, hours, timeout=15: [])
         metar_client.ingest_missing_recent(["EGLC"], days_back=1)
 
-        assert seen, "the day window was never built"
-        assert all(
-            o == config.current_utc_offset_hours("EGLC") for o in seen
-        ), f"day window built on {seen}, expected the live DST-aware offset"
+        assert seen == [1], f"expected BST (+1) for every day, got {seen}"
+
+    def test_winter_instant_resolves_gmt(self, monkeypatch):
+        metar_client = self._wire_ingest(monkeypatch)
+        self._freeze_now(monkeypatch, "2026-01-15T12:00:00")
+
+        seen = []
+        monkeypatch.setattr(
+            metar_client, "_local_day_window_utc",
+            lambda day, offset: (seen.append(offset) or (0, 0)),
+        )
+        metar_client.ingest_missing_recent(["EGLC"], days_back=1)
+
+        assert seen == [0], f"expected GMT (0) for every day, got {seen}"
+
+    def test_offset_is_resolved_per_day_across_a_dst_transition(self, monkeypatch):
+        """
+        UK clocks go back (BST -> GMT) at 2026-10-25T01:00:00Z. Freeze
+        "now" a few days after that instant so days_back=3 pulls a
+        `missing` set that straddles the transition: one day still BST,
+        two days already GMT. A single offset resolved once (at "now", or
+        at any one instant) for the whole sweep gets at least one of these
+        three days wrong -- which is the failure mode this test is for,
+        distinct from the static-field defect the class above covers.
+        """
+        metar_client = self._wire_ingest(monkeypatch)
+        self._freeze_now(monkeypatch, "2026-10-28T10:00:00")
+
+        seen = {}
+        monkeypatch.setattr(
+            metar_client, "_local_day_window_utc",
+            lambda day, offset: (seen.__setitem__(day, offset) or (0, 0)),
+        )
+        metar_client.ingest_missing_recent(["EGLC"], days_back=3)
+
+        assert seen == {
+            date(2026, 10, 27): 0,  # GMT: after the transition
+            date(2026, 10, 26): 0,  # GMT: after the transition
+            date(2026, 10, 25): 1,  # BST: transition instant is 01:00Z,
+                                     # AFTER this day's UTC-midnight anchor
+        }, f"per-day offsets were {seen}, expected each day resolved on its own side of the transition"

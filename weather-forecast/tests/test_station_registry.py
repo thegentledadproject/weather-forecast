@@ -50,7 +50,7 @@ def test_bucket_span_is_eleven_for_every_station():
 
 def test_utc_offset_hours_in_registered_timezones():
     # 5/8/9 are the Asian registry. 0/1 are European STANDARD-time offsets.
-    # -3..-8 are the Americas, also STANDARD time (see
+    # -3, -5..-8 are the Americas (no station at -4), also STANDARD time (see
     # StationConfig.iana_timezone -- the live path resolves DST via
     # config.current_utc_offset_hours(); this static field is what the
     # backtest reads).

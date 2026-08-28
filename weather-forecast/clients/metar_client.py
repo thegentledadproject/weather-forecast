@@ -185,12 +185,26 @@ def ingest_missing_recent(station_icaos: List[str], days_back: int = 3) -> int:
             # DST-observing station for most of the year, which attributes
             # 23:00-00:00 local on D-1 to day D. That is a whole observation in the
             # wrong day, and the daily MAX is what settles the market.
-            offset = config.current_utc_offset_hours(station)
-            window_start = _local_day_window_utc(min(missing), offset)[0]
+            #
+            # config.local_day_bounds_utc() already resolves the offset AT the
+            # day being bounded (not at "now") -- reuse it here for the same
+            # reason its own docstring gives: `missing` can span up to
+            # `days_back` historical days, and a DST transition inside that
+            # span means no single offset is correct for all of them.
+            window_start = config.local_day_bounds_utc(station, min(missing))[0].timestamp()
             hours = int((datetime.now(timezone.utc).timestamp() - window_start) / 3600) + 2
             metars = fetch_metars(icao, hours=hours)
             for d in missing:
-                max_c = daily_max_temp_c(metars, d, offset)
+                # Per-day offset, anchored at day d's own UTC midnight -- NOT
+                # the single `window_start` offset above and NOT "now". A
+                # station is only ~3 days behind "now" here, but the days in
+                # `missing` can straddle a DST transition, and each day's
+                # attribution must use the offset that was in effect ON that
+                # day (same reasoning as config.local_day_bounds_utc).
+                day_offset = config.current_utc_offset_hours(
+                    station, at=datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+                )
+                max_c = daily_max_temp_c(metars, d, day_offset)
                 if max_c is None:
                     print(f"[metar_client] {icao} {d}: insufficient METAR coverage, not saving a daily max.")
                     continue
