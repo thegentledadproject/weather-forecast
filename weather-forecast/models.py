@@ -134,6 +134,15 @@ class StationConfig:
     #                   settlement station and would bias the observation blend)
     metar_ingest_mode: str = "resolution"
 
+    # How many METARs this station files per LOCAL day when reporting
+    # normally. A half-hourly-filing airport (most of the Asia/Europe
+    # registry) files ~48/day; an hourly-filing one (every US ASOS
+    # station) files ~24/day. clients/metar_client.py derives its daily
+    # coverage floor as half of this number rather than hard-coding it,
+    # so an hourly station isn't held to a half-hourly station's bar --
+    # see MIN_REPORTS_PER_DAY there for why a floor exists at all.
+    expected_metar_reports_per_day: int = 48
+
     @property
     def wunderground_history_url(self) -> str:
         return f"https://www.wunderground.com/history/daily/{self.wunderground_slug}"

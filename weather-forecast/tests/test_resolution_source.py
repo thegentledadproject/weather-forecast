@@ -22,7 +22,7 @@ from datetime import date, datetime, timedelta, timezone
 import config
 import storage
 from clients import metar_client
-from models import ObservedReading
+from models import ObservedReading, StationConfig
 
 
 def _ts(iso_utc: str) -> int:
@@ -50,6 +50,64 @@ class TestDailyMaxWindowing:
         day = date(2026, 8, 1)
         metars = _day_of_metars(day, [30.0] * (metar_client.MIN_REPORTS_PER_DAY - 1))
         assert metar_client.daily_max_temp_c(metars, day) is None
+
+
+def _station(expected_metar_reports_per_day):
+    """Minimal StationConfig for exercising the per-station coverage floor."""
+    return StationConfig(
+        icao="TEST",
+        display_name="Test Airport",
+        country="Testland",
+        lat=0.0,
+        lon=0.0,
+        wunderground_slug="tt/testcity/TEST",
+        long_term_normal_max_c=25.0,
+        official_client_key="test",
+        expected_metar_reports_per_day=expected_metar_reports_per_day,
+    )
+
+
+class TestPerStationCoverageFloor:
+    def test_default_expected_reports_floor_is_24(self):
+        # expected_metar_reports_per_day defaults to 48 (half-hourly filing),
+        # so the derived floor must be exactly today's MIN_REPORTS_PER_DAY --
+        # every one of the 24 already-registered stations must be unaffected.
+        assert metar_client.min_reports_for_station(_station(48)) == 24
+
+    def test_hourly_filing_station_floor_is_12(self):
+        # US ASOS airports file hourly (~24/day); the floor must scale down
+        # with them, not stay pinned to the half-hourly bar.
+        assert metar_client.min_reports_for_station(_station(24)) == 12
+
+    def test_registered_station_floor_is_still_24(self):
+        # No US station is registered yet -- every station in the live
+        # registry still expects half-hourly filing (48/day) and must still
+        # be held to a floor of 24.
+        for icao in config.STATIONS:
+            station = config.get_station(icao)
+            assert metar_client.min_reports_for_station(station) == 24, icao
+
+    def test_23_of_48_expected_still_declined(self):
+        # Regression for the defect: a half-hourly station with 23 reports
+        # must still be declined (unchanged behaviour).
+        day = date(2026, 8, 1)
+        station = _station(48)
+        metars = _day_of_metars(day, [30.0] * 23)
+        assert metar_client.daily_max_temp_c(
+            metars, day, min_reports=metar_client.min_reports_for_station(station)
+        ) is None
+
+    def test_12_of_24_expected_now_accepted(self):
+        # The actual defect this task fixes: an hourly-filing station (US
+        # ASOS, expects 24/day) with 12 reports -- exactly half -- must be
+        # ACCEPTED, not silently discarded the way the flat 24-report floor
+        # would have discarded it.
+        day = date(2026, 8, 1)
+        station = _station(24)
+        metars = _day_of_metars(day, [30.0] * 11 + [33.0], step_min=60)
+        assert metar_client.daily_max_temp_c(
+            metars, day, min_reports=metar_client.min_reports_for_station(station)
+        ) == 33.0
 
 
 class TestSourceRanking:
