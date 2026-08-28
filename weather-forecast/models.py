@@ -143,6 +143,27 @@ class StationConfig:
     # see MIN_REPORTS_PER_DAY there for why a floor exists at all.
     expected_metar_reports_per_day: int = 48
 
+    def __post_init__(self):
+        # clients/metar_client.py derives its coverage floor as
+        # expected_metar_reports_per_day // 2. An unvalidated 0 or 1 would
+        # derive a floor of 0 -- daily_max_temp_c would then either accept
+        # a day with NO corroborating reports at all, or crash calling
+        # max() on an empty list. Both are the wrong failure mode for a
+        # codebase that otherwise always prefers refusing to trade over
+        # trading on a number it can't justify -- so refuse construction
+        # instead of silently deriving a permissive floor. 2 is the floor
+        # of sane: a half-hourly-filing airport reports ~48/day, an
+        # hourly-filing one (every US ASOS station) reports ~24/day --
+        # anything below 2 isn't a real filing cadence.
+        if self.expected_metar_reports_per_day < 2:
+            raise ValueError(
+                f"{self.icao}: expected_metar_reports_per_day="
+                f"{self.expected_metar_reports_per_day} is not a plausible "
+                "METAR filing cadence (must be >= 2). A half-hourly-filing "
+                "airport reports ~48/day; an hourly-filing one (every US "
+                "ASOS station) reports ~24/day."
+            )
+
     @property
     def wunderground_history_url(self) -> str:
         return f"https://www.wunderground.com/history/daily/{self.wunderground_slug}"

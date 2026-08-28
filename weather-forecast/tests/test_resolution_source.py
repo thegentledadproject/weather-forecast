@@ -19,6 +19,8 @@ analysis after the backfill. Covered here:
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 import config
 import storage
 from clients import metar_client
@@ -108,6 +110,42 @@ class TestPerStationCoverageFloor:
         assert metar_client.daily_max_temp_c(
             metars, day, min_reports=metar_client.min_reports_for_station(station)
         ) == 33.0
+
+
+class TestExpectedReportsValidation:
+    """
+    expected_metar_reports_per_day // 2 is unguarded arithmetic -- a
+    nonsensical cadence (0 or 1) would derive a floor of 0, and a floor of
+    0 is the PERMISSIVE failure direction (accepts an uncorroborated day,
+    or crashes calling max() on an empty list). StationConfig refuses to
+    construct with such a value instead, so the bad number can never reach
+    metar_client at all.
+    """
+
+    def test_zero_rejected(self):
+        with pytest.raises(ValueError, match="expected_metar_reports_per_day"):
+            _station(0)
+
+    def test_one_rejected(self):
+        with pytest.raises(ValueError, match="expected_metar_reports_per_day"):
+            _station(1)
+
+    def test_two_is_the_minimum_accepted(self):
+        # 2 is the smallest value that isn't nonsensical (a report every 12
+        # hours, at the edge of plausible) -- must NOT raise, and must
+        # derive a floor of 1.
+        station = _station(2)
+        assert metar_client.min_reports_for_station(station) == 1
+
+    def test_registered_stations_pass_validation(self):
+        # Confirms the guard doesn't disturb the default path: every
+        # already-registered station still constructs cleanly (config.py
+        # importing STATIONS already proves this, but assert it directly)
+        # and still derives exactly today's floor of 24.
+        for icao in config.STATIONS:
+            station = config.get_station(icao)
+            assert station.expected_metar_reports_per_day == 48, icao
+            assert metar_client.min_reports_for_station(station) == 24, icao
 
 
 class TestSourceRanking:
