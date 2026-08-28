@@ -128,14 +128,21 @@ class TestStationConfigCarriesTheAxis:
         assert st.bucket_step == 1
         assert bucket_axis.for_station(st) == AXIS_C1
 
-    def test_every_asia_and_europe_station_is_still_on_the_default_axis(self):
+    def test_every_default_axis_station_is_still_on_the_default_axis(self):
         # NOT every station any more -- the Americas Fahrenheit cohort
-        # (Task 17) is the whole point of the axis. This still pins the
-        # byte-for-byte constraint for the stations that predate it.
+        # (Task 17) is the whole point of the axis. The predicate here is
+        # UNIT-BASED (bucket_unit=="C" and bucket_step==1), not region-based:
+        # region is a proxy for "on the default axis" and a false one -- the
+        # four Americas Celsius stations (CYYZ/MMMX/SBGR/SAEZ) are region
+        # "americas" but ARE on the default axis, and a region-based
+        # predicate silently stopped covering them. This is the same
+        # region-as-proxy mistake already ruled against once for a DST
+        # predicate; don't reintroduce it here by "simplifying" this back
+        # to a region check.
         import config
 
         for icao, st in config.STATIONS.items():
-            if st.region in ("asia", "europe"):
+            if st.bucket_unit == "C" and st.bucket_step == 1:
                 assert bucket_axis.for_station(st).is_default, icao
 
     def test_a_fahrenheit_station_declares_it(self):
@@ -582,7 +589,10 @@ class TestSettledBucketsAreSelfDescribing:
 
 
 def _all_axes_under_test():
-    """Every registered station, plus the two axes no station has YET."""
+    """Every registered station, plus the two synthetic axes exercised
+    directly here regardless of the registry -- not "no station has YET":
+    eleven real stations (Task 17's US Fahrenheit/2 cohort) are now on one
+    of these axes, this just also covers shapes the registry doesn't."""
     import config
 
     cases = [
@@ -661,14 +671,21 @@ class TestPhaseOneChangedNothing:
     reproduce the old formulas exactly.
     """
 
-    def test_every_asia_and_europe_station_is_still_on_the_default_axis(self):
+    def test_every_default_axis_station_is_still_on_the_default_axis(self):
         # NOT every station any more -- the Americas Fahrenheit cohort
-        # (Task 17) is the whole point of the axis. This still pins the
-        # byte-for-byte constraint for the stations that predate it.
+        # (Task 17) is the whole point of the axis. The predicate here is
+        # UNIT-BASED (bucket_unit=="C" and bucket_step==1), not region-based:
+        # region is a proxy for "on the default axis" and a false one -- the
+        # four Americas Celsius stations (CYYZ/MMMX/SBGR/SAEZ) are region
+        # "americas" but ARE on the default axis, and a region-based
+        # predicate silently stopped covering them. This is the same
+        # region-as-proxy mistake already ruled against once for a DST
+        # predicate; don't reintroduce it here by "simplifying" this back
+        # to a region check.
         import config
 
         for icao, st in config.STATIONS.items():
-            if st.region in ("asia", "europe"):
+            if st.bucket_unit == "C" and st.bucket_step == 1:
                 assert bucket_axis.for_station(st).is_default, icao
 
     def test_the_default_axis_reproduces_the_historical_interval_formulas(self):

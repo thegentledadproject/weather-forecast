@@ -153,9 +153,12 @@ class TestExpectedReportsValidation:
         # still constructs cleanly (config.py importing STATIONS already
         # proves this, but assert it directly). expected_metar_reports_per_day
         # is no longer uniformly 48 -- Task 17's eleven US cities declare 24
-        # (hourly filing) -- so this only pins the pre-Task-17 stations to
-        # their historical default and floor.
+        # (hourly filing) -- so this pins BOTH registered cadences (every
+        # value in the registry must be one of the two, nothing else slips
+        # through unasserted), while only checking the derived floor for
+        # the pre-Task-17, half-hourly-filing stations.
         for icao, station in config.STATIONS.items():
+            assert station.expected_metar_reports_per_day in (24, 48), icao
             if station.expected_metar_reports_per_day != 48:
                 continue
             assert metar_client.min_reports_for_station(station) == 24, icao
