@@ -59,16 +59,26 @@ def _bucket_label_html(icao, bucket_c):
 
 def _bucket_range_html(icao, lo, hi):
     """
-    HTML-entity rendering of a DISCOVERED [lo, hi] bucket range -- unlike
-    _bucket_label_html, lo/hi here ARE the live bounds (discovery already
-    supplied them), so they double as both the key and the axis bounds,
-    same as bounds_drift() above.
+    HTML-entity rendering of a DISCOVERED [lo, hi] bucket range.
+
+    Labels against the station's REGISTERED bounds (bucket_min_c/
+    bucket_max_c), like _bucket_label_html does -- NOT against lo/hi
+    themselves. label() treats key<=lo and key>=hi as the market's "or
+    below"/"or higher" catch-alls, so using the discovered extremes as the
+    axis bounds would claim every discovered range reaches the market's
+    real edge, even a partial one that stops short. Labeling against the
+    registry means that wording only appears when it's true: a complete
+    discovery run's lo/hi equal the registered bounds and this renders
+    exactly as before, while a partial run gets a plain "X .. Y" instead of
+    a false "or below"/"or higher".
     """
     import config
 
     station = config.STATIONS.get(icao)
     axis = bucket_axis.for_station(station)
-    return f"{axis.label(lo, lo, hi)} .. {axis.label(hi, lo, hi)}".replace("°", "&deg;")
+    axis_lo = getattr(station, "bucket_min_c", 25)
+    axis_hi = getattr(station, "bucket_max_c", 35)
+    return f"{axis.label(lo, axis_lo, axis_hi)} .. {axis.label(hi, axis_lo, axis_hi)}".replace("°", "&deg;")
 
 # NOTE: no os.chdir(). generate_dashboard.py chdirs into PKG; doing that here
 # would make a relative --out resolve differently under test than in
