@@ -16,11 +16,14 @@ To add a new station (e.g. WMKK):
      add one in clients/official/ (see clients/official/base.py for
      the interface) and register it in clients/official/registry.py.
   3. If this is the first station naming a given `region`, add an entry
-     for that region to all five REGION_* dicts below (REGION_BANKROLL_USD,
+     for that region to all six REGION_* dicts below (REGION_BANKROLL_USD,
      REGION_MAX_DAILY_EXPOSURE_USD, REGION_LIVE_MAX_CONCURRENT_POSITIONS,
-     REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, REGION_LIVE_MAX_ORDERS_PER_DAY) --
-     a region missing from any of them raises at trade time rather than
-     silently borrowing another region's money.
+     REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, REGION_LIVE_MAX_ORDERS_PER_DAY,
+     REGION_SPREAD_CEILING_C) -- a region missing from any of them raises
+     at trade time rather than silently borrowing another region's money.
+     REGION_SPREAD_CEILING_C also accepts None, meaning no clamp -- that is
+     the correct entry for a region whose own spread hasn't been measured
+     yet. Copying another region's number is not.
   4. Otherwise nothing else needs to change -- pipeline.py, calibration.py,
      probability.py, storage.py are all station-parameterized already.
 
