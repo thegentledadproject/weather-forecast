@@ -279,7 +279,7 @@ class TestRegionScopedCapital:
         equality here is a sizing choice, not a shared pot.
         """
         assert config.REGION_BANKROLL_USD is not config.REGION_MAX_DAILY_EXPOSURE_USD
-        assert set(config.REGION_BANKROLL_USD) == {"asia", "europe"}
+        assert set(config.REGION_BANKROLL_USD) == {"asia", "europe", "americas"}
 
     def test_region_lookup_helpers_resolve_through_the_station(self, monkeypatch):
         st = _station(icao="TEST", region="europe", iana_timezone="Europe/London")

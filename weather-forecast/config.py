@@ -1734,10 +1734,10 @@ LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
 # WSSS and RCSS for the same slots and the same dollar ceiling -- discovered
 # under promotion pressure, which is the worst moment to discover it.
 #
-# EUROPE IS 0/0.0/0. Not "small": zero. A European station cannot submit a
-# live order regardless of LIVE_TRADING_STATIONS membership or the
-# POLYMARKET_LIVE_TRADING process flag, because its region authorises no
-# concurrent positions at all.
+# ANY REGION AT 0/0.0/0 IS ZERO, NOT SMALL. A station in such a region
+# cannot submit a live order regardless of LIVE_TRADING_STATIONS membership
+# or the POLYMARKET_LIVE_TRADING process flag, because its region authorises
+# no concurrent positions at all. Both europe and americas are 0/0.0/0 today.
 #
 # RE-DERIVE, DO NOT COPY, IF EUROPE IS EVER FUNDED.
 # Asia's pair is not two independently chosen numbers: they encode an
@@ -1751,16 +1751,19 @@ LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
 REGION_LIVE_MAX_CONCURRENT_POSITIONS = {
     "asia": LIVE_MAX_CONCURRENT_POSITIONS,
     "europe": 0,
+    "americas": 0,
 }
 
 REGION_LIVE_MAX_TOTAL_EXPOSURE_USD = {
     "asia": LIVE_MAX_TOTAL_EXPOSURE_USD,
     "europe": 0.0,
+    "americas": 0.0,
 }
 
 REGION_LIVE_MAX_ORDERS_PER_DAY = {
     "asia": LIVE_MAX_ORDERS_PER_DAY,
     "europe": 0,
+    "americas": 0,
 }
 
 
@@ -2539,6 +2542,7 @@ MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD = 400.0
 REGION_BANKROLL_USD = {
     "asia": BANKROLL_USD,
     "europe": BANKROLL_USD,
+    "americas": BANKROLL_USD,
 }
 
 # Raised with the bankroll above, and it HAS to be. Leaving this at 0.0
@@ -2548,6 +2552,7 @@ REGION_BANKROLL_USD = {
 REGION_MAX_DAILY_EXPOSURE_USD = {
     "asia": MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD,
     "europe": MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD,
+    "americas": MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD,
 }
 
 
