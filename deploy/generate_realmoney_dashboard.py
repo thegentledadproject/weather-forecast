@@ -71,6 +71,16 @@ def _bucket_range_html(icao, lo, hi):
     discovery run's lo/hi equal the registered bounds and this renders
     exactly as before, while a partial run gets a plain "X .. Y" instead of
     a false "or below"/"or higher".
+
+    Registered bounds CAN drift from the live discovered window -- this is
+    not assumed away here, it is handled by a neighbor. bounds_drift()
+    above renders its own "bounds drift" badge into this same discovery
+    panel precisely when discovered != config, so the one case where
+    labeling against config could mislabel an edge (a stale registry) is
+    already flagged to the reader beside this range, not silently trusted.
+    That is what makes labeling against config safe rather than a
+    coincidence -- don't "fix" this back to discovered bounds without
+    keeping that pairing intact.
     """
     import config
 

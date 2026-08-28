@@ -797,6 +797,43 @@ def test_render_orders_empty_trail(monkeypatch):
     assert "no real order" in out.lower()
 
 
+# --- bucket range html (discovery edge labelling) ---------------------------
+# _bucket_range_html labels the DISCOVERED [lo, hi] against the station's
+# REGISTERED bucket_min_c/bucket_max_c, not against lo/hi themselves --
+# label() renders its "or below"/"or higher" catch-alls whenever key<=lo or
+# key>=hi, so labelling against the discovered extremes would claim every
+# discovered range reaches the market's real edge, true only when discovery
+# is complete. WSSS is registered 28-38C (see config.STATIONS).
+
+
+def test_bucket_range_html_complete_map_keeps_catch_all_wording():
+    """A complete discovery run's lo/hi equal the registry bounds, so this
+    must render byte-for-byte the same catch-all wording it did before the
+    fix -- this is the case Task 15's carried-forward fix must not change."""
+    gen = load_gen()
+    assert gen._bucket_range_html("WSSS", 28, 38) == "28&deg;C or below .. 38&deg;C or higher"
+
+
+def test_bucket_range_html_partial_interior_map_is_a_plain_range():
+    """A partial map that touches neither true edge must not claim to --
+    no "or below"/"or higher" on either side."""
+    gen = load_gen()
+    out = gen._bucket_range_html("WSSS", 30, 32)
+    assert out == "30&deg;C .. 32&deg;C"
+    assert "or below" not in out
+    assert "or higher" not in out
+
+
+def test_bucket_range_html_partial_map_touching_one_edge_labels_only_that_side():
+    """A partial map that genuinely reaches one true edge keeps the
+    catch-all wording on that side only -- the other side, still short of
+    the registry bound, stays a plain number."""
+    gen = load_gen()
+    out = gen._bucket_range_html("WSSS", 28, 32)
+    assert out == "28&deg;C or below .. 32&deg;C"
+    assert "or higher" not in out
+
+
 # --- render_discovery ---------------------------------------------------------
 # discovery_state itself is monkeypatched here, not exercised through a real
 # db_path -- render_discovery's interface takes no db_path, so the only way
