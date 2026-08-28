@@ -252,3 +252,255 @@ def test_unresolved_are_counted_per_cohort_not_just_in_total():
 
     assert take_sweep._unresolved_count(runs, lottery=True) == 2
     assert take_sweep._unresolved_count(runs, lottery=False) == 1
+
+
+# --------------------------------------------------------------------------
+# replay_stored -- scoring the REAL book's entries instead of generating new
+# ones. See backtest/take_sweep.py's STORED-ENTRY REPLAY MODE docstring for
+# why: engine.run() re-decides entries under a capital constraint, so a wider
+# take frees capital at a different hour and changes WHICH positions exist.
+# The cohort is then not held fixed across rows, which is the confound this
+# mode removes -- pinned by
+# test_stored_replay_scores_the_identical_cohort_at_every_take_level.
+# --------------------------------------------------------------------------
+
+import itertools
+import sqlite3
+from datetime import date, datetime
+
+
+def _ts(iso):
+    return int(datetime.fromisoformat(iso).timestamp())
+
+
+_DB_SEQ = itertools.count()
+
+
+def _make_dbs(tmp_path, positions, snapshots, settlements=()):
+    """
+    Two throwaway sqlite files shaped like the real ones.
+
+    Each call gets its OWN pair, because the cohort test replays the same
+    fixture at five take levels and would otherwise re-create the tables.
+
+    positions:   dicts of the columns replay_stored() reads
+    snapshots:   (token_id, iso_ts, price) triples
+    settlements: (icao, target_date, bucket_c) triples
+    """
+    d = tmp_path / ("db%d" % next(_DB_SEQ))
+    d.mkdir()
+    live = d / "live.sqlite3"
+    market = d / "market.sqlite3"
+
+    lc = sqlite3.connect(live)
+    lc.execute(
+        "create table positions ("
+        " position_id text primary key, station_icao text, target_date text,"
+        " bucket_c int, side text, entry_price real, size_usd real,"
+        " entry_time text, status text, high_water_mark real, exit_price real,"
+        " exit_time text, exit_reason text, token_id text, is_paper int,"
+        " size_shares real)"
+    )
+    lc.execute(
+        "create table settled_buckets ("
+        " station_icao text, target_date text, bucket_c int)"
+    )
+    for p in positions:
+        cols = ",".join(p)
+        marks = ",".join("?" for _ in p)
+        lc.execute("insert into positions (%s) values (%s)" % (cols, marks),
+                   tuple(p.values()))
+    for icao, td, bkt in settlements:
+        lc.execute("insert into settled_buckets (station_icao, target_date, bucket_c)"
+                   " values (?,?,?)", (icao, td, bkt))
+    lc.commit()
+    lc.close()
+
+    mc = sqlite3.connect(market)
+    mc.execute(
+        "create table price_snapshots ("
+        " token_id text, ts int, price real, depth_usd real, source text,"
+        " fidelity_min int, ask_price real)"
+    )
+    for token, iso, price in snapshots:
+        mc.execute("insert into price_snapshots (token_id, ts, price) values (?,?,?)",
+                   (token, _ts(iso), price))
+    mc.commit()
+    mc.close()
+    return live, market
+
+
+def _position(**kw):
+    base = dict(position_id="P1", station_icao="WSSS", target_date="2026-08-20",
+                bucket_c=33, side="YES", entry_price=0.10, size_usd=1.0,
+                entry_time="2026-08-19T22:00:00+00:00", status="closed_take_profit",
+                token_id="T1", is_paper=1, size_shares=10.0)
+    base.update(kw)
+    return base
+
+
+@contextmanager
+def _no_override():
+    yield
+
+
+def _replay(tmp_path, positions, snapshots, settlements=(), take=None):
+    live, market = _make_dbs(tmp_path, positions, snapshots, settlements)
+    ctx = take_sweep._lottery_take(take) if take is not None else _no_override()
+    with ctx:
+        return take_sweep.replay_stored(
+            ["WSSS"], date(2026, 8, 19), date(2026, 8, 21),
+            db_path=live, market_db_path=market)
+
+
+def test_stored_replay_takes_profit_when_the_path_reaches_the_take_level(tmp_path):
+    """
+    An 0.10 lottery entry with a 50% take exits at 0.15. The path touches
+    0.16, so the take fires and the position is booked at the SNAPSHOT
+    price that triggered it, not at the theoretical level -- the same
+    discrete-cycle fill the live system gets.
+    """
+    run = _replay(
+        tmp_path,
+        positions=[_position()],
+        snapshots=[("T1", "2026-08-19T23:00:00+00:00", 0.11),
+                   ("T1", "2026-08-20T00:00:00+00:00", 0.16),
+                   ("T1", "2026-08-20T01:00:00+00:00", 0.04)],
+        settlements=[("WSSS", "2026-08-20", 31)],
+        take=0.50)
+
+    assert len(run.closed_positions) == 1
+    p = run.closed_positions[0]
+    assert p.status == "closed_take_profit"
+    assert p.exit_price == pytest.approx(0.16)
+
+
+def test_stored_replay_rides_to_settlement_when_the_take_is_never_reached(tmp_path):
+    """
+    Same ticket, take pushed out of reach. Nothing on the path triggers, so
+    it settles -- and the winning bucket pays 1.00, which is exactly the
+    payoff the take was capping.
+    """
+    run = _replay(
+        tmp_path,
+        positions=[_position()],
+        snapshots=[("T1", "2026-08-19T23:00:00+00:00", 0.11),
+                   ("T1", "2026-08-20T00:00:00+00:00", 0.16)],
+        settlements=[("WSSS", "2026-08-20", 33)],
+        take=take_sweep.NO_TAKE)
+
+    assert len(run.closed_positions) == 1
+    p = run.closed_positions[0]
+    assert p.status == "closed_resolution"
+    assert p.exit_price == pytest.approx(1.0)
+
+
+def test_stored_replay_scores_the_identical_cohort_at_every_take_level(tmp_path):
+    """
+    THE POINT OF THIS MODE. engine.run() re-decides entries under a capital
+    constraint, so a wider take frees capital at a different hour and
+    changes WHICH positions exist -- the 2026-08-28 sweep went 44 -> 39
+    lottery positions between its tightest and widest rows, and that
+    difference is not the take's effect. Replaying stored entries must hold
+    the cohort fixed.
+    """
+    positions = [_position(position_id="P%d" % i, token_id="T%d" % i) for i in range(3)]
+    snapshots = [("T%d" % i, "2026-08-20T00:00:00+00:00", 0.16) for i in range(3)]
+    settlements = [("WSSS", "2026-08-20", 31)]
+
+    counts = set()
+    for take in (0.10, 0.25, 0.50, 1.0, take_sweep.NO_TAKE):
+        run = _replay(tmp_path, positions, snapshots, settlements, take=take)
+        counts.add(len(run.closed_positions) + len(run.unresolved_positions))
+
+    assert counts == {3}
+
+
+def test_stored_replay_keeps_the_stop_for_a_normal_entry(tmp_path):
+    """
+    The take is the only thing this sweep varies. A NON-lottery entry still
+    has its stop, and a path that dips through it must exit stop_loss --
+    otherwise the mode is a take-only walker and would score the normal
+    cohort as if the stop had been removed too.
+    """
+    run = _replay(
+        tmp_path,
+        positions=[_position(entry_price=0.40, size_shares=2.5)],
+        snapshots=[("T1", "2026-08-19T23:00:00+00:00", 0.36),
+                   ("T1", "2026-08-20T00:00:00+00:00", 0.26)],
+        settlements=[("WSSS", "2026-08-20", 33)],
+        take=0.50)
+
+    assert len(run.closed_positions) == 1
+    p = run.closed_positions[0]
+    assert p.status == "closed_stop_loss"
+    assert p.exit_price == pytest.approx(0.26)
+
+
+def test_stored_replay_evaluates_each_snapshot_at_its_own_simulated_local_hour(tmp_path):
+    """
+    evaluate_exit() halves the take after EDGE_DECAY_TIGHTEN_HOUR_LOCAL, so
+    the replay must evaluate each snapshot at ITS OWN simulated local hour.
+    Shown on a NORMAL entry, because _lottery_take() deliberately pins both
+    lottery constants to the same value and so models no tightening there.
+
+    A 0.40 entry takes at +50% of the risk unit (0.60) before 10:00 local
+    and +25% (0.50) after. WSSS is UTC+8, so 03:00Z is 11:00 local: a price
+    of 0.52 fires only under the tightened distance. The control at 00:00Z
+    (08:00 local) is the same price and must NOT fire -- together they fail
+    if the replay pins one hour, or reads the wall clock.
+    """
+    tightened = _replay(
+        tmp_path,
+        positions=[_position(entry_price=0.40, size_shares=2.5)],
+        snapshots=[("T1", "2026-08-20T03:00:00+00:00", 0.52)],
+        settlements=[("WSSS", "2026-08-20", 31)])
+
+    loose = _replay(
+        tmp_path,
+        positions=[_position(entry_price=0.40, size_shares=2.5)],
+        snapshots=[("T1", "2026-08-20T00:00:00+00:00", 0.52)],
+        settlements=[("WSSS", "2026-08-20", 31)])
+
+    assert tightened.closed_positions[0].status == "closed_take_profit"
+    assert loose.closed_positions[0].status == "closed_resolution"
+
+
+def test_stored_replay_reports_a_position_with_no_settlement_as_unresolved(tmp_path):
+    """
+    The same censoring rule the engine path has: no settlement observation
+    means the position cannot be scored, and it must land in
+    unresolved_positions so _unresolved_count() still reports it. Booking it
+    as a loss would manufacture exactly the -100% the lottery band is most
+    vulnerable to (see _unresolved_count's docstring).
+    """
+    run = _replay(
+        tmp_path,
+        positions=[_position()],
+        snapshots=[("T1", "2026-08-19T23:00:00+00:00", 0.11)],
+        settlements=[])
+
+    assert run.closed_positions == []
+    assert len(run.unresolved_positions) == 1
+
+
+def test_sweep_in_stored_mode_holds_the_lottery_cohort_fixed_across_takes(tmp_path):
+    """
+    The mode has to reach the scorecard, not just exist. Three identical
+    lottery tickets, swept at three distances: in stored mode every row
+    must score the same three positions, because the entries no longer
+    depend on the take. The engine path cannot promise that -- which is
+    the whole reason for the flag.
+    """
+    live, market = _make_dbs(
+        tmp_path,
+        positions=[_position(position_id="P%d" % i, token_id="T%d" % i) for i in range(3)],
+        snapshots=[("T%d" % i, "2026-08-20T00:00:00+00:00", 0.16) for i in range(3)],
+        settlements=[("WSSS", "2026-08-20", 31)])
+
+    results = take_sweep.sweep(
+        ["WSSS"], date(2026, 8, 19), date(2026, 8, 21),
+        [0.25, 0.50, take_sweep.NO_TAKE],
+        market_db_path=market, stored=True, db_path=live)
+
+    assert {results[pct]["lottery"]["n"] for pct in results} == {3}

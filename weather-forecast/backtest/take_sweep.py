@@ -75,6 +75,25 @@ actually had, every run, unconditionally. A row is worth acting on when
 the ordering holds per station AND across windows AND on full-coverage
 days -- the same bar stop_sweep.py set and did not clear.
 
+STORED-ENTRY REPLAY MODE (--stored, added 2026-08-28)
+-----------------------------------------------------
+The engine path above re-decides ENTRIES at every take level, under a
+capital constraint. A wider take holds capital longer, so it finances
+fewer subsequent entries: the 2026-08-28 run moved 44 -> 39 lottery
+positions between its tightest and widest rows. Part of every difference
+in that table is therefore entry selection, not the take.
+
+--stored removes that confound by replaying the book's OWN stored entries
+through the same risk_manager.evaluate_exit(), so the cohort is identical
+in every row. What it gives up is the portfolio effect itself: capital
+freed by an early exit finances nothing, so a tight take looks free when
+in the real book it funds the next trade.
+
+NEITHER MODE IS THE ANSWER. They bracket it, and on 2026-08-28 they
+disagreed in SIGN: the engine path scored `none` as the WORST lottery row
+in every window, while a marginal read of the stored book scored removing
+the take as worth +$194. Run both. A recommendation needs them to agree.
+
 DEPENDENCIES
 ------------
 argparse, sqlite3, statistics, contextlib, datetime (standard library)
@@ -88,6 +107,8 @@ from contextlib import contextmanager
 from datetime import date, datetime, timezone
 
 import config
+import risk_manager
+from models import Position
 from backtest import engine, settings
 
 # A take this far away cannot fire. The risk unit for a lottery entry IS
@@ -109,6 +130,141 @@ def _lottery_take(pct: float):
     finally:
         config.LOTTERY_PROFIT_TAKE_PCT = old_loose
         config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = old_tight
+
+
+class StoredRun:
+    """
+    Duck-types engine.run()'s result for _cohort() and _unresolved_count(),
+    so the whole scoring half below is shared between the two modes and
+    cannot drift.
+    """
+
+    def __init__(self):
+        self.closed_positions = []
+        self.unresolved_positions = []
+
+
+def _stored_rows(stations, start, end, db_path):
+    """The book's own entries in the window, oldest first."""
+    path = str(db_path or config.DB_PATH)
+    conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        marks = ",".join("?" for _ in stations)
+        rows = conn.execute(
+            "select * from positions"
+            " where station_icao in (%s) and target_date >= ? and target_date <= ?"
+            "   and entry_price is not null and token_id is not null"
+            " order by entry_time" % marks,
+            (*stations, start.isoformat(), end.isoformat()),
+        ).fetchall()
+        settled = {
+            (r["station_icao"], r["target_date"]): r["bucket_c"]
+            for r in conn.execute("select station_icao, target_date, bucket_c"
+                                  " from settled_buckets")
+        }
+    finally:
+        conn.close()
+    return rows, settled
+
+
+def _price_path(token_id, since_ts, until_ts, market_db_path):
+    path = str(market_db_path or settings.MARKET_DATA_DB)
+    conn = sqlite3.connect("file:%s?mode=ro" % path, uri=True)
+    try:
+        return conn.execute(
+            "select ts, price from price_snapshots"
+            " where token_id = ? and ts >= ? and ts < ? and price is not null"
+            " order by ts",
+            (token_id, since_ts, until_ts),
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+def replay_stored(stations, start: date, end: date,
+                  db_path=None, market_db_path=None) -> StoredRun:
+    """
+    Re-run the EXIT rules over the book's OWN stored entries.
+
+    This is the answer to the confound in sweep()'s engine path: there the
+    simulator re-decides entries under a capital constraint, so a wider take
+    frees capital at a different hour and changes WHICH positions exist. The
+    2026-08-28 run moved 44 -> 39 lottery positions between its tightest and
+    widest rows, and none of that difference is the take's doing. Here the
+    cohort is whatever the book actually entered, identical at every
+    distance, so the only thing varying between rows is the exit rule.
+
+    WHAT THIS BUYS AND WHAT IT COSTS. It buys a clean marginal read on the
+    take. It gives up the portfolio effect entirely: capital freed by an
+    earlier exit finances nothing here, so a tight take looks free when in
+    the real book it funds the next entry. The engine path models that and
+    this one does not. **The two modes bracket the answer; neither is it.**
+
+    Each snapshot is evaluated through the real risk_manager.evaluate_exit()
+    at ITS OWN simulated local hour -- the same reason the engine path
+    exists (module docstring, WHY THIS GOES THROUGH engine.run()). A naive
+    walk that models the loose thresholds only came out 12x from the live
+    number on 2026-08-18, because it missed the post-10:00 tightening.
+
+    Positions with no settlement observation land in unresolved_positions
+    rather than being booked at zero -- see _unresolved_count() for why that
+    censoring is not neutral on this band.
+    """
+    run = StoredRun()
+    rows, settled = _stored_rows(stations, start, end, db_path)
+
+    for r in rows:
+        entry = r["entry_price"]
+        target = date.fromisoformat(r["target_date"])
+        _, day_end = config.local_day_bounds_utc(r["station_icao"], target)
+        entered_at = datetime.fromisoformat(r["entry_time"])
+
+        pos = Position(
+            position_id=r["position_id"],
+            station_icao=r["station_icao"],
+            target_date=target,
+            bucket_c=r["bucket_c"],
+            side=r["side"],
+            entry_price=entry,
+            size_usd=r["size_usd"],
+            entry_time=r["entry_time"],
+            status="open",
+            high_water_mark=entry,
+            token_id=r["token_id"],
+        )
+
+        for ts, price in _price_path(r["token_id"], int(entered_at.timestamp()),
+                                     int(day_end.timestamp()), market_db_path):
+            at = datetime.fromtimestamp(ts, tz=timezone.utc)
+            # AT THE SNAPSHOT, not at wall clock: the tightening is a
+            # function of the simulated hour, and config.py's own offset
+            # helper refuses to be correct about a past instant otherwise.
+            offset = config.current_utc_offset_hours(r["station_icao"], at=at)
+            pos.high_water_mark = max(pos.high_water_mark, price)
+            decision = risk_manager.evaluate_exit(
+                pos, price, local_hour=(at.hour + offset) % 24)
+            if decision.should_exit:
+                pos.status = "closed_%s" % decision.reason
+                pos.exit_price = price
+                pos.exit_time = at.isoformat()
+                pos.exit_reason = decision.reason
+                break
+
+        if pos.status == "open":
+            bucket = settled.get((r["station_icao"], r["target_date"]))
+            if bucket is None:
+                run.unresolved_positions.append(pos)
+                continue
+            in_bucket = (bucket == r["bucket_c"])
+            won = in_bucket if r["side"] == "YES" else not in_bucket
+            pos.status = "closed_resolution"
+            pos.exit_price = 1.0 if won else 0.0
+            pos.exit_reason = "resolution"
+
+        run.closed_positions.append(pos)
+
+    return run
 
 
 def _cohort(runs, lottery: bool):
@@ -209,24 +365,37 @@ def _score(rows) -> dict:
     }
 
 
-def sweep(stations, start: date, end: date, take_pcts, market_db_path=None) -> dict:
-    """{take_pct: {"lottery": scorecard, "normal": scorecard, ...}}."""
+def sweep(stations, start: date, end: date, take_pcts, market_db_path=None,
+          stored: bool = False, db_path=None) -> dict:
+    """
+    {take_pct: {"lottery": scorecard, "normal": scorecard, ...}}.
+
+    stored=True scores the book's OWN entries via replay_stored() instead of
+    letting engine.run() generate them. That holds the cohort fixed across
+    rows at the cost of the portfolio effect -- see replay_stored() for what
+    each mode buys and gives up. They bracket the answer; neither is it.
+    """
     out = {}
     for pct in take_pcts:
         runs = []
         with _lottery_take(pct):
-            for icao in stations:
-                try:
-                    runs.append(engine.run(icao, start, end, market_db_path=market_db_path))
-                except Exception as exc:  # noqa: BLE001 -- one bad station must not void the sweep
-                    print(f"  [take_sweep] {icao} failed at take={pct}: "
-                          f"{type(exc).__name__}: {str(exc)[:100]}")
+            if stored:
+                runs.append(replay_stored(stations, start, end, db_path=db_path,
+                                          market_db_path=market_db_path))
+            else:
+                for icao in stations:
+                    try:
+                        runs.append(engine.run(icao, start, end,
+                                               market_db_path=market_db_path))
+                    except Exception as exc:  # noqa: BLE001 -- one bad station must not void the sweep
+                        print(f"  [take_sweep] {icao} failed at take={pct}: "
+                              f"{type(exc).__name__}: {str(exc)[:100]}")
         out[pct] = {
             "lottery": _score(_cohort(runs, lottery=True)),
             "normal": _score(_cohort(runs, lottery=False)),
             "unresolved_lottery": _unresolved_count(runs, lottery=True),
             "unresolved_normal": _unresolved_count(runs, lottery=False),
-            "stations_run": len(runs),
+            "stations_run": len(stations) if stored else len(runs),
         }
     return out
 
@@ -289,7 +458,17 @@ def main() -> None:
                          "unit -- which for a lottery entry IS the entry price, so 2 means "
                          "'sell at 3x entry'. 'none' disables the lottery take entirely.")
     ap.add_argument("--market-db", dest="market_db", default=None)
+    ap.add_argument("--stored", action="store_true",
+                    help="Score the BOOK'S OWN stored entries instead of letting the engine "
+                         "generate them. Holds the cohort fixed across rows, which the engine "
+                         "path cannot -- at the cost of the portfolio effect. See "
+                         "replay_stored(); the two modes bracket the answer, neither is it.")
+    ap.add_argument("--live-db", dest="live_db", default=None,
+                    help="Positions database for --stored (default: config.DB_PATH)")
     args = ap.parse_args()
+
+    if args.live_db and not args.stored:
+        ap.error("--live-db only means anything with --stored")
 
     stations = ([s.strip().upper() for s in args.stations.split(",")]
                 if args.stations else list(config.STATIONS))
@@ -308,11 +487,22 @@ def main() -> None:
           f"(tightened {config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT:.0%} after "
           f"{config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL}:00 local)")
     print(f"the stop is untouched throughout: lottery entries have none, and normal "
-          f"entries keep {config.STOP_LOSS_PCT:.0%}\n")
+          f"entries keep {config.STOP_LOSS_PCT:.0%}")
+    if args.stored:
+        print("MODE: STORED ENTRIES -- the book's own positions, re-exited at each distance.\n"
+              "      The cohort is identical in every row, so no difference below is entry\n"
+              "      selection. It also models NO portfolio effect: capital freed by an early\n"
+              "      exit finances nothing here. Compare against a run WITHOUT --stored --\n"
+              "      the two bracket the answer and neither is it on its own.\n")
+    else:
+        print("MODE: ENGINE ENTRIES -- the simulator re-decides entries under a capital\n"
+              "      constraint, so n can move between rows and part of any difference is\n"
+              "      entry selection, not the take. Re-run with --stored for the other half.\n")
 
     print_coverage(args.from_date, args.to_date, args.market_db)
 
-    results = sweep(stations, args.from_date, args.to_date, pcts, args.market_db)
+    results = sweep(stations, args.from_date, args.to_date, pcts, args.market_db,
+                    stored=args.stored, db_path=args.live_db)
 
     print(f"LOTTERY COHORT (entry < {config.LOTTERY_PRICE_THRESHOLD})")
     print(f"{'take':>8} {'n':>4} {'took':>5} {'settled':>8} {'staked':>9} {'pnl':>9} "
