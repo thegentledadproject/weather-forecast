@@ -13,7 +13,7 @@ a bad trade or a silently-skipped station-day.
 import config
 from clients.official.registry import _CLIENTS
 
-EXPECTED_STATION_COUNT = 20
+EXPECTED_STATION_COUNT = 24
 
 
 def test_station_count_matches_expected():
@@ -50,10 +50,12 @@ def test_bucket_span_is_eleven_for_every_station():
 
 def test_utc_offset_hours_in_registered_timezones():
     # 5/8/9 are the Asian registry. 0/1 are European STANDARD-time offsets.
-    # -3, -5..-8 are the Americas (no station at -4), also STANDARD time (see
-    # StationConfig.iana_timezone -- the live path resolves DST via
-    # config.current_utc_offset_hours(); this static field is what the
-    # backtest reads).
+    # -3, -5, -6 are the four registered Americas stations' STANDARD-time
+    # offsets: CYYZ (Toronto) -5, MMMX (Mexico City) -6, SBGR (Sao Paulo) and
+    # SAEZ (Buenos Aires) both -3 (see StationConfig.iana_timezone -- the
+    # live path resolves DST via config.current_utc_offset_hours(); this
+    # static field is what the backtest reads). -7/-8 are reserved for
+    # Americas stations not yet registered; no station sits at -4.
     allowed = (-8, -7, -6, -5, -3, 0, 1, 5, 8, 9)
     for icao, st in config.STATIONS.items():
         assert st.utc_offset_hours in allowed, (

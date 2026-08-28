@@ -181,3 +181,44 @@ class TestMetarDayWindowFollowsDst:
             date(2026, 10, 25): 1,  # BST: transition instant is 01:00Z,
                                      # AFTER this day's UTC-midnight anchor
         }, f"per-day offsets were {seen}, expected each day resolved on its own side of the transition"
+
+
+AMERICAS_CELSIUS = ("CYYZ", "MMMX", "SBGR", "SAEZ")
+
+
+class TestTheFourCelsiusCities:
+    def test_they_are_registered_in_the_americas_region(self):
+        for icao in AMERICAS_CELSIUS:
+            assert icao in config.STATIONS, icao
+            assert config.STATIONS[icao].region == "americas", icao
+
+    def test_they_are_on_the_default_axis(self):
+        import bucket_axis
+
+        for icao in AMERICAS_CELSIUS:
+            assert bucket_axis.for_station(config.STATIONS[icao]).is_default, icao
+
+    def test_none_of_them_may_trade_real_money(self):
+        for icao in AMERICAS_CELSIUS:
+            assert icao not in config.LIVE_TRADING_STATIONS, icao
+            assert not config.live_mode_is_permitted(icao, "live"), icao
+
+    def test_only_toronto_observes_dst(self):
+        assert config.STATIONS["CYYZ"].iana_timezone == "America/Toronto"
+        for icao in ("MMMX", "SBGR", "SAEZ"):
+            assert config.STATIONS[icao].iana_timezone is None, icao
+
+    def test_they_land_in_their_own_scheduler_groups(self):
+        import scheduler
+
+        groups = scheduler.stations_by_utc_offset()
+        asia_europe = {
+            icao for icao, st in config.STATIONS.items()
+            if st.region in ("asia", "europe")
+        }
+        for offset, icaos in groups.items():
+            if any(i in AMERICAS_CELSIUS for i in icaos):
+                assert not (set(icaos) & asia_europe), (
+                    f"offset {offset} mixes an Americas station with "
+                    f"another region's"
+                )

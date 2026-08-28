@@ -9,9 +9,11 @@ a StationConfig by ICAO code and stays generic from there.
 
 To add a new station (e.g. WMKK):
   1. Add a STATIONS["WMKK"] = StationConfig(...) entry below. Set `region`
-     explicitly for anything outside the existing Asia pool, and set
-     `iana_timezone` for any station in a DST-observing region -- see
-     StationConfig's field comments in models.py for what each drives.
+     explicitly for anything outside the existing Asia pool, set
+     `iana_timezone` for any station in a DST-observing region, and set
+     `bucket_unit`/`bucket_step` explicitly whenever the market's axis isn't
+     the ("C", 1) default -- see StationConfig's field comments in models.py
+     for what each drives.
   2. If its official forecast source doesn't have an adapter yet,
      add one in clients/official/ (see clients/official/base.py for
      the interface) and register it in clients/official/registry.py.
@@ -832,6 +834,169 @@ STATIONS = {
         utc_offset_hours=1,
         bucket_min_c=17,
         bucket_max_c=27,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    # --- Americas --------------------------------------------------------
+    # Registered 2026-08-28. Confirmed facts in
+    # docs/superpowers/research/2026-08-27-americas-station-facts.md. Four
+    # Celsius, 1-degree-bucket cities out of the Americas cohort -- the
+    # region's Fahrenheit/2-degree US cities are a separate, later task and
+    # are NOT registered here.
+    #
+    # region="americas" draws on its OWN capital pool, already wired (see
+    # REGION_BANKROLL_USD etc. below) with a real-money blast radius locked
+    # at 0/0.0/0 -- these four are collection-only and cannot size a live
+    # order regardless of LIVE_TRADING_STATIONS membership (they are not on
+    # it, and never should be added to it as part of this task).
+    #
+    # iana_timezone is set ONLY for CYYZ (Toronto), the one city of the four
+    # that actually observes DST -- confirmed directly against real tzdata,
+    # not assumed (see the research doc). The other three resolve a flat
+    # standard-time offset year-round, so utc_offset_hours alone is correct
+    # and iana_timezone stays None, same convention as every pre-Europe
+    # Asian entry.
+    #
+    # PROVENANCE: gamma-api.polymarket.com and polymarket.com are
+    # network-blocked in the research environment (same finding as the
+    # Europe pass). Every Polymarket-sourced fact here (bucket windows,
+    # resolution-source text) comes from polym.trade, a third-party mirror,
+    # captured 2026-08-28 -- cross-checked against a second independent
+    # source per fact: ICAO/lat/lon against Wikipedia airport infoboxes,
+    # station identity against Wunderground's own history-page header, live
+    # METAR precision directly against aviationweather.gov, and WWIS
+    # city-list membership directly against worldweather.wmo.int. All four
+    # markets were independently verified Celsius, 1-degree-bucket, 11
+    # buckets -- not assumed from the plan doc.
+    #
+    # long_term_normal_max_c is, per the same controller ruling as Europe's
+    # entries, the MIDPOINT of each city's live bucket window at
+    # registration time -- an honestly-labeled placeholder, not a sourced
+    # climatological normal. It is read only on the no-forecast/no-observation
+    # fallback path (blend_central_estimate), and MIN_RESOLUTION_OBS_BEFORE_ENTRY
+    # is the designed mitigation until each station accrues its own history.
+    # Registration month is August -- Southern-Hemisphere WINTER for Sao
+    # Paulo and Buenos Aires -- so each placeholder is labelled with that
+    # month explicitly, not left to be assumed evergreen.
+    "CYYZ": StationConfig(
+        icao="CYYZ",
+        display_name="Toronto Pearson International Airport",
+        country="Canada",
+        lat=43.67611,
+        lon=-79.63056,
+        wunderground_slug="ca/mississauga/CYYZ",
+        long_term_normal_max_c=25.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (20-30) as read in AUGUST 2026, NOT
+                                       # a sourced Environment and Climate
+                                       # Change Canada 1991-2020 normal.
+        official_client_key="wwis",
+        # Province-qualified string required -- WWIS lists this city as
+        # "Toronto, Ontario", not bare "Toronto"; wwis.py's lookup is
+        # .lower()-only and does not strip qualifiers.
+        wwis_city_name="Toronto, Ontario",
+        polymarket_city_slug="toronto",
+        region="americas",
+        iana_timezone="America/Toronto",
+        utc_offset_hours=-5,
+        bucket_min_c=20,
+        bucket_max_c=30,
+        bucket_unit="C",
+        bucket_step=1,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "MMMX": StationConfig(
+        icao="MMMX",
+        display_name="Mexico City International Airport",
+        country="Mexico",
+        lat=19.43611,
+        lon=-99.07194,
+        wunderground_slug="mx/mexico-city/MMMX",
+        long_term_normal_max_c=24.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (19-29) as read in AUGUST 2026, NOT
+                                       # a sourced SMN (Servicio
+                                       # Meteorologico Nacional) 1991-2020
+                                       # normal.
+        official_client_key="wwis",
+        # Spanish-name string required -- WWIS lists this city as "Ciudad de
+        # Mexico", no bare "Mexico City" entry exists.
+        wwis_city_name="Ciudad de Mexico",
+        polymarket_city_slug="mexico-city",
+        region="americas",
+        iana_timezone=None,  # Mexico abolished DST in 2022 -- verified
+                              # directly against tzdata (flat -6 year-round
+                              # from 2024 onward).
+        utc_offset_hours=-6,
+        bucket_min_c=19,
+        bucket_max_c=29,
+        bucket_unit="C",
+        bucket_step=1,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "SBGR": StationConfig(
+        icao="SBGR",
+        display_name="Guarulhos–Governador André Franco Montoro International Airport",
+        country="Brazil",
+        lat=-23.43556,
+        lon=-46.47306,
+        wunderground_slug="br/guarulhos/SBGR",
+        long_term_normal_max_c=29.0,  # PLACEHOLDER -- midpoint of the live
+                                       # bucket window (24-34) as read in
+                                       # AUGUST 2026, which is
+                                       # SOUTHERN-HEMISPHERE WINTER. NOT a
+                                       # year-round normal -- flagged
+                                       # explicitly in the research doc as
+                                       # an unusually warm window for
+                                       # Sao Paulo winter (real winter
+                                       # daily-max normals run closer to
+                                       # 22-23C). Sao Paulo's annual swing
+                                       # is larger than any previously
+                                       # registered city's; do NOT treat
+                                       # 29.0 as a stable seasonal figure or
+                                       # reuse it once seasons turn.
+        official_client_key="wwis",
+        wwis_city_name="Sao Paulo",
+        polymarket_city_slug="sao-paulo",
+        region="americas",
+        iana_timezone=None,  # Brazil abolished DST in 2019 -- verified
+        utc_offset_hours=-3,
+        bucket_min_c=24,
+        bucket_max_c=34,
+        bucket_unit="C",
+        bucket_step=1,
+        metar_ingest_mode="resolution",
+        resolution_grade_source="metar_daily_max",
+    ),
+    "SAEZ": StationConfig(
+        icao="SAEZ",
+        display_name="Ministro Pistarini International Airport",
+        country="Argentina",
+        lat=-34.82222,
+        lon=-58.53583,
+        wunderground_slug="ar/ezeiza/SAEZ",
+        long_term_normal_max_c=19.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (14-24) as read in AUGUST 2026
+                                       # (Southern-Hemisphere winter). Not a
+                                       # sourced SMN (Servicio Meteorologico
+                                       # Nacional) 1991-2020 normal, though
+                                       # directionally plausible: the window
+                                       # is corroborated by live fog/8C
+                                       # METAR conditions sampled in the
+                                       # research pass, unlike Sao Paulo's.
+        official_client_key="wwis",
+        wwis_city_name="Buenos Aires",
+        polymarket_city_slug="buenos-aires",
+        region="americas",
+        iana_timezone=None,  # Argentina has not observed DST since 2010 (a
+                              # flagged 1999-2000 anomaly in tzdata is
+                              # offset-unchanged and does not apply to any
+                              # date this codebase ever resolves) -- verified
+        utc_offset_hours=-3,
+        bucket_min_c=14,
+        bucket_max_c=24,
+        bucket_unit="C",
+        bucket_step=1,
         metar_ingest_mode="resolution",
         resolution_grade_source="metar_daily_max",
     ),
@@ -3054,6 +3219,10 @@ MATURITY_SNAPSHOT = {
     "LIMC": "exploratory",
     "EDDM": "exploratory",
     "EPWA": "exploratory",
+    "CYYZ": "exploratory",
+    "MMMX": "exploratory",
+    "SBGR": "exploratory",
+    "SAEZ": "exploratory",
 }
 
 _maturity_cache: dict = {}
