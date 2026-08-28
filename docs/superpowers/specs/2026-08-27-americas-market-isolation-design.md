@@ -202,7 +202,13 @@ literal expressions (`math.floor(t + 0.5)` / `math.floor(t)`) rather than
 route it through the general grid formula. The general formula is
 algebraically identical for integer bounds, but the short-circuit makes
 "byte-for-byte identical for Asia and Europe" a property of the code rather
-than of an algebra argument someone has to re-derive during a review.
+than of an algebra argument someone has to re-derive during a review. That
+claim is scoped to the AXIS -- `key_for_temp_c` and the five functions
+built on it (section 4) -- not to the branch as a whole: section 10(d)'s
+METAR day-window fix is a separate, deliberate change that does alter
+Europe's observation-day attribution. The two claims are independent and
+both true; see section 10(d) before assuming "the axis is a no-op"
+extends to everything else this branch touches.
 
 Six functions gain an optional `axis`, each defaulting to `AXIS_C1`:
 
@@ -517,6 +523,16 @@ the same magnitude, on twelve more stations. Fixed here because this is the
 change that is already in the file. The arithmetic itself handles negative
 offsets correctly.
 
+This fix is NOT covered by the axis's no-op claims (section 3, section
+9's "No-op proof"): it deliberately changes observation-day attribution
+for Europe's seven DST-observing stations, on the days each falls on
+either side of a transition -- correcting a real mis-attribution, not
+introducing one. Asia is unaffected because no registered Asian station
+observes DST, so `current_utc_offset_hours()` already equalled the static
+`utc_offset_hours` for all of them. Do not weaken this fix to preserve a
+"nothing changes for existing stations" narrative; the axis being a no-op
+and this fix changing Europe's day windows are both true at once.
+
 **e. Two registry tests encode the old assumptions.**
 `test_bucket_span_is_eleven_for_every_station` counts VALUES
 (`max - min + 1`), which is 21 for a Fahrenheit station; it becomes
@@ -610,7 +626,11 @@ Beyond it:
   `("C", 1, <their edge_mode>)`, and `_bucket_interval`,
   `bucket_probabilities`, `bucket_for_temp`, `parse_bucket_label`,
   `derive_bucket_bounds` and `bucket_midpoint_c` return values identical to
-  the pre-change implementations across their full input ranges.
+  the pre-change implementations across their full input ranges. This is
+  the AXIS's no-op proof only. It says nothing about section 10(d)'s METAR
+  day-window fix, which intentionally changes observation-DAY attribution
+  (not bucket math) for Europe's seven DST-observing stations -- a correct
+  fix, not a regression, and independent of whether the axis is a no-op.
 - **Fail-closed:** `bucket_probabilities` RAISES when given no axis for a
   Fahrenheit station, rather than returning a Celsius-grid answer.
 - **Parsing:** all eleven real NYC labels parse to `68,70,...,88`; a label

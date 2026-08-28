@@ -804,18 +804,22 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
         return None
 
     bucket_min, bucket_max = bounds
+    axis = bucket_axis.for_station(station)
     if (bucket_min, bucket_max) != (station.bucket_min_c, station.bucket_max_c):
         print(
             f"[position_manager] {position.position_id}: settling on the LIVE event bounds "
-            f"{bucket_min}-{bucket_max}C, not config's {station.bucket_min_c}-"
-            f"{station.bucket_max_c}C (bounds drift)."
+            f"{axis.label(bucket_min, bucket_min, bucket_max)} to "
+            f"{axis.label(bucket_max, bucket_min, bucket_max)}, not config's "
+            f"{axis.label(station.bucket_min_c, station.bucket_min_c, station.bucket_max_c)} to "
+            f"{axis.label(station.bucket_max_c, station.bucket_min_c, station.bucket_max_c)} "
+            f"(bounds drift)."
         )
 
     winning_bucket = settlement.bucket_for_temp(
         obs.max_temp_c,
         bucket_min,
         bucket_max,
-        axis=bucket_axis.for_station(station),
+        axis=axis,
     )
     exit_price = settlement.resolution_exit_price(
         position.side, position.bucket_c, winning_bucket,
@@ -823,7 +827,8 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
 
     basis = (
         f"no book left to read; settled from {obs.source} {obs.max_temp_c:.1f}C "
-        f"-> winning bucket {winning_bucket}C, so {position.bucket_c}C "
+        f"-> winning bucket {axis.label(winning_bucket, bucket_min, bucket_max)}, so "
+        f"{axis.label(position.bucket_c, bucket_min, bucket_max)} "
         f"{position.side} pays {exit_price:.1f}"
     )
     return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)

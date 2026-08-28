@@ -264,6 +264,48 @@ class TestSettlementOnAFahrenheitAxis:
         assert resolution.bucket_for_temp(-50.0, 27, 37, "half_up") == 27
         assert resolution.bucket_for_temp(500.0, 27, 37, "half_up") == 37
 
+    def _klga(self):
+        from models import StationConfig
+
+        return StationConfig(
+            icao="KLGA", display_name="LaGuardia", country="United States",
+            lat=40.777, lon=-73.872, wunderground_slug="us/new-york/KLGA",
+            long_term_normal_max_c=28.0, official_client_key="wwis",
+            polymarket_city_slug="nyc", bucket_unit="F", bucket_step=2,
+        )
+
+    def test_it_raises_rather_than_settling_an_f_market_on_a_c_grid(self):
+        # Mirrors probability.bucket_probabilities()'s fail-closed guard:
+        # settlement.bucket_for_temp() must not be allowed to silently
+        # build a Celsius/1 axis for a station that isn't on one -- on
+        # KLGA's 68-88F bounds that clamps every Celsius reading a weather
+        # station can produce (-50..500 alike) into bucket 68.
+        from backtest import resolution
+
+        with pytest.raises(ValueError, match="axis"):
+            resolution.bucket_for_temp(26.1, self.LO, self.HI, station=self._klga())
+
+    def test_no_station_no_axis_still_defaults_legacy_bounds(self):
+        # station is opt-in: a caller that supplies explicit bounds but no
+        # station (every pre-axis call site, and the legacy positional
+        # tests that pin this behaviour) must be completely unaffected --
+        # this is not the same shape as an F-station call, and cannot be
+        # told apart from one by the bounds' values alone.
+        from backtest import resolution
+
+        assert resolution.bucket_for_temp(27.0, 25, 35, "half_up") == 27
+        assert resolution.bucket_for_temp(27.0, 30, 40, "half_up") == 30
+
+    def test_axis_together_with_station_never_evaluates_the_guard(self):
+        # The four production call sites already pass axis= explicitly;
+        # adding station= alongside it (defense in depth) must not change
+        # their answer -- axis, not station, decides once axis is given.
+        from backtest import resolution
+
+        assert resolution.bucket_for_temp(
+            26.1, self.LO, self.HI, axis=self.AXIS, station=self._klga()
+        ) == 78
+
 
 class TestDiscoveryParsesTheMarketsAxis:
     F_AXIS = BucketAxis(unit="F", step=2)

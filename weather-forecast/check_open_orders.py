@@ -119,10 +119,22 @@ def _position_labels() -> dict:
     listing, which is the point of the script.
     """
     try:
+        import bucket_axis
+        import config
         import storage
+
+        def _bucket_label(pos) -> str:
+            station = config.STATIONS.get(pos.station_icao)
+            if station is None:
+                # Unregistered/test station -- no bounds to build a real
+                # axis from. Keep the old bare rendering rather than guess.
+                return f"{pos.bucket_c}C"
+            axis = bucket_axis.for_station(station)
+            return axis.label(pos.bucket_c, station.bucket_min_c, station.bucket_max_c)
+
         return {
             pos.token_id: (
-                f"{pos.station_icao} {pos.bucket_c}C {pos.side} "
+                f"{pos.station_icao} {_bucket_label(pos)} {pos.side} "
                 f"({'paper' if pos.is_paper else 'real'})"
             )
             for pos in storage.load_open_positions()

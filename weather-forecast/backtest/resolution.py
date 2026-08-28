@@ -39,6 +39,7 @@ backtest/settings.py (local)
 import math
 from datetime import date, datetime, timedelta
 
+import bucket_axis
 import config
 from bucket_axis import BucketAxis
 
@@ -52,6 +53,7 @@ def bucket_for_temp(
     edge_mode: str = "half_up",
     *,
     axis: BucketAxis = None,
+    station=None,
 ) -> int:
     """
     The resolution bucket a max temperature of `t` degrees C falls in,
@@ -88,7 +90,37 @@ def bucket_for_temp(
     is REQUIRED for any market that is not Celsius whole-degree. `t` is
     Celsius in every case -- the conversion into the market's unit happens
     inside the axis, so no caller ever handles a Fahrenheit temperature.
+
+    station is optional and purely a safety rail: this function (unlike
+    probability.bucket_probabilities(), which takes a CalibratedEstimate
+    carrying station_icao) has no station identity of its own to check
+    against, so it cannot fail closed the way bucket_probabilities does
+    just from bucket_min/bucket_max -- those are plain ints in the axis's
+    own unit, and an F-station's bounds (e.g. KLGA's 70/90) are not
+    distinguishable from valid Celsius bounds by value alone. If a caller
+    DOES have the station in hand, passing it here lets this function
+    check its axis the same way bucket_probabilities checks estimate's:
+    when axis is None and station is not None, a non-default station axis
+    raises rather than silently building a Celsius/1 axis and clamping
+    every reading into the bottom catch-all bucket. Passing no station
+    (every legacy call site, and every call before axis existed) leaves
+    this check off, exactly as before -- axis remains the only REQUIRED
+    guard; station is a caller's opt-in extra one.
     """
+    if axis is None and station is not None:
+        station_axis = bucket_axis.for_station(station)
+        if not station_axis.is_default:
+            icao = getattr(station, "icao", station)
+            raise ValueError(
+                f"{icao} is on a {station_axis.unit}/step-{station_axis.step} "
+                f"bucket axis but bucket_for_temp() was called with no axis. "
+                f"Refusing to settle it on the Celsius whole-degree clamp: "
+                f"key_for_temp_c() would then clamp every reading this "
+                f"station can actually report into the bottom catch-all "
+                f"bucket, silently, because that bucket's number never "
+                f"lines up with a real Celsius reading. Pass "
+                f"axis=bucket_axis.for_station(station)."
+            )
     lo = config.BUCKET_MIN_C if bucket_min is None else bucket_min
     hi = config.BUCKET_MAX_C if bucket_max is None else bucket_max
     resolved = BucketAxis(edge_mode=edge_mode) if axis is None else axis

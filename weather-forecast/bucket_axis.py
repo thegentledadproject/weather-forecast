@@ -153,11 +153,22 @@ class BucketAxis:
         """
         The label the market itself prints for this bucket.
 
-        REQUIRED at every human-facing site. A key is the bucket's lower
-        edge, so on a step-2 axis the bottom catch-all's key (68) is a
-        number the market never prints ("69F or below"). Rendering the raw
-        key with a hardcoded degree suffix is how a human ends up told to
-        buy the wrong contract.
+        REQUIRED wherever a bucket is shown to a person who will act on
+        it -- an order confirmation, a settlement basis, anything printed
+        next to money. A key is the bucket's lower edge, so on a step-2
+        axis the bottom catch-all's key (68) is a number the market never
+        prints ("69F or below"). Rendering the raw key with a hardcoded
+        degree suffix is how a human ends up told to buy the wrong
+        contract.
+
+        As of 2026-08-27 the four order/settlement-facing sites route
+        through this (position_manager.py's order-confirmation and
+        paper-settlement prints, check_open_orders.py's inventory
+        labelling). A further seventeen sites (entry_manager.py,
+        executor.py, ev_engine.py and others) still print a bare key next
+        to a hardcoded degree sign in internal log lines -- none of them
+        an instruction a person acts on directly, so routing all of them
+        was left as a known follow-up rather than folded into that pass.
         """
         suffix = "°C" if self.unit == UNIT_C else "°F"
         if key <= lo:
