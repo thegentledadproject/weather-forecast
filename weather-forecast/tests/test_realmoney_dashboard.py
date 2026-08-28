@@ -1033,6 +1033,10 @@ def test_setup_dashboard_execstart_renders_the_realmoney_page():
     assert "generate_realmoney_dashboard.py" in exec_line
     assert "generate_dashboard.py --region asia" in exec_line
     assert "generate_dashboard.py --region europe" in exec_line
+    assert "generate_dashboard.py --region americas" in exec_line, (
+        "americas.html would silently never render -- the same trap "
+        "europe.html hit on 2026-08-25"
+    )
     assert "generate_backtest_dashboard.py" in exec_line
 
 
