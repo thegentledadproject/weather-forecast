@@ -488,12 +488,17 @@ ZERO_REGION = "testzero"
 
 
 def _pin_zero_region(monkeypatch):
-    """Register a zero-funded synthetic region across all five pools."""
+    """Register a zero-funded synthetic region across all six pools."""
     monkeypatch.setitem(config.REGION_BANKROLL_USD, ZERO_REGION, 0.0)
     monkeypatch.setitem(config.REGION_MAX_DAILY_EXPOSURE_USD, ZERO_REGION, 0.0)
     monkeypatch.setitem(config.REGION_LIVE_MAX_CONCURRENT_POSITIONS, ZERO_REGION, 0)
     monkeypatch.setitem(config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, ZERO_REGION, 0.0)
     monkeypatch.setitem(config.REGION_LIVE_MAX_ORDERS_PER_DAY, ZERO_REGION, 0)
+    # Not a blast-radius pool like the five above, but the same
+    # raise-on-unknown-region guard applies (config.region_spread_ceiling_c),
+    # so the synthetic region needs an entry here too or calibrate() raises
+    # the moment it's asked to price a candidate for it.
+    monkeypatch.setitem(config.REGION_SPREAD_CEILING_C, ZERO_REGION, config.SPREAD_CEILING_C)
 
 
 import executor

@@ -2590,6 +2590,24 @@ def region_max_daily_exposure_usd(station_icao: str) -> float:
     return REGION_MAX_DAILY_EXPOSURE_USD[region]
 
 
+def region_spread_ceiling_c(station_icao: str) -> Optional[float]:
+    """
+    This station's region's spread ceiling, or None for no clamp.
+
+    Raises on a region with no entry rather than falling back, for the same
+    reason region_bankroll_usd() does: a typo'd region must not quietly
+    inherit another region's risk posture.
+    """
+    region = region_of(station_icao)
+    if region not in REGION_SPREAD_CEILING_C:
+        raise KeyError(
+            f"{station_icao} names region {region!r}, which has no entry in "
+            f"config.REGION_SPREAD_CEILING_C "
+            f"(known: {list(REGION_SPREAD_CEILING_C)})."
+        )
+    return REGION_SPREAD_CEILING_C[region]
+
+
 def live_size_cap_usd(station_icao: str, execution_mode: str) -> Optional[float]:
     """
     The fixed notional this station must trade at under `execution_mode`,
@@ -2680,6 +2698,26 @@ MIN_SPREAD_PAIRS = 5
 # (~0.56C) sits below this floor and gets raised to it.
 SPREAD_FLOOR_C = 0.7
 SPREAD_CEILING_C = 2.0
+
+# The ceiling is a REGIONAL fact, not a global one. 2.0 was measured on
+# tropical stations whose day-to-day maximum barely moves. Continental North
+# America and Southern-hemisphere winter routinely run wider, and clamping
+# them runs in the direction this file already calls the dangerous one (see
+# SPREAD_FLOOR_C above): a too-narrow spread makes the model look certain,
+# which inflates the gap against market price, which the entry gates size
+# into.
+#
+# None means NO CLAMP -- the measured spread is used as-is. That is
+# deliberately the conservative direction: an unclamped spread is wider,
+# which makes the model LESS certain, which SHRINKS the gap. A guessed
+# ceiling would run the other way. americas stops being None only when a
+# number is derived from its OWN measured spread, which cannot happen before
+# it has observations. Do not copy 2.0 across.
+REGION_SPREAD_CEILING_C = {
+    "asia": SPREAD_CEILING_C,
+    "europe": SPREAD_CEILING_C,
+    "americas": None,
+}
 
 # Used only when even the pooled estimate is unavailable -- an empty
 # database. The measured pooled value on 2026-08-10 was 0.81C.
