@@ -91,34 +91,50 @@ def bucket_for_temp(
     Celsius in every case -- the conversion into the market's unit happens
     inside the axis, so no caller ever handles a Fahrenheit temperature.
 
-    station is optional and purely a safety rail: this function (unlike
-    probability.bucket_probabilities(), which takes a CalibratedEstimate
-    carrying station_icao) has no station identity of its own to check
-    against, so it cannot fail closed the way bucket_probabilities does
-    just from bucket_min/bucket_max -- those are plain ints in the axis's
-    own unit, and an F-station's bounds (e.g. KLGA's 70/90) are not
-    distinguishable from valid Celsius bounds by value alone. If a caller
-    DOES have the station in hand, passing it here lets this function
-    check its axis the same way bucket_probabilities checks estimate's:
-    when axis is None and station is not None, a non-default station axis
-    raises rather than silently building a Celsius/1 axis and clamping
-    every reading into the bottom catch-all bucket. Passing no station
-    (every legacy call site, and every call before axis existed) leaves
-    this check off, exactly as before -- axis remains the only REQUIRED
-    guard; station is a caller's opt-in extra one.
+    Fail-closed guard, unconditional: when axis is None and BOTH
+    bucket_min and bucket_max are given explicitly, their span is checked
+    against config.EXPECTED_BUCKET_COUNT. A bucket window is always
+    exactly EXPECTED_BUCKET_COUNT buckets wide, so at step 1 the span
+    (bucket_max - bucket_min + 1) is always EXPECTED_BUCKET_COUNT -- every
+    Celsius station in the registry gives 11, and every Fahrenheit
+    station's bounds (step 2, e.g. KLGA's 70/90) give 21. A span other
+    than EXPECTED_BUCKET_COUNT therefore CANNOT be a valid step-1 grid,
+    which is exactly the case a defaulted axis would mis-settle: this is
+    a structural fact about the bounds, not a guess about the caller. The
+    guard fires whether or not the caller also happens to pass station --
+    a caller who simply forgets axis= must still be caught. Calls that
+    omit bucket_min/bucket_max entirely (the legacy no-argument form,
+    falling back to config.BUCKET_MIN_C/BUCKET_MAX_C) are exempt, since
+    there the span IS config's own default and nothing was forgotten.
+
+    station is optional and purely a secondary rail: this function
+    (unlike probability.bucket_probabilities(), which takes a
+    CalibratedEstimate carrying station_icao) has no station identity of
+    its own, so when a caller does supply one this produces a better
+    error message (the station's icao and its real unit/step) than the
+    bounds check alone can -- but the bounds check above is what actually
+    catches a caller who forgot axis=, station or not.
     """
-    if axis is None and station is not None:
-        station_axis = bucket_axis.for_station(station)
-        if not station_axis.is_default:
-            icao = getattr(station, "icao", station)
+    if axis is None and bucket_min is not None and bucket_max is not None:
+        span = bucket_max - bucket_min + 1
+        if span != config.EXPECTED_BUCKET_COUNT:
+            detail = ""
+            if station is not None:
+                station_axis = bucket_axis.for_station(station)
+                icao = getattr(station, "icao", station)
+                detail = (
+                    f" {icao} is on a {station_axis.unit}/step-"
+                    f"{station_axis.step} bucket axis."
+                )
             raise ValueError(
-                f"{icao} is on a {station_axis.unit}/step-{station_axis.step} "
-                f"bucket axis but bucket_for_temp() was called with no axis. "
-                f"Refusing to settle it on the Celsius whole-degree clamp: "
-                f"key_for_temp_c() would then clamp every reading this "
-                f"station can actually report into the bottom catch-all "
-                f"bucket, silently, because that bucket's number never "
-                f"lines up with a real Celsius reading. Pass "
+                f"bucket_for_temp() was called with bounds ({bucket_min}, "
+                f"{bucket_max}) spanning {span} buckets, not "
+                f"config.EXPECTED_BUCKET_COUNT ({config.EXPECTED_BUCKET_COUNT}), "
+                f"but no axis.{detail} Refusing to settle it on the Celsius "
+                f"whole-degree clamp: key_for_temp_c() would then clamp "
+                f"every reading this station can actually report into the "
+                f"bottom catch-all bucket, silently, because that bucket's "
+                f"number never lines up with a real Celsius reading. Pass "
                 f"axis=bucket_axis.for_station(station)."
             )
     lo = config.BUCKET_MIN_C if bucket_min is None else bucket_min

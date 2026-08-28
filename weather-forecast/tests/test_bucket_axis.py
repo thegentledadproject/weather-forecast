@@ -279,18 +279,31 @@ class TestSettlementOnAFahrenheitAxis:
         # settlement.bucket_for_temp() must not be allowed to silently
         # build a Celsius/1 axis for a station that isn't on one -- on
         # KLGA's 68-88F bounds that clamps every Celsius reading a weather
-        # station can produce (-50..500 alike) into bucket 68.
+        # station can produce (-50..500 alike) into bucket 68. station=
+        # is supplied here purely for the richer error message; the bounds
+        # check below is what actually does the catching.
         from backtest import resolution
 
         with pytest.raises(ValueError, match="axis"):
             resolution.bucket_for_temp(26.1, self.LO, self.HI, station=self._klga())
 
-    def test_no_station_no_axis_still_defaults_legacy_bounds(self):
-        # station is opt-in: a caller that supplies explicit bounds but no
-        # station (every pre-axis call site, and the legacy positional
-        # tests that pin this behaviour) must be completely unaffected --
-        # this is not the same shape as an F-station call, and cannot be
-        # told apart from one by the bounds' values alone.
+    def test_the_bounds_guard_fires_with_no_station_at_all(self):
+        # The whole point: a caller who simply forgets axis= gets no
+        # station to hand over either, so the guard must not depend on
+        # one. A step-1 window is always EXPECTED_BUCKET_COUNT buckets
+        # wide -- 68..88 spans 21, not 11 -- and that mismatch alone is
+        # enough to refuse, with no station in scope at all.
+        from backtest import resolution
+
+        with pytest.raises(ValueError, match="axis"):
+            resolution.bucket_for_temp(26.1, self.LO, self.HI)
+
+    def test_a_valid_celsius_span_is_never_flagged(self):
+        # A caller that supplies explicit bounds spanning exactly
+        # EXPECTED_BUCKET_COUNT (every pre-axis call site, and the legacy
+        # positional tests that pin this behaviour) must be unaffected --
+        # (25, 35), (30, 40), (22, 32) and (26, 36) all span 11, so none of
+        # them are a step-1-grid violation regardless of station.
         from backtest import resolution
 
         assert resolution.bucket_for_temp(27.0, 25, 35, "half_up") == 27
@@ -299,7 +312,8 @@ class TestSettlementOnAFahrenheitAxis:
     def test_axis_together_with_station_never_evaluates_the_guard(self):
         # The four production call sites already pass axis= explicitly;
         # adding station= alongside it (defense in depth) must not change
-        # their answer -- axis, not station, decides once axis is given.
+        # their answer -- axis, not the bounds check, decides once axis
+        # is given.
         from backtest import resolution
 
         assert resolution.bucket_for_temp(
