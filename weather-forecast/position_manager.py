@@ -185,9 +185,16 @@ def check_and_exit_positions(
         try:
             decision = _check_one_position(position, capture_fidelity_min)
         except Exception as exc:  # noqa: BLE001 - one row must never strand the others
+            station = _station_for(position)
+            axis = bucket_axis.for_station(station)
+            bucket_label = axis.label(
+                position.bucket_c,
+                getattr(station, "bucket_min_c", 25),
+                getattr(station, "bucket_max_c", 35),
+            )
             print(
                 f"[position_manager] ERROR checking {position.position_id} ({position.station_icao} "
-                f"{position.bucket_c}°{position.side}, ${position.size_usd:.2f} open): {exc} -- skipping "
+                f"{bucket_label} {position.side}, ${position.size_usd:.2f} open): {exc} -- skipping "
                 f"THIS position only, the rest of the cycle continues. This position is not being "
                 f"monitored and has no working stop-loss until the cause is fixed."
             )

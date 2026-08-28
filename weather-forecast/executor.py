@@ -537,8 +537,15 @@ def warn_about_unmanageable_live_positions() -> int:
         f"non-live mode.\n"
     )
     for p in stranded:
+        p_station = config.STATIONS.get(p.station_icao)
+        p_axis = bucket_axis.for_station(p_station)
+        p_bucket_label = p_axis.label(
+            p.bucket_c,
+            getattr(p_station, "bucket_min_c", 25),
+            getattr(p_station, "bucket_max_c", 35),
+        )
         print(
-            f"    {p.station_icao} {p.bucket_c}°{p.side}  {p.size_shares or '?'} shares "
+            f"    {p.station_icao} {p_bucket_label} {p.side}  {p.size_shares or '?'} shares "
             f"@ {p.entry_price:.4f} (${p.size_usd:.2f})  order {p.order_id or 'unrecorded'}\n"
             f"      {p.position_id}"
         )
