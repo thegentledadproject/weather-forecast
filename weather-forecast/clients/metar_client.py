@@ -179,11 +179,18 @@ def ingest_missing_recent(station_icaos: List[str], days_back: int = 3) -> int:
             if not missing:
                 continue
 
-            window_start = _local_day_window_utc(min(missing), station.utc_offset_hours)[0]
+            # The LIVE offset, not the static winter field. station.utc_offset_hours
+            # is STANDARD time by design (see StationConfig.iana_timezone); building
+            # a local-day window on it shifts the window an hour for every
+            # DST-observing station for most of the year, which attributes
+            # 23:00-00:00 local on D-1 to day D. That is a whole observation in the
+            # wrong day, and the daily MAX is what settles the market.
+            offset = config.current_utc_offset_hours(station)
+            window_start = _local_day_window_utc(min(missing), offset)[0]
             hours = int((datetime.now(timezone.utc).timestamp() - window_start) / 3600) + 2
             metars = fetch_metars(icao, hours=hours)
             for d in missing:
-                max_c = daily_max_temp_c(metars, d, station.utc_offset_hours)
+                max_c = daily_max_temp_c(metars, d, offset)
                 if max_c is None:
                     print(f"[metar_client] {icao} {d}: insufficient METAR coverage, not saving a daily max.")
                     continue

@@ -92,3 +92,36 @@ class TestSpreadCeilingIsPerRegion:
         import calibration
 
         assert calibration._clamp_spread(5.0) == 2.0
+
+
+class TestMetarDayWindowFollowsDst:
+    def test_the_window_uses_the_live_offset_not_the_static_field(self, monkeypatch):
+        """
+        EGLC is utc_offset_hours=0 (GMT, the STANDARD-time field) but
+        Europe/London in August is BST, +1. A day window built on 0 is
+        shifted an hour and mis-attributes the last hour of the previous
+        local day.
+        """
+        import storage
+        from clients import metar_client
+
+        st = config.get_station("EGLC")
+        assert st.utc_offset_hours == 0
+        assert st.iana_timezone == "Europe/London"
+
+        monkeypatch.setattr(metar_client, "_last_ingest_by_station", {})
+        monkeypatch.setattr(storage, "load_observations_since", lambda icao, cutoff: [])
+        monkeypatch.setattr(storage, "save_observation", lambda o: None)
+
+        seen = []
+        monkeypatch.setattr(
+            metar_client, "_local_day_window_utc",
+            lambda day, offset: (seen.append(offset) or (0, 0)),
+        )
+        monkeypatch.setattr(metar_client, "fetch_metars", lambda icao, hours, timeout=15: [])
+        metar_client.ingest_missing_recent(["EGLC"], days_back=1)
+
+        assert seen, "the day window was never built"
+        assert all(
+            o == config.current_utc_offset_hours("EGLC") for o in seen
+        ), f"day window built on {seen}, expected the live DST-aware offset"
