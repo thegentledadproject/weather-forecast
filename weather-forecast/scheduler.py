@@ -329,7 +329,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
             # calibrating blind to every reading actually collected.
             observations=pipeline.gather_observations(station, target_date),
             forecasts=pipeline.gather_forecasts(station),
-            ensemble_members=openmeteo_client.get_ensemble_spread(station),
+            ensemble_members=pipeline.ensemble_spread_for(station, target_date),
             # Measured (forecast - settled truth) for THIS station, so a
             # source that habitually runs cool is read as what it has
             # historically meant. The same number gates entry below: if it

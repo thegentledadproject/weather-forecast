@@ -31,7 +31,12 @@ the trigger for this design, not an aside.
   backstop "across all live stations" -- without this, isolation holds
   only until the first European station is ever promoted to real money,
   at which point it would silently start competing with WSSS/RCSS for the
-  same 3 slots.
+  same slots and the same dollar ceiling.
+- A region-scoped pooled forecast-error spread
+  (`calibration.pooled_error_spread`), which today pools across every
+  registered station and is the tier a new station falls back on -- the
+  one coupling that would let merely registering Europe change ASIAN
+  trading behaviour, via spread -> probability -> EV -> entries.
 - A DST-aware offset mechanism (`iana_timezone` on `StationConfig` +
   `config.current_utc_offset_hours()`), so `local_today()`,
   `local_day_bounds_utc()`, and scheduler grouping stay correct for
@@ -109,7 +114,7 @@ $0.00: raising it is a one-line, explicit, auditable operator decision,
 not a side effect of adding stations to the registry.
 
 Two call sites change:
-- `entry_manager.py:667` -- `bankroll_sized_usd = kelly_applied *
+- the `bankroll_sized_usd` assignment in `entry_manager.evaluate_entry()` -- `bankroll_sized_usd = kelly_applied *
   config.region_bankroll_usd(station_icao)` (new lookup helper) instead of
   the flat `config.BANKROLL_USD`.
 - `entry_manager.portfolio_day_exposure_usd()` (currently sums
@@ -128,7 +133,7 @@ was pooling across regions.
 
 This is a separate mechanism from section 3 -- `LIVE_MAX_CONCURRENT_POSITIONS`,
 `LIVE_MAX_TOTAL_EXPOSURE_USD`, and `LIVE_MAX_ORDERS_PER_DAY`
-(`config.py:1240-1242`) gate real-money order submission specifically, and
+gate real-money order submission specifically, and
 are explicitly documented today as counting "across all live stations" --
 process-global, not per-station, not per-region. `entry_manager`'s
 Kelly-sizing budget being isolated by region does nothing to this path,
@@ -172,9 +177,41 @@ is not independently chosen -- `config.py`'s own comment derives it as
 `REGION_LIVE_MAX_TOTAL_EXPOSURE_USD["europe"]` must be re-derived from that
 same product for Europe's own worst-case entry cost (which will differ --
 different `MAX_ENTRY_PRICE`/bucket economics), not copied from Asia's
-$11.25 or guessed.
+Asia's current ceiling or guessed.
 
-### 5. Promotion gate
+### 5. Region-scoped pooled forecast-error spread (`calibration.py`)
+
+A THIRD kind of coupling, found while reviewing the implementation plan
+against the code and not identified when sections 3 and 4 were written.
+It is neither capital nor blast radius but a shared STATISTICAL
+ESTIMATOR, and it is the only one of the three that can change an
+existing region's trading behaviour without touching that region's code.
+
+`calibration.pooled_error_spread()` pools forecast errors across every
+station in `config.STATIONS`, and is the spread tier a station falls back
+to when it has fewer than `config.MIN_SPREAD_PAIRS` (5) pairs of its own.
+Every newly registered station starts on exactly that tier. So:
+
+  - European stations would derive their spread from Asian tropical
+    forecast errors. Wrong, but wrong only for Europe.
+  - Once European errors accumulate, they enter the pool ASIAN stations
+    fall back on. Spread feeds `probability.py`, which feeds EV, which
+    feeds entry decisions -- so merely registering Europe would move
+    Asian trading behaviour. That is the isolation premise failing at its
+    quietest point.
+
+Temperate and tropical stations have genuinely different error
+distributions; a pool spanning both describes neither.
+
+`pooled_error_spread(region: Optional[str] = None)` filters the stations
+it pools, and `region` joins `config.DB_PATH` in the `_pooled_spread_cache`
+key -- without that, the first region to compute would serve its spread to
+every other one, reintroducing the leak the filter removes. `None` keeps
+the all-stations pool for callers that predate regions. Callers that know
+their station pass its region; `estimate_std_dev()` is the one that
+matters, since it is on the live entry path.
+
+### 6. Promotion gate
 
 No new code. `LIVE_TRADING_STATIONS` already gates real-money submission
 per station-ICAO, and simulation mode is already available to any
@@ -185,17 +222,29 @@ European stations are added to `config.STATIONS` and simply never added
 to `LIVE_TRADING_STATIONS` -- identical to how all 11 non-WSSS Asia
 stations started.
 
-### 6. Scheduling isolation (`scheduler.py`)
+### 7. Scheduling isolation (`scheduler.py`)
 
 `stations_by_utc_offset()` switches its lookup from
 `station.utc_offset_hours` to `config.current_utc_offset_hours(station)`.
 No other scheduler change is needed: European stations' offsets (UK
 0/+1, CET +1/+2) don't collide with any Asia offset (+5/+8/+9), so they
 fall into their own timezone group(s) automatically under the daemon's
-existing per-offset-group dispatch, and a bug or slow cycle in one
-region's group cannot block or delay another region's group -- that's
-already how `run_forever()` works today for Japan vs. Singapore vs.
-Karachi.
+existing per-offset-group dispatch.
+
+CORRECTED 2026-08-25, after the final branch review. An earlier draft of
+this section claimed that "a bug or slow cycle in one region's group
+cannot block or delay another region's group". That is FALSE.
+`run_forever()` dispatches groups synchronously inside a `for offset in
+due:` loop, so group isolation is CADENCE, not CONCURRENCY: a slow or
+hanging cycle in one group delays any other group that comes due while it
+runs. The coupling is pre-existing -- it already applied to Japan vs.
+Singapore -- and this design does not introduce it, but registering seven
+more stations multiplies the load, and Europe's primary window
+(~03:00-06:00 UTC) interleaves with Asia's all-day monitor_only/risk_only
+exit checks. Since stops are roughly 47% of closed trades in this book,
+the practical exposure is a DELAYED EXIT CHECK, not a delayed entry.
+Making the dispatch concurrent is a separate decision with its own risks
+and is not part of this design.
 
 **Known limitation, documented rather than solved:** `run_forever()`
 computes `groups = stations_by_utc_offset(...)` once at startup. A station
@@ -209,7 +258,7 @@ year. The operational note: restart the daemon on or shortly after each
 BST/CEST transition date. Building automatic mid-run regrouping is
 explicitly deferred -- flag it if it ever causes a real missed window.
 
-### 7. Station registry entries
+### 8. Station registry entries
 
 Confirmed via the Gamma API (`https://gamma-api.polymarket.com/events?slug=...`,
 same lookup `market_discovery.py` uses at trade time) to have a live
@@ -271,6 +320,10 @@ needed, same as Asia.
   block a Europe entry once Europe has its own non-zero budget, and vice
   versa -- the two regions' concurrent-position counts, exposure sums, and
   daily order counts must be computed independently.
+- Region-scoped pooled spread: with a European station registered and
+  carrying wild forecast errors, `pooled_error_spread(region="asia")` is
+  unchanged from the pre-Europe value, and the two regions' cached values
+  do not overwrite one another.
 - Regression: full existing suite green, plus an explicit check that
   `current_utc_offset_hours()` for all 13 existing stations returns
   exactly `station.utc_offset_hours` (i.e. the new helper is a true
@@ -298,5 +351,7 @@ needed, same as Asia.
 - `executor.py` -- `_live_budget_breach(size_usd, station_icao)` filters
   live positions and rate-limit counts to the station's own region
 - `storage.py` -- `count_live_order_attempts(kind, since_iso, station_icaos=None)`
+- `calibration.py` -- `pooled_error_spread(region=None)`, region in the
+  `_pooled_spread_cache` key, and its callers on the entry path
 - `scheduler.py` -- `stations_by_utc_offset()` uses the new helper
 - `tests/` -- new test file(s) for the above, plus regression coverage

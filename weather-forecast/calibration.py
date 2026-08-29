@@ -407,14 +407,14 @@ def estimate_std_dev(
     0.7225 -- and 0.5448 on WSSS alone, the only station that trades.
 
     station_icao is optional so existing callers keep working; without it
-    the measured tier cannot be reached and the estimate falls to pooled.
-    """
-    if ensemble_members and len(ensemble_members) > 1:
-        # A real ensemble spread is the one honest physical spread available
-        # -- distinct model runs of the same atmosphere. Still clamped:
-        # ensembles are known to be under-dispersive at short lead times.
-        return _clamp_spread(statistics.stdev(ensemble_members), station_icao), "ensemble"
+    the measured tier cannot be reached and the estimate falls to the
+    ensemble, then to pooled.
 
+    TIER ORDER (changed 2026-08-29): replay constant, measured error,
+    ensemble, pooled error, flat constant. The ensemble sat at the top until
+    then, which made the measured tier unreachable live -- see the comment
+    on that branch for the Brier comparison that moved it.
+    """
     if not allow_measured:
         # THE BACKTEST PATH. Both measured tiers read the WHOLE stored error
         # record, so using either inside a replay would leak days the
@@ -436,6 +436,45 @@ def estimate_std_dev(
         measured, _ = measured_error_spread(station_icao)
         if measured is not None:
             return _clamp_spread(measured, station_icao), "measured_error"
+
+    if ensemble_members and len(ensemble_members) > 1:
+        # A real ensemble spread is the one honest physical spread available
+        # -- distinct model runs of the same atmosphere. Still clamped:
+        # ensembles are known to be under-dispersive at short lead times.
+        #
+        # BELOW the measured tier since 2026-08-29, having been above it
+        # since this chain was written. The ordering was never measured, and
+        # it was not a close call in practice: the ECMWF fetch returns 51
+        # members for every station on every cycle, so this branch always
+        # fired and measured_error_spread() had never once run on the live
+        # path.
+        #
+        # spread_tier_brier.py scored the two over 248 paired settled
+        # station-days -- every day and every listed bucket, selected on
+        # nothing. The measured tier wins by 0.0352 mean Brier (t = -3.15),
+        # it wins at 7 of the 11 stations that have enough pairs to compute
+        # it, and dropping any single station leaves the gap between -0.027
+        # and -0.040, so it is not one station's result.
+        #
+        # WHERE IT LOSES, IT LOSES SMALL: RKPK +0.013, ZSPD +0.004,
+        # WMKK +0.001, WSSS 0.000. Where it wins it wins big: RKSI -0.118,
+        # RPLL -0.084, RJTT -0.052. That asymmetry is the argument for the
+        # order rather than a per-station toggle.
+        #
+        # WHAT IS STILL UNTESTED, and what would justify moving this back
+        # above: whether the ensemble's DAY-TO-DAY movement carries
+        # information its typical value does not. It cannot be tested yet --
+        # the value was fetched and discarded on every cycle until
+        # pipeline.ensemble_spread_for() started recording it, so the
+        # comparison above had to score this tier at one standing width per
+        # station. Re-run spread_tier_brier.py once that history exists.
+        #
+        # Note also that SPREAD_FLOOR_C (0.70) clamps UP most of what this
+        # branch produces -- raw ensemble dispersion measured across the
+        # registry on 2026-08-29 ran 0.24C to 1.20C, under the floor at 24
+        # of 35 stations. For those, this tier and the floor are the same
+        # number, which is why the comparison also reports a floor row.
+        return _clamp_spread(statistics.stdev(ensemble_members), station_icao), "ensemble"
 
     pooled, _ = pooled_error_spread(
         region=config.region_of(station_icao) if station_icao else None,

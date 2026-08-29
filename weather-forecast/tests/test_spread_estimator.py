@@ -62,7 +62,14 @@ def _obs(t, day=1):
 # Tier selection
 # --------------------------------------------------------------------------
 
-def test_ensemble_spread_wins_when_available():
+def test_ensemble_spread_is_used_when_nothing_is_measured():
+    """
+    Renamed 2026-08-29 with the tier reorder. It used to be
+    test_ensemble_spread_wins_when_available, which stopped describing the
+    contract: the ensemble no longer wins merely by being available, it wins
+    when the station has no measured error spread. The database here is
+    empty, so it does.
+    """
     sd, src = calibration.estimate_std_dev([], [], ensemble_members=[31.0, 32.0, 33.0],
                                            station_icao="WSSS")
     assert src == "ensemble"
@@ -284,3 +291,84 @@ def test_engine_opts_out_of_the_measured_spread():
             f"measured spread -- that is lookahead"
         )
         assert kw["allow_measured_spread"].value is False
+
+
+# --------------------------------------------------------------------------
+# Tier ORDER: measured above ensemble (2026-08-29)
+#
+# The ensemble tier used to be tried first, and the ECMWF fetch returns 51
+# members for every station on every cycle -- so measured_error_spread() was
+# unreachable on the live path and had never once run.
+#
+# Reordered on spread_tier_brier.py's verdict: over 248 paired settled
+# station-days, the measured tier scores 0.0352 Brier BETTER than the
+# ensemble (t = -3.15), and dropping any single station leaves the gap
+# between -0.027 and -0.040. The ensemble's remaining claim -- that its
+# day-to-day movement carries information its typical value does not -- is
+# untested, because the value was discarded before pipeline.ensemble_spread_for
+# began recording it. That claim is what would justify moving it back.
+# --------------------------------------------------------------------------
+
+def test_measured_spread_beats_a_live_ensemble():
+    seed_pairs("WSSS", [-1.0, 0.0, 1.0, -1.0, 1.0, 0.0])
+
+    sd, src = calibration.estimate_std_dev(
+        [_fc(32.0)], [_obs(32.0)],
+        ensemble_members=[31.0, 32.0, 33.0], station_icao="WSSS",
+    )
+
+    assert src == "measured_error"
+    assert sd != pytest.approx(1.0), "1.0 is the ensemble's own stdev -- the wrong tier won"
+
+
+def test_ensemble_still_wins_when_the_station_has_too_few_pairs():
+    """Below MIN_SPREAD_PAIRS the measured tier has nothing to say."""
+    seed_pairs("WMKK", [0.5, -0.5])
+
+    _, src = calibration.estimate_std_dev(
+        [_fc(32.0)], [_obs(32.0)],
+        ensemble_members=[31.0, 32.0, 33.0], station_icao="WMKK",
+    )
+
+    assert src == "ensemble"
+
+
+def test_ensemble_still_wins_when_no_station_is_given():
+    """Without an ICAO the measured tier cannot be reached at all."""
+    seed_pairs("WSSS", [-1.0, 0.0, 1.0, -1.0, 1.0, 0.0])
+
+    _, src = calibration.estimate_std_dev(
+        [_fc(32.0)], [_obs(32.0)], ensemble_members=[31.0, 32.0, 33.0],
+    )
+
+    assert src == "ensemble"
+
+
+def test_the_replay_constant_still_pre_empts_both_tiers():
+    """
+    allow_measured=False is the backtest path. Both measured tiers read the
+    WHOLE stored error record, so either would leak days the simulated
+    instant has not reached. Reordering them must not open that door.
+    """
+    seed_pairs("WSSS", [-1.0, 0.0, 1.0, -1.0, 1.0, 0.0])
+
+    _, src = calibration.estimate_std_dev(
+        [_fc(32.0)], [_obs(32.0)],
+        ensemble_members=[31.0, 32.0, 33.0], station_icao="WSSS",
+        allow_measured=False,
+    )
+
+    assert src == "replay_constant"
+
+
+def test_the_measured_spread_is_still_clamped():
+    seed_pairs("WSSS", [-8.0, 8.0, -8.0, 8.0, -8.0, 8.0])  # stdev ~8.8C
+
+    sd, src = calibration.estimate_std_dev(
+        [_fc(32.0)], [_obs(32.0)],
+        ensemble_members=[31.0, 32.0, 33.0], station_icao="WSSS",
+    )
+
+    assert src == "measured_error"
+    assert sd == pytest.approx(config.REGION_SPREAD_CEILING_C[config.region_of("WSSS")]
+                               or config.SPREAD_CEILING_C)

@@ -14,3 +14,6 @@ venv/
 .env
 *.pem
 *.key
+
+# Claude Code personal settings (contains local key paths)
+.claude/settings.local.json

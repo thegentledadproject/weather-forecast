@@ -301,6 +301,34 @@ def _connect() -> sqlite3.Connection:
         if column_name not in existing_settled_bucket_columns:
             conn.execute(f"ALTER TABLE settled_buckets ADD COLUMN {column_ddl}")
 
+    # The ECMWF ensemble spread the live path already fetches, kept instead
+    # of discarded. calibration.estimate_std_dev() returns the "ensemble"
+    # tier BEFORE it ever reaches measured_error_spread(), and the fetch
+    # succeeds for every station on every cycle -- so the measured tier is
+    # unreachable live, and no record exists to score the two against each
+    # other. This table is that record, and nothing reads it on the trading
+    # path: collection only.
+    #
+    # std_dev_c is the RAW stdev across members, deliberately NOT clamped by
+    # calibration._clamp_spread(). SPREAD_FLOOR_C already lifts several
+    # stations' ensembles, so storing the clamped number would hide the very
+    # quantity a later comparison has to see.
+    #
+    # Keyed per (station, target_date), so re-scanning a day overwrites
+    # rather than accumulating one row per cycle.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ensemble_spread (
+            station_icao TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            std_dev_c REAL NOT NULL,
+            member_count INTEGER NOT NULL,
+            fetched_at TEXT NOT NULL,
+            PRIMARY KEY (station_icao, target_date)
+        )
+        """
+    )
+
     # After the ALTER TABLE migration above, so the view is defined against
     # the migrated `positions` shape rather than a short one.
     _ensure_position_economics_view(conn)
@@ -691,6 +719,47 @@ def load_settled_buckets(station_icao: str) -> Dict[date, Tuple[int, int, int, s
         date.fromisoformat(str(r[0])): (
             int(r[1]), int(r[2]), int(r[3]), str(r[4]), int(r[5])
         )
+        for r in rows
+    }
+
+
+def save_ensemble_spread(
+    station_icao: str,
+    target_date: date,
+    std_dev_c: float,
+    member_count: int,
+    fetched_at: str,
+) -> None:
+    """
+    Record the raw ensemble dispersion behind one station-day's estimate.
+
+    REPLACE per (station, date): the scheduler re-fetches on every cycle of
+    the morning, and the question this record exists to answer is about the
+    number the day was priced from, not about every intraday re-read. The
+    last write of the day wins, which is the one closest to the decision.
+
+    std_dev_c is stored UNCLAMPED -- see the table comment in _connect().
+    """
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO ensemble_spread "
+            "(station_icao, target_date, std_dev_c, member_count, fetched_at) "
+            "VALUES (?,?,?,?,?)",
+            (station_icao, target_date.isoformat(), float(std_dev_c),
+             int(member_count), fetched_at),
+        )
+
+
+def load_ensemble_spreads(station_icao: str) -> Dict[date, Tuple[float, int]]:
+    """{target_date: (std_dev_c, member_count)} for one station."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT target_date, std_dev_c, member_count "
+            "FROM ensemble_spread WHERE station_icao = ?",
+            (station_icao,),
+        ).fetchall()
+    return {
+        date.fromisoformat(str(r[0])): (float(r[1]), int(r[2]))
         for r in rows
     }
 
