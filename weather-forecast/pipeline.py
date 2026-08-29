@@ -27,6 +27,7 @@ config.py, models.py, calibration.py, probability.py, storage.py (local)
 clients/* (local)
 """
 
+import statistics
 from datetime import date, datetime, timedelta, timezone
 
 import bucket_axis
@@ -114,6 +115,47 @@ def gather_observations(station, target_date: date) -> list:
     return storage.dedupe_observations(observations)
 
 
+def ensemble_spread_for(station, target_date: date) -> list:
+    """
+    The ensemble members for one station/date, AND the record of their
+    dispersion. Shared by pipeline.run() and scheduler._run_full_cycle() for
+    the same reason gather_observations() is: the cycle that trades is the
+    one whose inputs have to be recorded, and a second call site that fetches
+    directly would leave holes on exactly those cycles.
+
+    WHY THE RECORD EXISTS. calibration.estimate_std_dev() returns the
+    "ensemble" tier before it ever reaches measured_error_spread(), and the
+    fetch succeeds for every station on every cycle -- so the measured tier
+    is unreachable on the live path, and nothing was stored that could score
+    the two against each other. Measured 2026-08-29, the ensemble is narrower
+    than the station's own measured forecast error at 9 of 11 stations
+    (ZSPD 0.26 vs 0.78, RPLL 0.65 vs 1.52), but whether that makes it a WORSE
+    width is a Brier question, not a ratio question -- see
+    spread_tier_brier.py.
+
+    Returns the members unchanged, including None. Recording is a side
+    effect and never changes what calibration receives.
+    """
+    members = openmeteo_client.get_ensemble_spread(station)
+
+    if members and len(members) > 1:
+        try:
+            storage.save_ensemble_spread(
+                station.icao,
+                target_date,
+                # UNCLAMPED, deliberately -- config.SPREAD_FLOOR_C lifts
+                # several stations' ensembles, and a clamped record would
+                # hide the quantity the comparison is about.
+                std_dev_c=statistics.stdev(members),
+                member_count=len(members),
+                fetched_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001 - collection must not break a cycle
+            print(f"[pipeline] could not record ensemble spread for {station.icao}: {exc}")
+
+    return members
+
+
 def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
     """Run the full pipeline for one station/date. Returns a summary dict."""
     station = config.get_station(station_icao)
@@ -122,7 +164,7 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
     target_date = target_date or config.local_today(station)
 
     forecasts = gather_forecasts(station)
-    ensemble = openmeteo_client.get_ensemble_spread(station)
+    ensemble = ensemble_spread_for(station, target_date)
     observations = gather_observations(station, target_date)
 
     estimate = calibrate(
