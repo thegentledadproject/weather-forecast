@@ -158,3 +158,55 @@ class TestStationReport:
 
     def test_a_station_with_no_settled_days_reports_nothing_rather_than_raising(self, db):
         assert stb.station_report("RJTT", grid=[0.5, 1.0])["n_days"] == 0
+
+
+class TestEnsembleProxy:
+    def test_a_proxy_width_scores_the_ensemble_row_when_no_history_exists(self, db):
+        _seed_run(6)
+
+        report = stb.station_report(STATION, grid=[0.5, 1.0], ensemble_proxy=0.9)
+
+        assert report["ensemble"]["n"] == 6
+        assert report["ensemble"]["proxy"] is True
+        assert report["ensemble"]["brier"] == pytest.approx(
+            stb.score_width(stb.build_days(STATION), 0.9)
+        )
+
+    def test_the_proxy_is_clamped_the_way_production_clamps_it(self, db):
+        """A raw ensemble under SPREAD_FLOOR_C never reaches the buckets."""
+        import calibration
+
+        _seed_run(6)
+
+        report = stb.station_report(STATION, grid=[0.5, 1.0], ensemble_proxy=0.26)
+
+        assert report["ensemble"]["brier"] == pytest.approx(
+            stb.score_width(stb.build_days(STATION), calibration._clamp_spread(0.26, STATION))
+        )
+
+    def test_recorded_history_wins_over_a_proxy(self, db):
+        """
+        Once pipeline.ensemble_spread_for has built a record, the real
+        day-by-day widths must be scored, not the standing proxy.
+        """
+        _seed_run(6)
+        for i in range(6):
+            storage.save_ensemble_spread(
+                STATION, date(2026, 8, 1) + timedelta(days=i),
+                std_dev_c=1.4, member_count=51, fetched_at="2026-08-29T00:00:00+00:00",
+            )
+
+        report = stb.station_report(STATION, grid=[0.5, 1.0], ensemble_proxy=0.9)
+
+        assert report["ensemble"]["proxy"] is False
+        assert report["ensemble"]["brier"] == pytest.approx(
+            stb.score_width(stb.build_days(STATION), 1.4)
+        )
+
+    def test_no_proxy_and_no_history_leaves_the_row_unscored(self, db):
+        _seed_run(6)
+
+        report = stb.station_report(STATION, grid=[0.5, 1.0])
+
+        assert report["ensemble"]["brier"] is None
+        assert report["ensemble"]["n"] == 0

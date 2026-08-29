@@ -311,7 +311,11 @@ def build_days(station_icao: str) -> List[ScoredDay]:
 DEFAULT_GRID = [round(0.3 + 0.1 * i, 1) for i in range(23)]  # 0.3 .. 2.5
 
 
-def station_report(station_icao: str, grid: Sequence[float] = None) -> dict:
+def station_report(
+    station_icao: str,
+    grid: Sequence[float] = None,
+    ensemble_proxy: Optional[float] = None,
+) -> dict:
     """
     One station's tier comparison. Everything here composes the tested
     primitives above; nothing new is decided in this function.
@@ -321,9 +325,13 @@ def station_report(station_icao: str, grid: Sequence[float] = None) -> dict:
                    errors, clamped as production clamps it. This is the
                    tier the ensemble currently pre-empts.
       ensemble  -- the recorded ensemble dispersion for that day, if
-                   pipeline.ensemble_spread_for() has stored one. Empty
-                   before 2026-08-29; the caller must say so rather than
-                   let a blank row read as "no difference".
+                   pipeline.ensemble_spread_for() has stored one. No
+                   history exists before 2026-08-29, so ensemble_proxy
+                   scores the row at ONE standing width instead, flagged
+                   proxy=True. That proxy cannot show what the ensemble's
+                   day-to-day movement is worth -- only what its typical
+                   value is worth -- and a row that cannot be scored at all
+                   stays None rather than blank, so nothing reads as a tie.
       constant  -- config.POOLED_SPREAD_FALLBACK_C, the flat width the
                    chain falls to when nothing is measured. The baseline
                    estimate_std_dev's own docstring scored against.
@@ -345,7 +353,7 @@ def station_report(station_icao: str, grid: Sequence[float] = None) -> dict:
         "n_days": len(days),
         "best_grid": (None, None),
         "measured": {"brier": None, "n": 0, "widths": {}},
-        "ensemble": {"brier": None, "n": 0, "widths": {}},
+        "ensemble": {"brier": None, "n": 0, "widths": {}, "proxy": False},
         "constant": {"brier": None, "n": 0, "width": None},
         "floor": {"brier": None, "n": 0, "width": None},
     }
@@ -367,11 +375,18 @@ def station_report(station_icao: str, grid: Sequence[float] = None) -> dict:
     }
 
     recorded = storage.load_ensemble_spreads(station_icao)
-    ens_widths = {
-        d: calibration._clamp_spread(sd, station_icao) for d, (sd, _) in recorded.items()
-    }
-    brier, n = score_per_day_widths(days, ens_widths)
-    report["ensemble"] = {"brier": brier, "n": n, "widths": ens_widths}
+    if recorded:
+        ens_widths = {
+            d: calibration._clamp_spread(sd, station_icao) for d, (sd, _) in recorded.items()
+        }
+        brier, n = score_per_day_widths(days, ens_widths)
+        report["ensemble"] = {"brier": brier, "n": n, "widths": ens_widths, "proxy": False}
+    elif ensemble_proxy is not None:
+        width = calibration._clamp_spread(ensemble_proxy, station_icao)
+        report["ensemble"] = {
+            "brier": score_width(days, width), "n": len(days),
+            "widths": {d.target_date: width for d in days}, "proxy": True,
+        }
 
     for key, raw in (
         ("constant", config.POOLED_SPREAD_FALLBACK_C),
@@ -395,7 +410,7 @@ def print_report(reports: List[dict]) -> None:
     header = (
         f"{'stn':6s}{'n':>4s}{'bestW':>7s}{'bestB':>8s}"
         f"{'measW':>7s}{'measB':>8s}{'ensW':>7s}{'ensB':>8s}"
-        f"{'constB':>8s}{'floorB':>8s}{'meas-best':>10s}"
+        f"{'constB':>8s}{'floorB':>8s}{'meas-ens':>9s}{'meas-best':>10s}"
     )
     print(header)
     print("-" * len(header))
@@ -407,16 +422,18 @@ def print_report(reports: List[dict]) -> None:
         mean_mw = statistics.mean(mw.values()) if mw else None
         mean_ew = statistics.mean(ew.values()) if ew else None
         best_w, best_b = r["best_grid"]
-        gap = (
-            r["measured"]["brier"] - best_b
-            if r["measured"]["brier"] is not None and best_b is not None else None
-        )
+        meas_b, ens_b = r["measured"]["brier"], r["ensemble"]["brier"]
+        gap = meas_b - best_b if meas_b is not None and best_b is not None else None
+        # NEGATIVE means the measured tier scores better than the ensemble.
+        # This is the column the tier order turns on.
+        vs_ens = meas_b - ens_b if meas_b is not None and ens_b is not None else None
+        mark = "*" if r["ensemble"].get("proxy") else " "
         print(
             f"{r['station']:6s}{r['n_days']:4d}{_fmt(best_w, 1, 7)}{_fmt(best_b)}"
-            f"{_fmt(mean_mw, 2, 7)}{_fmt(r['measured']['brier'])}"
-            f"{_fmt(mean_ew, 2, 7)}{_fmt(r['ensemble']['brier'])}"
+            f"{_fmt(mean_mw, 2, 7)}{_fmt(meas_b)}"
+            f"{_fmt(mean_ew, 2, 6)}{mark}{_fmt(ens_b)}"
             f"{_fmt(r['constant']['brier'])}{_fmt(r['floor']['brier'])}"
-            f"{_fmt(gap, 4, 10)}"
+            f"{_fmt(vs_ens, 4, 9)}{_fmt(gap, 4, 10)}"
         )
 
 
@@ -426,10 +443,22 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     parser.add_argument("--station", action="append", dest="stations",
                         help="ICAO to score; repeatable. Default: every registered station.")
+    parser.add_argument(
+        "--ensemble-proxy", action="append", dest="proxies", metavar="ICAO=WIDTH",
+        help="Score the ensemble row at ONE standing width for this station, for use "
+             "until pipeline.ensemble_spread_for has built real history. Repeatable. "
+             "A proxied row is marked * and says only what the ensemble's TYPICAL "
+             "value is worth, never what its day-to-day movement is worth.",
+    )
     args = parser.parse_args(argv)
 
+    proxies = {}
+    for item in args.proxies or []:
+        icao, _, width = item.partition("=")
+        proxies[icao.strip().upper()] = float(width)
+
     stations = args.stations or sorted(config.STATIONS)
-    reports = [station_report(s) for s in stations]
+    reports = [station_report(s, ensemble_proxy=proxies.get(s)) for s in stations]
     scored = [r for r in reports if r["n_days"]]
 
     print_report(reports)
@@ -443,7 +472,20 @@ def main(argv=None) -> None:
         "measW/measB: the measured-error tier under leave-one-out. "
         "ensW/ensB: the RECORDED ensemble dispersion."
     )
-    if ens_days == 0:
+    proxied = [r["station"] for r in scored if r["ensemble"].get("proxy")]
+    if proxied:
+        print()
+        print(
+            f"* ensemble row is a ONE-WIDTH PROXY for {len(proxied)} station(s): "
+            f"{', '.join(proxied)}. It scores what that ensemble's typical value is "
+            f"worth, not what its day-to-day movement is worth -- the latter needs "
+            f"the history pipeline.ensemble_spread_for is now collecting."
+        )
+        print(
+            "meas-ens: NEGATIVE means the measured tier scores better than the "
+            "ensemble tier that currently pre-empts it."
+        )
+    if ens_days == 0 and not proxied:
         print(
             "\nENSEMBLE COLUMN IS EMPTY, and that is a data gap, not a tie: the "
             "ensemble spread was discarded on every cycle before 2026-08-29. "
