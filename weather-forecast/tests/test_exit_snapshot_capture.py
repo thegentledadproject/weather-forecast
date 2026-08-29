@@ -200,6 +200,7 @@ class TestEntryWindowsDoNotDoubleCapture:
     """
 
     def test_full_cycle_exit_check_passes_no_fidelity(self, monkeypatch):
+        import ev_engine
         import scheduler
 
         seen = {}
@@ -210,20 +211,27 @@ class TestEntryWindowsDoNotDoubleCapture:
         monkeypatch.setattr(scheduler, "_run_exit_check", _spy)
         # pipeline.run() must SUCCEED here: on failure _run_full_cycle
         # returns early and never reaches the exit check, which would make
-        # this assertion pass without testing anything.
-        monkeypatch.setattr(scheduler.pipeline, "run", lambda station_icao: None)
+        # this assertion pass without testing anything. It is also where
+        # the cycle's one calibration lives since 2026-08-30, so stubbing
+        # it keeps this wiring test off the network.
+        monkeypatch.setattr(
+            scheduler.pipeline, "run",
+            lambda station_icao, forecast_bias_c=0.0: {"estimate": object()},
+        )
         monkeypatch.setattr(scheduler.pipeline, "print_summary", lambda r: None)
 
-        # Fail the EV leg fast. It is wrapped in its own try/except and the
-        # exit check still runs after it, but left alone it calls calibrate()
-        # -- which fetches real forecasts over the network and then writes
-        # data/ev_latest_RCSS.json. A wiring test must not do either.
-        import calibration
+        import entry_manager
 
+        monkeypatch.setattr(entry_manager, "forecast_bias_stats", lambda icao: (0.0, 0, 0.0))
+
+        # Fail the EV leg fast. It is wrapped in its own try/except and the
+        # exit check still runs after it, but left alone it prices a real
+        # book and writes data/ev_latest_RCSS.json. A wiring test must not
+        # do either.
         def _no_ev(*a, **kw):
             raise RuntimeError("EV leg stubbed out -- this test only checks wiring")
 
-        monkeypatch.setattr(calibration, "calibrate", _no_ev)
+        monkeypatch.setattr(ev_engine, "run_for_station_with_map", _no_ev)
 
         scheduler._run_full_cycle("RCSS", min_net_ev=0.15)
 
@@ -247,6 +255,10 @@ class TestEntryWindowsDoNotDoubleCapture:
             lambda station_icao, interval_min=None: seen.update(interval_min=interval_min),
         )
         monkeypatch.setattr(scheduler, "_ingest_resolution_observations", lambda icaos: None)
+        # Monitor cycles also carry a collection pass on their own throttle
+        # (see tests/test_collection_window.py). It fetches over the network,
+        # and this test is about the exit check's cadence argument only.
+        monkeypatch.setattr(scheduler, "_run_collection_cycle", lambda icao: None)
 
         window = {
             "start_minute": 600, "end_minute": 720, "interval_min": 15,

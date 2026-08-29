@@ -63,8 +63,10 @@ DELIBERATE DIVERGENCES FROM A NAIVE READING OF "REPLAY THE LIVE SYSTEM"
    resolution day happens to have no market listed.
 2. Exit checks run only in the window modes that run them live --
    primary, secondary, monitor_only, risk_only (see scheduler.run_cycle).
-   pre_poll ticks mark equity and do nothing else, because live pre_poll
-   cycles only look for a published forecast.
+   collection ticks mark equity and do nothing else: live collection
+   records forecasts and prices the book without surfacing an entry or
+   taking an exit. (It replaced pre_poll on 2026-08-30, which did even
+   less -- it only looked for a published forecast.)
 3. Calibration observations include BOTH the station's seed observations
    and stored observations, mirroring pipeline.run(). NOTE THE LIVE
    QUIRK: the path that actually trades, scheduler._run_full_cycle(),
@@ -115,8 +117,10 @@ from backtest.portfolio import PortfolioState
 # Window modes that run an exit check in the live system. Read straight
 # off scheduler.run_cycle(): "primary"/"secondary" dispatch to
 # _run_full_cycle(), which ends with _run_exit_check(); "monitor_only"/
-# "risk_only" call _run_exit_check() directly. "pre_poll" does not, and
-# "closed" emits no ticks at all.
+# "risk_only" call _run_exit_check() directly. "collection" does not --
+# it records and decides nothing, deliberately, so that the hour before
+# entries open cannot start firing stops -- and "closed" emits no ticks
+# at all.
 EXIT_CHECK_MODES = ("primary", "secondary", "monitor_only", "risk_only")
 
 # Window modes that surface new entries. Same source: only these two

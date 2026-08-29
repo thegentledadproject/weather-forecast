@@ -79,7 +79,7 @@ class Tick:
 
     min_net_ev carries the active window's EV bar straight through from
     config.SCHEDULE_WINDOWS, INCLUDING its None for windows that surface
-    no entries at all (pre_poll, monitor_only, risk_only). None here
+    no entries at all (collection, monitor_only, risk_only). None here
     means "this window does not open positions", which is different from
     a bar of 0.0, and collapsing the two would let the simulator enter
     trades in windows the live system never enters trades in.
@@ -214,11 +214,14 @@ def generate_ticks(day: date, utc_offset_hours: Optional[int] = None) -> List[Ti
             )
         )
         # Advance by this window's interval, but never PAST the window's
-        # own end -- exactly what scheduler.seconds_until_next_boundary()
-        # does with min(interval_min, minutes_left_in_window). Without the
-        # clamp, a short window (e.g. the 2-minute 04:45-05:00 pre-poll)
-        # overshoots its boundary and drags every later tick of the day a
-        # minute or two off the times the live daemon actually wakes at.
+        # own end. This walk has always been grid-anchored -- start, then
+        # start+interval, clamped at the window end -- and since 2026-08-30
+        # scheduler.seconds_until_next_boundary() is too, so live and replay
+        # now agree on when the daemon wakes. (Before that the live side
+        # answered "one interval from now" AFTER a cycle had run, so a slow
+        # group drifted later all day and delivered fewer ticks than every
+        # replay assumed.) Without the clamp, a short window overshoots its
+        # boundary and drags every later tick of the day off the grid.
         minutes_left_in_window = window["end_minute"] - minute_of_day
         minute_of_day += min(interval, max(minutes_left_in_window, 1))
 

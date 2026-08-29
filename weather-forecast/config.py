@@ -1817,7 +1817,9 @@ MAX_SINGLE_CYCLE_MOVE = 0.15
 #
 # modes:
 #   "closed"       -- scheduler does nothing, sleeps until next window
-#   "pre_poll"     -- watching for the official forecast to publish
+#   "collection"   -- fetch and RECORD only: forecasts, ensemble members and
+#                      both sides of every bucket's book. Surfaces no entry
+#                      and takes no exit. See COLLECTION_INTERVAL_MIN.
 #   "primary"      -- full cycle: forecast -> calibration -> EV -> exits.
 #                      Lowest EV threshold of the day (peak edge window)
 #   "secondary"    -- same full cycle, but a higher EV bar and wider interval
@@ -1826,8 +1828,19 @@ MAX_SINGLE_CYCLE_MOVE = 0.15
 #   "risk_only"    -- exit-checks only, plus same-day nowcast signal watch
 SCHEDULE_WINDOWS = [
     (0, 0, 4, 0, None, "closed", None, "Overnight -- explicit floor, nothing runs before 04:00"),
-    (4, 0, 4, 45, 15, "pre_poll", None, "Early watch -- checking if forecast posted ahead of schedule"),
-    (4, 45, 5, 0, 2, "pre_poll", None, "Tight pre-poll -- waiting for the 05:00 forecast publish event"),
+    # WAS TWO pre_poll WINDOWS (15-min from 04:00, then 2-min from 04:45),
+    # replaced 2026-08-30. pre_poll called official.get_24hr_forecast() and
+    # PRINTED the result: storage.save_forecast is reachable only from
+    # pipeline.run(), so ~10 polls per station per day were stored nowhere,
+    # and determine_window() is purely clock-based so the "publish detected"
+    # result gated nothing either. The 2-minute burst was waiting for
+    # Singapore's 05:00 NEA publish -- a real event for 1 of 35 stations,
+    # and unrelated to when the other 34 sources update.
+    #
+    # Collection does the thing that hour was always trying to do: record
+    # what is available before entries open. It stores forecasts and prices
+    # both sides of every bucket, and it decides nothing.
+    (4, 0, 5, 0, 30, "collection", None, "Pre-entry collection -- forecasts and book recorded, no entries, no exits"),
     (5, 0, 8, 0, 10, "primary", 0.15, "Primary edge window -- confirmed bias-correction edge, tightest scan interval"),
     # ENTRIES CLOSE AT 08:00 (changed 2026-08-17). This was two "secondary"
     # entry windows, 08:00-09:00 at an EV bar of 0.20 and 09:00-10:00 at
@@ -1928,6 +1941,29 @@ SCHEDULE_WINDOWS = [
     (16, 0, 22, 45, 30, "monitor_only", None, "Evening -- position monitoring, wider as volatility falls off"),
     (22, 45, 24, 0, None, "closed", None, "Late night -- log closing state, then stop until 04:00"),
 ]
+
+# How often a station is collected OUTSIDE its entry window, in minutes.
+#
+# The 04:00-05:00 collection window above runs on its own 30-minute
+# interval. This governs the other side: monitor_only and risk_only cycles
+# carry a collection pass on this throttle, so the record covers 04:00 to
+# 22:45 local instead of the 3 hours the system happened to be trading in.
+#
+# IT IS A THROTTLE, NOT A CADENCE, and it deliberately does not touch the
+# exit-monitoring intervals it rides along with. Those are 15/15/30 minutes
+# because the scan interval IS the resolution of every exit level (see the
+# note above the 10:00 window); collection has no such requirement -- the
+# GFS/ECMWF runs it exists to catch land a few times a day.
+#
+# THE COST IS THE SINGLE-THREADED LOOP, NOT THE APIs. A station-cycle takes
+# ~20-25s, almost all of it market discovery and per-token book fetches, and
+# scheduler.run_forever() dispatches timezone groups SERIALLY -- so ~17
+# collection passes per station per day across 35 stations is roughly 3
+# hours/day of added work in a loop that already spends ~4.5. Raising this
+# number is the first thing to reach for if groups start delaying each
+# other's exit checks; 60 is not a measured optimum, it is one model-run
+# arrival per pass with margin.
+COLLECTION_INTERVAL_MIN = 60
 
 # Opt-in only -- disabled by default per the walked-back Window-0 analysis.
 # If enabled, adds a sparse scan around a station's likely next-day market

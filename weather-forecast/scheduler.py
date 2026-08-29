@@ -66,7 +66,6 @@ DEPENDENCIES
 datetime, time (standard library)
 config.py (local)
 pipeline.py, ev_engine.py, position_manager.py (local)
-clients/official/registry.py (local)
 """
 
 import argparse
@@ -82,7 +81,6 @@ import position_manager
 import executor
 import storage
 from clients import wallet_client
-from clients.official.registry import get_official_client
 
 # Floor on how long the daemon loop may sleep between wake-ups. With 13
 # stations across three timezone groups the next-run times interleave, and
@@ -90,6 +88,12 @@ from clients.official.registry import get_official_client
 # loop at near-zero intervals. 30s is short enough that no window boundary
 # is ever missed by a meaningful margin.
 MIN_SLEEP_SECONDS = 30
+
+# When each station was last collected, as a unix timestamp. Read by
+# _collection_due(), written by the two cycles that record a station:
+# _run_collection_cycle() and _run_full_cycle(). In-process only -- see
+# _collection_due() for why that is the right direction to be wrong in.
+_last_collection_ts: Dict[str, float] = {}
 
 
 def local_now(tz_offset_hours: int = 8) -> Tuple[int, int]:
@@ -192,18 +196,42 @@ def determine_window(hour: int, minute: int) -> Optional[dict]:
 
 def seconds_until_next_boundary(window: dict, hour: int, minute: int) -> int:
     """
-    How long until either this window's own scan interval next fires,
-    or the window itself ends -- whichever is sooner. Used by
-    run_forever() to decide how long to sleep.
+    How long until this window's next GRID POINT (start + k*interval), or
+    the window's own end -- whichever is sooner. Used by run_forever() to
+    decide how long to sleep.
+
+    THE GRID, NOT "ONE INTERVAL FROM NOW". This function is called AFTER a
+    cycle has run (see _schedule_next_run), so answering "one interval"
+    made the real period interval + cycle duration, and every group's
+    cadence drifted by its own cycle length. Measured 2026-08-28 on 13
+    stations: the 9-station UTC+8 group took ~3.5 min per cycle and got 14
+    of its designed 18 entry-window ticks, while one-station groups got
+    17-18 -- i.e. the biggest group, which needs the most watching, was
+    quietly scanning at 13.5-minute intervals inside a 10-minute window.
+
+    It also settles a live/replay disagreement rather than creating one:
+    backtest/simclock.generate_ticks() has always walked the grid from the
+    window start, so every replay already assumed the cadence this now
+    delivers.
+
+    A cycle that overruns a grid point waits for the NEXT one. Firing
+    immediately would convert a slow cycle into a catch-up burst -- the
+    one behaviour the old "fresh clock reading" comment in
+    _schedule_next_run was right to worry about.
     """
     minute_of_day = hour * 60 + minute
-    minutes_left_in_window = window["end_minute"] - minute_of_day
+    end_minute = window["end_minute"]
+    minutes_left_in_window = end_minute - minute_of_day
 
     if window["interval_min"] is None:
         # "closed" windows have no interval -- just sleep until the window ends.
         return max(minutes_left_in_window, 1) * 60
 
-    return min(window["interval_min"], max(minutes_left_in_window, 1)) * 60
+    interval = window["interval_min"]
+    elapsed = minute_of_day - window["start_minute"]
+    next_grid_minute = window["start_minute"] + (elapsed // interval + 1) * interval
+    minutes_ahead = min(next_grid_minute, end_minute) - minute_of_day
+    return max(minutes_ahead, 1) * 60
 
 
 def run_cycle(window: dict, station_icaos: Optional[list] = None) -> None:
@@ -223,15 +251,9 @@ def run_cycle(window: dict, station_icaos: Optional[list] = None) -> None:
 
     _ingest_resolution_observations(station_icaos)
 
-    if mode == "pre_poll":
+    if mode == "collection":
         for icao in station_icaos:
-            station = config.get_station(icao)
-            official = get_official_client(station.official_client_key)
-            forecast = official.get_24hr_forecast(station)
-            if forecast and forecast.max_temp_c is not None:
-                print(f"[scheduler] {icao}: official forecast appears published (max={forecast.max_temp_c}°C) -- primary window can begin.")
-            else:
-                print(f"[scheduler] {icao}: no forecast detected yet this poll.")
+            _run_collection_cycle(icao)
         return
 
     if mode in ("primary", "secondary"):
@@ -248,6 +270,14 @@ def run_cycle(window: dict, station_icaos: Optional[list] = None) -> None:
             _run_exit_check(icao, interval_min=window["interval_min"])
             if mode == "risk_only":
                 _check_same_day_signal(icao)
+            # Collection rides along on its OWN throttle rather than the
+            # window's interval: the exit intervals are the resolution of
+            # every exit level and must not be spent on data gathering,
+            # while the model runs collection exists to catch arrive a few
+            # times a day. Exits first, deliberately -- a slow collection
+            # pass must never be what delays a stop.
+            if _collection_due(icao, time.time()):
+                _run_collection_cycle(icao)
         return
 
     print(f"[scheduler] unrecognized mode '{mode}' -- skipping this cycle.")
@@ -304,39 +334,46 @@ def _ingest_resolution_observations(station_icaos: list) -> None:
 
 
 def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
-    """Forecast -> calibration -> EV -> surfaced opportunities -> exit checks, for one station."""
+    """
+    Forecast -> calibration -> EV -> surfaced opportunities -> exit checks,
+    for one station.
+
+    ONE FETCH, ONE CALIBRATION, printed and traded. This used to run
+    pipeline.run() for the printed table and then build a SECOND estimate
+    for the EV leg, because only the second one knew the station's
+    measured forecast bias. It cost every station-cycle a duplicate fetch
+    of every forecast source (18 rows per station-cycle in the live
+    `forecasts` table, two identical batches 2.3s apart), and it printed a
+    model nobody traded: RCSS 2026-08-28 21:28 printed p(36C) = 0.41%
+    while placing a real order on 36 YES at model_prob 0.2691.
+
+    The bias now goes INTO pipeline.run(), and the estimate it returns is
+    the one priced below.
+    """
+    import entry_manager
+
+    # A full cycle records everything a collection pass does, so it counts
+    # as one: without this the first monitor cycle after 08:00 would
+    # re-collect a station the 07:5x entry cycle had just recorded.
+    _last_collection_ts[station_icao] = time.time()
+
     try:
-        result = pipeline.run(station_icao=station_icao)
+        # Measured (forecast - settled truth) for THIS station, so a source
+        # that habitually runs cool is read as what it has historically
+        # meant. The same number gates entry below: if it is too noisy to
+        # correct with, decide_portfolio_entries keeps the station
+        # collection-only regardless of what the EV says.
+        forecast_bias_c = entry_manager.forecast_bias_stats(station_icao)[0] or 0.0
+        result = pipeline.run(
+            station_icao=station_icao, forecast_bias_c=forecast_bias_c
+        )
         pipeline.print_summary(result)
     except Exception as exc:
         print(f"[scheduler] {station_icao}: pipeline.run() failed this cycle: {exc}")
         return
 
     try:
-        from calibration import calibrate
-        from clients import openmeteo_client
-        import entry_manager
-
-        station = config.get_station(station_icao)
-        # This station's own market day, not the box's UTC+8 notion of one.
-        target_date = config.local_today(station)
-        estimate = calibrate(
-            station=station,
-            target_date=target_date,
-            # Same assembly as pipeline.run(): seeds + STORED observations
-            # (incl. settlement-grade METAR daily maxima), deduped. The
-            # trading path previously passed climate-monitor seeds only,
-            # calibrating blind to every reading actually collected.
-            observations=pipeline.gather_observations(station, target_date),
-            forecasts=pipeline.gather_forecasts(station),
-            ensemble_members=pipeline.ensemble_spread_for(station, target_date),
-            # Measured (forecast - settled truth) for THIS station, so a
-            # source that habitually runs cool is read as what it has
-            # historically meant. The same number gates entry below: if it
-            # is too noisy to correct with, decide_portfolio_entries keeps
-            # the station collection-only regardless of what the EV says.
-            forecast_bias_c=entry_manager.forecast_bias_stats(station_icao)[0] or 0.0,
-        )
+        estimate = result["estimate"]
         # ONE discovery per station-cycle. The EV table, the bucket bounds
         # the model probabilities were computed on, and the token ids entry
         # sizing trades against all come out of the same StationEVRun --
@@ -395,6 +432,80 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
     _run_exit_check(station_icao, interval_min=None)
 
 
+def _run_collection_cycle(station_icao: str) -> None:
+    """
+    Record what is available for one station, and decide nothing.
+
+    Fetches and STORES the forecasts, the ensemble members and both sides
+    of every bucket's book -- everything a primary cycle records -- then
+    stops before entry_manager. No entry is surfaced and no exit is taken.
+
+    WHY IT MUST NOT TAKE EXITS. The 04:00-05:00 hour has never been able to
+    fire a stop, and monitor windows already run their own exit check on
+    their own interval. Letting collection exit as well would change WHEN
+    the book can be closed while claiming to be a data-collection change,
+    and would put a slow network call in front of a stop.
+
+    It calibrates on the station's measured bias, exactly as the trading
+    cycle does, so the EV snapshot this leaves behind is the table that
+    WOULD have been traded -- not a second, uncorrected model. (See
+    pipeline.run: printing one model and trading another is the defect
+    that motivated collapsing the two.)
+    """
+    _last_collection_ts[station_icao] = time.time()
+
+    try:
+        # Imported inside the guard on purpose: collection rides along with
+        # the exit check in monitor windows, and nothing in a data-gathering
+        # step may be able to break the cycle that closes positions.
+        import entry_manager
+
+        forecast_bias_c = entry_manager.forecast_bias_stats(station_icao)[0] or 0.0
+        result = pipeline.run(
+            station_icao=station_icao, forecast_bias_c=forecast_bias_c
+        )
+    except Exception as exc:  # noqa: BLE001 - collection is never a gate
+        print(f"[scheduler] {station_icao}: collection forecast leg failed: {exc}")
+        return
+
+    try:
+        ev_run = ev_engine.run_for_station_with_map(result["estimate"])
+        ev_engine.save_ev_snapshot(station_icao, ev_run.ev_results)
+        if ev_run.veto_reason:
+            print(
+                f"[scheduler] {station_icao}: collected forecasts; discovery "
+                f"vetoed the station-day ({ev_run.veto_reason}), so no book to price."
+            )
+        else:
+            print(
+                f"[scheduler] {station_icao}: collected -- forecasts stored, "
+                f"{len(ev_run.ev_results)} bucket(s) priced and captured. "
+                f"No entries surfaced."
+            )
+    except Exception as exc:  # noqa: BLE001 - collection is never a gate
+        print(f"[scheduler] {station_icao}: collection price leg failed: {exc}")
+
+
+def _collection_due(station_icao: str, now_ts: float) -> bool:
+    """
+    Whether this station is due a collection pass -- a pure read of
+    _last_collection_ts against config.COLLECTION_INTERVAL_MIN.
+
+    Per station, not per group: stations in one timezone group share a
+    window but are collected one at a time, and a group that grows should
+    not start skipping its later members.
+
+    In-process state, deliberately. A restart re-collects every station
+    once, which is the harmless direction to be wrong in -- the opposite
+    (persisting the stamps) would let a crash loop starve collection
+    exactly when something is already going wrong.
+    """
+    last = _last_collection_ts.get(station_icao)
+    if last is None:
+        return True
+    return (now_ts - last) >= config.COLLECTION_INTERVAL_MIN * 60
+
+
 def _run_exit_check(station_icao: str, interval_min: Optional[int] = None) -> None:
     try:
         decisions = position_manager.check_and_exit_positions(
@@ -419,12 +530,15 @@ def _schedule_next_run(offset: int) -> float:
     Absolute wall-clock timestamp for one timezone group's next cycle,
     computed from a FRESH reading of the clock.
 
-    Fresh matters: a cycle over several stations can take minutes (network
-    calls to Gamma, the CLOB, and every forecast source), and scheduling
-    the next run off the pre-cycle time would hand back an interval that
-    has already partly elapsed -- at the primary window's 10-minute
-    cadence, a slow cycle would leave near-zero sleep and effectively
-    free-run the loop.
+    Fresh matters, but not for the reason it originally did. A cycle over
+    several stations can take minutes (network calls to Gamma, the CLOB,
+    and every forecast source), and the clock read here is what tells
+    seconds_until_next_boundary() WHERE ON THE GRID that cycle finished --
+    which grid point it already ran past, and therefore which one is next.
+    The grid itself is fixed to the window, so a slow cycle now costs the
+    ticks it ran through and nothing more; it can neither free-run the
+    loop nor drag every later tick of the day later, which is what
+    "one interval from now" used to do.
     """
     hour, minute = local_now(offset)
     window = determine_window(hour, minute)

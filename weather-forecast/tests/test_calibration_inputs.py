@@ -10,9 +10,7 @@ trades. pipeline.gather_observations() is now the single shared assembly
 scheduler._run_full_cycle().
 """
 
-import ast
 from datetime import date
-from pathlib import Path
 
 import config
 import pipeline
@@ -20,7 +18,6 @@ import storage
 from clients import climate_monitor_client
 from models import ObservedReading
 
-PKG = Path(__file__).resolve().parent.parent
 
 
 def test_gather_observations_merges_and_dedupes(monkeypatch):
@@ -53,38 +50,44 @@ def test_gather_observations_merges_and_dedupes(monkeypatch):
     assert by_day[date(2026, 7, 31)].source == config.RESOLUTION_GRADE_OBSERVATION_SOURCE
 
 
-def test_scheduler_trading_path_uses_shared_assembly():
+def test_trading_path_calibrates_on_the_shared_observation_assembly(monkeypatch):
     """
-    AST guard on scheduler._run_full_cycle: its calibrate() call must take
-    observations from pipeline.gather_observations, and must not hand
-    climate_monitor_client.load_recent_observations to calibrate directly
-    -- that exact wiring was finding #3.
+    The estimate the trading cycle prices must take its observations from
+    pipeline.gather_observations -- seeds PLUS everything stored, deduped
+    by source rank -- and never from climate_monitor_client directly.
+    Seeds-only wiring was finding #3: the trading path calibrated blind to
+    every settlement-grade METAR reading the system had collected.
+
+    This was an AST guard on scheduler._run_full_cycle until 2026-08-30,
+    when the cycle's two calibrations were collapsed into one inside
+    pipeline.run(). The property is unchanged and now lives where the
+    single calibrate() call does; that the scheduler prices exactly what
+    run() returned is pinned in tests/test_cycle_calibration.py.
     """
-    src = (PKG / "scheduler.py").read_text(encoding="utf-8")
-    tree = ast.parse(src)
-    fn = next(
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "_run_full_cycle"
-    )
-    calls = [n for n in ast.walk(fn) if isinstance(n, ast.Call)]
+    assembled = [ObservedReading("WSSS", date(2026, 8, 28), 32.5, "metar_daily_max")]
 
-    def called_name(call):
-        f = call.func
-        if isinstance(f, ast.Attribute):
-            parts = [f.attr]
-            while isinstance(f.value, ast.Attribute):
-                f = f.value
-                parts.append(f.attr)
-            if isinstance(f.value, ast.Name):
-                parts.append(f.value.id)
-            return ".".join(reversed(parts))
-        return f.id if isinstance(f, ast.Name) else ""
+    monkeypatch.setattr(pipeline, "gather_observations", lambda station, target_date: assembled)
+    monkeypatch.setattr(pipeline, "gather_forecasts", lambda station: [])
+    monkeypatch.setattr(pipeline, "ensemble_spread_for", lambda station, target_date: [])
+    monkeypatch.setattr(pipeline, "gather_same_day_signal", lambda station: "none")
 
-    calibrate_calls = [c for c in calls if called_name(c) == "calibrate"]
-    assert calibrate_calls, "calibrate() call not found in _run_full_cycle"
-    obs_kw = next(kw for kw in calibrate_calls[0].keywords if kw.arg == "observations")
-    assert isinstance(obs_kw.value, ast.Call)
-    assert called_name(obs_kw.value) == "pipeline.gather_observations", (
-        "scheduler's calibrate() must source observations via "
-        "pipeline.gather_observations -- seeds-only wiring was finding #3"
-    )
+    def _no_direct_seeds(station, days=30):
+        raise AssertionError(
+            "the trading path read climate-monitor seeds directly -- that is "
+            "the seeds-only wiring of finding #3"
+        )
+
+    monkeypatch.setattr(climate_monitor_client, "load_recent_observations", _no_direct_seeds)
+
+    seen = {}
+    real_calibrate = pipeline.calibrate
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        return real_calibrate(**kwargs)
+
+    monkeypatch.setattr(pipeline, "calibrate", _spy)
+
+    pipeline.run(station_icao="WSSS", target_date=date(2026, 8, 29))
+
+    assert seen.get("observations") == assembled
