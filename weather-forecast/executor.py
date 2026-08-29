@@ -66,6 +66,7 @@ from models import Position, ExitDecision, EntryDecision
 import storage
 import risk_manager
 import config
+import bucket_axis
 from clients import market_client, wallet_client
 
 # Per-station execution mode. See the ladder in the module docstring.
@@ -470,8 +471,11 @@ def _note_live_close_refused(position: Position, decision: ExitDecision) -> int:
 
     shares = getattr(position, "size_shares", None)
     shares_text = f"{shares:.2f} shares" if shares else "an unrecorded share count"
+    station = config.STATIONS.get(position.station_icao)
+    axis = bucket_axis.for_station(station)
+    bucket_label = axis.label(position.bucket_c, station.bucket_min_c, station.bucket_max_c)
     print(
-        f"\n[ACTION NEEDED] {position.station_icao} {position.bucket_c}°C "
+        f"\n[ACTION NEEDED] {position.station_icao} {bucket_label} "
         f"({position.side}) -- LIVE POSITION CANNOT BE CLOSED BY THIS PROCESS\n"
         f"  Position:  {position.position_id}\n"
         f"  Held:      {shares_text} @ {position.entry_price:.4f} "
@@ -533,8 +537,15 @@ def warn_about_unmanageable_live_positions() -> int:
         f"non-live mode.\n"
     )
     for p in stranded:
+        p_station = config.STATIONS.get(p.station_icao)
+        p_axis = bucket_axis.for_station(p_station)
+        p_bucket_label = p_axis.label(
+            p.bucket_c,
+            getattr(p_station, "bucket_min_c", 25),
+            getattr(p_station, "bucket_max_c", 35),
+        )
         print(
-            f"    {p.station_icao} {p.bucket_c}°{p.side}  {p.size_shares or '?'} shares "
+            f"    {p.station_icao} {p_bucket_label} {p.side}  {p.size_shares or '?'} shares "
             f"@ {p.entry_price:.4f} (${p.size_usd:.2f})  order {p.order_id or 'unrecorded'}\n"
             f"      {p.position_id}"
         )
@@ -601,8 +612,11 @@ def open_position(decision: EntryDecision) -> None:
         )
 
     if mode == "manual_review":
+        station = config.STATIONS.get(decision.station_icao)
+        axis = bucket_axis.for_station(station)
+        bucket_label = axis.label(decision.bucket_c, station.bucket_min_c, station.bucket_max_c)
         print(
-            f"\n[ACTION NEEDED] {decision.station_icao} {decision.bucket_c}°C ({decision.side}) -- OPEN ENTRY\n"
+            f"\n[ACTION NEEDED] {decision.station_icao} {bucket_label} ({decision.side}) -- OPEN ENTRY\n"
             f"  Price: {decision.entry_price:.3f}  Size: ${decision.recommended_size_usd:.2f}  "
             f"({decision.station_maturity} station)\n"
             f"  Net EV at size: {_fmt_net_ev(decision.net_ev_at_size)}\n"
@@ -874,8 +888,11 @@ def close_position(
         else:
             action = f"SELL {position.size_usd:.2f} USD of this position now."
         _, net_pnl_pct, _ = _economics(decision.current_price)
+        station = config.STATIONS.get(position.station_icao)
+        axis = bucket_axis.for_station(station)
+        bucket_label = axis.label(position.bucket_c, station.bucket_min_c, station.bucket_max_c)
         print(
-            f"\n[ACTION NEEDED] {position.station_icao} {position.bucket_c}°C "
+            f"\n[ACTION NEEDED] {position.station_icao} {bucket_label} "
             f"({position.side}) -- {decision.reason.upper()}\n"
             f"  Entry: {position.entry_price:.3f}  Current: {decision.current_price:.3f}  "
             f"P&L: {decision.pnl_pct:+.1%} gross, {net_pnl_pct:+.1%} net of the exit fee\n"

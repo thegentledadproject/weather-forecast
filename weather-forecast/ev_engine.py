@@ -73,6 +73,7 @@ from typing import Dict, List, Optional
 from models import CalibratedEstimate, MarketQuote, EVResult
 from probability import bucket_probabilities
 from clients import market_client
+import bucket_axis
 import config
 import market_discovery
 
@@ -228,7 +229,12 @@ def compute_ev_table(
     so callers can see what couldn't be evaluated this cycle.
     """
     if model_probs is None:
-        model_probs = {b.bucket_c: b.probability for b in bucket_probabilities(estimate)}
+        model_probs = {
+            b.bucket_c: b.probability
+            for b in bucket_probabilities(
+                estimate, axis=bucket_axis.for_station(config.get_station(estimate.station_icao))
+            )
+        }
     if quotes is None:
         quotes = fetch_market_quotes(token_map)
 
@@ -393,6 +399,7 @@ def run_for_station_with_map(
          own bucket_edge_mode, then price them against the book
     """
     station = config.get_station(estimate.station_icao)
+    axis = bucket_axis.for_station(station)
 
     token_map = market_discovery.discover_token_map(
         station, estimate.target_date, station.bucket_min_c, station.bucket_max_c
@@ -408,7 +415,9 @@ def run_for_station_with_map(
             veto_reason="no token map discovered",
         )
 
-    bounds = market_discovery.derive_bucket_bounds(token_map)
+    bounds = market_discovery.derive_bucket_bounds(
+        token_map, step=axis.step
+    )
     if bounds is None:
         discovered = sorted(token_map)
         print(
@@ -428,17 +437,22 @@ def run_for_station_with_map(
 
     bucket_min, bucket_max = bounds
     if (bucket_min, bucket_max) != (station.bucket_min_c, station.bucket_max_c):
+        live_range = f"{axis.label(bucket_min, bucket_min, bucket_max)} .. {axis.label(bucket_max, bucket_min, bucket_max)}"
+        config_range = (
+            f"{axis.label(station.bucket_min_c, station.bucket_min_c, station.bucket_max_c)} .. "
+            f"{axis.label(station.bucket_max_c, station.bucket_min_c, station.bucket_max_c)}"
+        )
         print(
-            f"[ev_engine] BOUNDS DRIFT for {station.icao}: live event lists {bucket_min}-{bucket_max}°C, "
-            f"config.STATIONS says {station.bucket_min_c}-{station.bucket_max_c}°C. The LIVE event is "
-            f"what is being traded, so pricing proceeds on {bucket_min}-{bucket_max}; config is the "
+            f"[ev_engine] BOUNDS DRIFT for {station.icao}: live event lists {live_range}, "
+            f"config.STATIONS says {config_range}. The LIVE event is "
+            f"what is being traded, so pricing proceeds on {live_range}; config is the "
             f"stale side and its cross-check bounds want updating."
         )
 
     model_probs = {
         b.bucket_c: b.probability
         for b in bucket_probabilities(
-            estimate, bucket_min, bucket_max, edge_mode=station.bucket_edge_mode
+            estimate, bucket_min, bucket_max, axis=axis
         )
     }
 

@@ -57,14 +57,48 @@ class TestStationConfigRegionFields:
         assert st.region == "europe"
         assert st.iana_timezone == "Europe/London"
 
-    def test_every_registered_station_today_is_asia(self):
+    # Stations documented, per-ICAO, as NOT observing DST -- so
+    # iana_timezone=None is correct for them rather than an omission. This
+    # used to be tested as "iana_timezone is None => region == asia", using
+    # region as a PROXY for "does not observe DST". That proxy only held
+    # while Asia was the only non-DST region: it broke the moment a second
+    # non-DST, non-Asia region (americas) existed, even though every
+    # station on both sides of the break was still correctly configured.
+    # An explicit allowlist tests the real invariant directly instead of a
+    # coincidence about which regions happen not to observe DST -- and it
+    # is deliberately NOT keyed by region, so widening it to "asia" or
+    # "americas" can never again silently readmit a whole region without a
+    # per-station reason attached below. A new station that forgets to set
+    # iana_timezone fails this test unless someone deliberately adds its
+    # ICAO here, which is the audit trail this allowlist exists to force.
+    NO_DST_STATIONS = {
+        # The 13 Asian stations: no DST observed anywhere in the region.
+        "WSSS", "WMKK", "RJTT", "RKSI", "RKPK", "VHHH", "RPLL", "RCSS",
+        "ZSPD", "ZBAA", "ZGGG", "ZGSZ", "OPKC",
+        # Americas non-DST stations (CYYZ/Toronto DOES observe DST and sets
+        # iana_timezone="America/Toronto", so it is correctly absent here):
+        "MMMX",  # Mexico City -- DST abolished 2022 (verified against tzdata)
+        "SBGR",  # Sao Paulo -- DST abolished 2019 (verified against tzdata)
+        "SAEZ",  # Buenos Aires -- has not observed DST since 2010 (a
+                 # flagged, offset-unchanged 1999-2000 tzdata anomaly does
+                 # not apply to any date this codebase ever resolves)
+    }
+
+    def test_every_station_without_an_iana_timezone_is_a_documented_non_dst_station(self):
         """
-        The default is load-bearing: it is what keeps all 13 existing
-        entries in one pool with zero edits to them.
+        The real invariant: a station that observes DST MUST set
+        iana_timezone, or it trades on a static offset that is wrong for
+        half the year. That can't be tested via region (see NO_DST_STATIONS
+        above), so this checks the explicit per-ICAO allowlist instead.
         """
         for icao, st in config.STATIONS.items():
             if st.iana_timezone is None:
-                assert st.region == "asia", f"{icao}: non-Asia station must set iana_timezone"
+                assert icao in self.NO_DST_STATIONS, (
+                    f"{icao}: no iana_timezone and not on the documented "
+                    f"non-DST allowlist -- either it observes DST and is "
+                    f"missing iana_timezone, or it genuinely doesn't and "
+                    f"belongs on NO_DST_STATIONS with a reason"
+                )
 
 
 from datetime import date, datetime, timezone
@@ -279,7 +313,7 @@ class TestRegionScopedCapital:
         equality here is a sizing choice, not a shared pot.
         """
         assert config.REGION_BANKROLL_USD is not config.REGION_MAX_DAILY_EXPOSURE_USD
-        assert set(config.REGION_BANKROLL_USD) == {"asia", "europe"}
+        assert set(config.REGION_BANKROLL_USD) == {"asia", "europe", "americas"}
 
     def test_region_lookup_helpers_resolve_through_the_station(self, monkeypatch):
         st = _station(icao="TEST", region="europe", iana_timezone="Europe/London")
@@ -488,12 +522,17 @@ ZERO_REGION = "testzero"
 
 
 def _pin_zero_region(monkeypatch):
-    """Register a zero-funded synthetic region across all five pools."""
+    """Register a zero-funded synthetic region across all six pools."""
     monkeypatch.setitem(config.REGION_BANKROLL_USD, ZERO_REGION, 0.0)
     monkeypatch.setitem(config.REGION_MAX_DAILY_EXPOSURE_USD, ZERO_REGION, 0.0)
     monkeypatch.setitem(config.REGION_LIVE_MAX_CONCURRENT_POSITIONS, ZERO_REGION, 0)
     monkeypatch.setitem(config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD, ZERO_REGION, 0.0)
     monkeypatch.setitem(config.REGION_LIVE_MAX_ORDERS_PER_DAY, ZERO_REGION, 0)
+    # Not a blast-radius pool like the five above, but the same
+    # raise-on-unknown-region guard applies (config.region_spread_ceiling_c),
+    # so the synthetic region needs an entry here too or calibrate() raises
+    # the moment it's asked to price a candidate for it.
+    monkeypatch.setitem(config.REGION_SPREAD_CEILING_C, ZERO_REGION, config.SPREAD_CEILING_C)
 
 
 import executor

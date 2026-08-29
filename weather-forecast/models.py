@@ -80,7 +80,11 @@ class StationConfig:
     # STANDARD-time (winter) offset.
     iana_timezone: Optional[str] = None
 
-    # Sanity CROSS-CHECK bounds for this station's Polymarket bucket range.
+    # Sanity CROSS-CHECK bounds for this station's Polymarket bucket range,
+    # EXPRESSED IN bucket_unit (below) -- the `_c` suffix is historical and
+    # is NOT a claim that these are Celsius. bucket_axis.for_station() is
+    # authoritative for what a bucket number means; the field name never is.
+    #
     # NOT the source of truth on the trading path: Polymarket shifts a city's
     # 11-bucket window seasonally (Singapore moved 25-35 -> 27-37 between July
     # and August 2026), so live trading derives the real bounds from the
@@ -95,6 +99,19 @@ class StationConfig:
     #                the range that CONTAINS the reading (Hong Kong Observatory);
     #                bucket = floor(temp), intervals [b, b+1).
     bucket_edge_mode: str = "half_up"
+
+    # The MARKET's bucket axis. See bucket_axis.BucketAxis.
+    #
+    # bucket_unit is the unit of the market's bucket LABELS -- and therefore
+    # of bucket_min_c/bucket_max_c above and of every bucket_c key. It is NOT
+    # the unit of any temperature: forecasts, std_dev, observations, midpoints
+    # and bias are Celsius everywhere, always.
+    #
+    # Defaults reproduce every market registered before 2026-08. The American
+    # cities are the first exception: 11 of the 15 list Fahrenheit in
+    # two-degree buckets ("70-71°F"), so they set ("F", 2).
+    bucket_unit: str = "C"
+    bucket_step: int = 1
 
     # City name in the WMO WWIS index (worldweather.wmo.int) for the generic
     # "wwis" official client. Empty string = city not listed there (e.g.
@@ -116,6 +133,36 @@ class StationConfig:
     #                   reading is systematically cooler than the urban HKO
     #                   settlement station and would bias the observation blend)
     metar_ingest_mode: str = "resolution"
+
+    # How many METARs this station files per LOCAL day when reporting
+    # normally. A half-hourly-filing airport (most of the Asia/Europe
+    # registry) files ~48/day; an hourly-filing one (every US ASOS
+    # station) files ~24/day. clients/metar_client.py derives its daily
+    # coverage floor as half of this number rather than hard-coding it,
+    # so an hourly station isn't held to a half-hourly station's bar --
+    # see MIN_REPORTS_PER_DAY there for why a floor exists at all.
+    expected_metar_reports_per_day: int = 48
+
+    def __post_init__(self):
+        # clients/metar_client.py derives its coverage floor as
+        # expected_metar_reports_per_day // 2. An unvalidated 0 or 1 would
+        # derive a floor of 0 -- daily_max_temp_c would then either accept
+        # a day with NO corroborating reports at all, or crash calling
+        # max() on an empty list. Both are the wrong failure mode for a
+        # codebase that otherwise always prefers refusing to trade over
+        # trading on a number it can't justify -- so refuse construction
+        # instead of silently deriving a permissive floor. 2 is the floor
+        # of sane: a half-hourly-filing airport reports ~48/day, an
+        # hourly-filing one (every US ASOS station) reports ~24/day --
+        # anything below 2 isn't a real filing cadence.
+        if self.expected_metar_reports_per_day < 2:
+            raise ValueError(
+                f"{self.icao}: expected_metar_reports_per_day="
+                f"{self.expected_metar_reports_per_day} is not a plausible "
+                "METAR filing cadence (must be >= 2). A half-hourly-filing "
+                "airport reports ~48/day; an hourly-filing one (every US "
+                "ASOS station) reports ~24/day."
+            )
 
     @property
     def wunderground_history_url(self) -> str:

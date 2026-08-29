@@ -95,6 +95,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
 
+import bucket_axis
 import calibration
 import config
 import ev_engine
@@ -994,7 +995,7 @@ def _entry_pass(
             estimate,
             bucket_min=station.bucket_min_c,
             bucket_max=station.bucket_max_c,
-            edge_mode=station.bucket_edge_mode,
+            axis=bucket_axis.for_station(station),
         )
     }
 
@@ -1303,7 +1304,10 @@ def _resolution_sweep(station, clock, portfolio, all_observations, counters, las
             continue
 
         winning_bucket = resolution.bucket_for_temp(
-            observation.max_temp_c, station.bucket_min_c, station.bucket_max_c, station.bucket_edge_mode
+            observation.max_temp_c,
+            station.bucket_min_c,
+            station.bucket_max_c,
+            axis=bucket_axis.for_station(station),
         )
         exit_price = resolution.resolution_exit_price(
             position.side, position.bucket_c, winning_bucket

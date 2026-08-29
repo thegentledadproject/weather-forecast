@@ -29,6 +29,7 @@ clients/* (local)
 
 from datetime import date, datetime, timedelta, timezone
 
+import bucket_axis
 import config
 from calibration import calibrate
 from probability import bucket_probabilities, most_likely_bucket
@@ -144,7 +145,7 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
         estimate,
         station.bucket_min_c,
         station.bucket_max_c,
-        edge_mode=station.bucket_edge_mode,
+        axis=bucket_axis.for_station(station),
     )
     top_bucket = most_likely_bucket(buckets)
     same_day_signal = gather_same_day_signal(station)
@@ -177,18 +178,25 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
 
 def print_summary(result: dict) -> None:
     """Human-readable console output."""
+    station = config.get_station(result["station_icao"])
+    axis = bucket_axis.for_station(station)
     print(f"\n=== {result['station_name']} ({result['station_icao']}) Forecast — {result['target_date']} ===")
     print(f"Monsoon phase:        {result['monsoon_phase']}")
     print(f"Inputs used:          {result['inputs_used'] or 'none (fell back to normal/observed)'}")
     print(f"Central estimate:     {result['central_estimate_c']}°C  (± {result['std_dev_c']}°C)")
-    print(f"Most likely bucket:   {result['top_bucket_c']}°C  (p={result['top_bucket_probability']})")
+    print(
+        f"Most likely bucket:   "
+        f"{axis.label(result['top_bucket_c'], station.bucket_min_c, station.bucket_max_c)}  "
+        f"(p={result['top_bucket_probability']})"
+    )
     print(f"Same-day signal:      {result['same_day_signal']}")
     if result["notes"]:
         print(f"Notes:                {result['notes']}")
     print("\nBucket probabilities:")
     for b in result["all_buckets"]:
         bar = "#" * int(b.probability * 50)
-        print(f"  {b.bucket_c:>3}°C  {b.probability:>6.2%}  {bar}")
+        label = axis.label(b.bucket_c, station.bucket_min_c, station.bucket_max_c)
+        print(f"  {label:>10}  {b.probability:>6.2%}  {bar}")
     # .get() with a True default so an older/hand-built result dict still
     # prints the original line rather than crashing on a missing key.
     if result.get("resolution_source_is_settlement", True):

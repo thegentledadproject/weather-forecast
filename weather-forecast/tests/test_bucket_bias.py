@@ -155,7 +155,7 @@ def test_error_sign_matches_forecast_error_samples(monkeypatch):
     # forecast of 30.0 against a settlement of 31.5 is COOL, so negative.
     _stub_storage(monkeypatch,
                   {date(2026, 8, 15): 30.0},
-                  {date(2026, 8, 15): (31, 27, 37)})
+                  {date(2026, 8, 15): (31, 27, 37, "C", 1)})
     errors, skipped, detail = bba.bucket_bias_samples("VHHH")
     assert errors == [pytest.approx(-1.5)]
     assert skipped == []
@@ -165,14 +165,14 @@ def test_error_sign_matches_forecast_error_samples(monkeypatch):
 def test_censored_settlement_is_skipped_with_a_reason(monkeypatch):
     _stub_storage(monkeypatch,
                   {date(2026, 8, 15): 30.0},
-                  {date(2026, 8, 15): (37, 27, 37)})
+                  {date(2026, 8, 15): (37, 27, 37, "C", 1)})
     errors, skipped, _ = bba.bucket_bias_samples("VHHH")
     assert errors == []
     assert len(skipped) == 1 and "censored" in skipped[0][1]
 
 
 def test_a_date_with_no_forecast_is_skipped_not_zeroed(monkeypatch):
-    _stub_storage(monkeypatch, {}, {date(2026, 8, 15): (31, 27, 37)})
+    _stub_storage(monkeypatch, {}, {date(2026, 8, 15): (31, 27, 37, "C", 1)})
     errors, skipped, _ = bba.bucket_bias_samples("VHHH")
     assert errors == []
     assert len(skipped) == 1 and "forecast" in skipped[0][1]
@@ -191,7 +191,7 @@ def test_statistic_is_calibrations_not_a_local_copy(monkeypatch):
     # must not become a third implementation.
     _stub_storage(monkeypatch,
                   {date(2026, 8, 13): 30.0, date(2026, 8, 15): 32.0},
-                  {date(2026, 8, 13): (31, 27, 37), date(2026, 8, 15): (31, 27, 37)})
+                  {date(2026, 8, 13): (31, 27, 37, "C", 1), date(2026, 8, 15): (31, 27, 37, "C", 1)})
     # derived_bias_stats now recency-weights, so the comparison is against
     # the weighted statistic -- still calibration's, still not a local copy.
     import config as _cfg
@@ -205,6 +205,15 @@ def test_derived_stats_on_nothing_is_unmeasured_not_zero(monkeypatch):
     _stub_storage(monkeypatch, {}, {})
     bias, n, stderr = bba.derived_bias_stats("VHHH")
     assert (bias, n, stderr) == (None, 0, None)
+
+
+def test_an_implausible_bias_raises_rather_than_graduating_a_station(monkeypatch):
+    monkeypatch.setattr(
+        bba, "bucket_bias_samples",
+        lambda icao, dates=None: ([59.5, 60.5, 61.0], [], []),
+    )
+    with pytest.raises(ValueError, match="plausible"):
+        bba.derived_bias_stats("WSSS")
 
 
 # --- the ingest -------------------------------------------------------------
@@ -226,7 +235,8 @@ def test_ingest_records_settled_days_and_skips_unresolved(monkeypatch, tmp_path)
     written = bba.ingest_settled_buckets(
         ["VHHH"], market_conn=conn, price_fn=_prices(prices), max_lookback_days=3)
     assert written == 1
-    assert bba.storage.load_settled_buckets("VHHH") == {date(2026, 8, 16): (31, 27, 37)}
+    assert bba.storage.load_settled_buckets("VHHH") == {
+        date(2026, 8, 16): (31, 27, 37, "C", 1)}
 
 
 def test_ingest_caps_new_settlements_per_sweep_and_says_so(monkeypatch, tmp_path, capsys):

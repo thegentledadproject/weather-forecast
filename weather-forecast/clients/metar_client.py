@@ -45,7 +45,28 @@ API_URL = "https://aviationweather.gov/api/data/metar"
 # A tropical airport files METARs at least half-hourly (~48/day). Below
 # this many reports in the local-day window, the daily max is not
 # trustworthy -- decline rather than under-report.
+#
+# This is a 50% coverage floor, not a fixed count: it assumes a
+# half-hourly-filing station (StationConfig.expected_metar_reports_per_day
+# == 48, the default). A station that files hourly instead (every US ASOS
+# airport, ~24/day) must NOT be held to this same bar -- see
+# min_reports_for_station() below, which every live caller should use
+# instead of this module constant directly. Kept here, and at its
+# original value, only because it is still the default for
+# daily_max_temp_c() and may be read elsewhere as the legacy floor.
 MIN_REPORTS_PER_DAY = 24
+
+
+def min_reports_for_station(station: StationConfig) -> int:
+    """
+    Per-station coverage floor: half of the station's expected METAR
+    volume, preserving the 50%-coverage rationale on MIN_REPORTS_PER_DAY
+    above for every station regardless of filing cadence. For the
+    default expected_metar_reports_per_day (48, half-hourly filing) this
+    is 48 // 2 == 24 -- byte-for-byte the same floor every station used
+    before this function existed.
+    """
+    return station.expected_metar_reports_per_day // 2
 
 # Per-station throttle for ingest_missing_recent(): one sweep per local
 # day per STATION is enough, the readings are immutable history. This
@@ -109,6 +130,7 @@ def daily_max_temp_c(
     metars: List[Tuple[int, float]],
     local_day: date,
     utc_offset_hours: int = config.LOCAL_UTC_OFFSET_HOURS,
+    *,
     min_reports: int = MIN_REPORTS_PER_DAY,
 ) -> Optional[float]:
     """
@@ -116,6 +138,11 @@ def daily_max_temp_c(
     the station's own utc_offset_hours, or None if coverage is too thin
     to trust. Pure -- callers fetch. Defaults to the legacy UTC+8 offset
     so existing station-agnostic callers/tests keep working unchanged.
+
+    min_reports is keyword-only and defaults to the legacy half-hourly
+    floor (MIN_REPORTS_PER_DAY) so every existing caller/test is
+    unaffected; a caller that knows its station should pass
+    min_reports=min_reports_for_station(station) instead.
     """
     start, end = _local_day_window_utc(local_day, utc_offset_hours)
     temps = [t for ts, t in metars if start <= ts < end]
@@ -179,11 +206,35 @@ def ingest_missing_recent(station_icaos: List[str], days_back: int = 3) -> int:
             if not missing:
                 continue
 
-            window_start = _local_day_window_utc(min(missing), station.utc_offset_hours)[0]
+            # The LIVE offset, not the static winter field. station.utc_offset_hours
+            # is STANDARD time by design (see StationConfig.iana_timezone); building
+            # a local-day window on it shifts the window an hour for every
+            # DST-observing station for most of the year, which attributes
+            # 23:00-00:00 local on D-1 to day D. That is a whole observation in the
+            # wrong day, and the daily MAX is what settles the market.
+            #
+            # config.local_day_bounds_utc() already resolves the offset AT the
+            # day being bounded (not at "now") -- reuse it here for the same
+            # reason its own docstring gives: `missing` can span up to
+            # `days_back` historical days, and a DST transition inside that
+            # span means no single offset is correct for all of them.
+            window_start = config.local_day_bounds_utc(station, min(missing))[0].timestamp()
             hours = int((datetime.now(timezone.utc).timestamp() - window_start) / 3600) + 2
             metars = fetch_metars(icao, hours=hours)
             for d in missing:
-                max_c = daily_max_temp_c(metars, d, station.utc_offset_hours)
+                # Per-day offset, anchored at day d's own UTC midnight -- NOT
+                # the single `window_start` offset above and NOT "now". A
+                # station is only ~3 days behind "now" here, but the days in
+                # `missing` can straddle a DST transition, and each day's
+                # attribution must use the offset that was in effect ON that
+                # day (same reasoning as config.local_day_bounds_utc).
+                day_offset = config.current_utc_offset_hours(
+                    station, at=datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+                )
+                max_c = daily_max_temp_c(
+                    metars, d, day_offset,
+                    min_reports=min_reports_for_station(station),
+                )
                 if max_c is None:
                     print(f"[metar_client] {icao} {d}: insufficient METAR coverage, not saving a daily max.")
                     continue

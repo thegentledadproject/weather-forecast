@@ -39,7 +39,9 @@ backtest/settings.py (local)
 import math
 from datetime import date, datetime, timedelta
 
+import bucket_axis
 import config
+from bucket_axis import BucketAxis
 
 from backtest import settings
 
@@ -49,6 +51,9 @@ def bucket_for_temp(
     bucket_min: int = None,
     bucket_max: int = None,
     edge_mode: str = "half_up",
+    *,
+    axis: BucketAxis = None,
+    station=None,
 ) -> int:
     """
     The resolution bucket a max temperature of `t` degrees C falls in,
@@ -80,14 +85,62 @@ def bucket_for_temp(
     The clamp mirrors the real market structure in both modes: the edge
     buckets are catch-alls ("25 or below", "35 or above"), which is also
     how probability.bucket_probabilities() folds the distribution's tails.
+
+    axis is the market's bucket axis; passing it supersedes edge_mode and
+    is REQUIRED for any market that is not Celsius whole-degree. `t` is
+    Celsius in every case -- the conversion into the market's unit happens
+    inside the axis, so no caller ever handles a Fahrenheit temperature.
+
+    Fail-closed guard, unconditional: when axis is None and BOTH
+    bucket_min and bucket_max are given explicitly, their span is checked
+    against config.EXPECTED_BUCKET_COUNT. A bucket window is always
+    exactly EXPECTED_BUCKET_COUNT buckets wide, so at step 1 the span
+    (bucket_max - bucket_min + 1) is always EXPECTED_BUCKET_COUNT -- every
+    Celsius station in the registry gives 11, and every Fahrenheit
+    station's bounds (step 2, e.g. KLGA's 70/90) give 21. A span other
+    than EXPECTED_BUCKET_COUNT therefore CANNOT be a valid step-1 grid,
+    which is exactly the case a defaulted axis would mis-settle: this is
+    a structural fact about the bounds, not a guess about the caller. The
+    guard fires whether or not the caller also happens to pass station --
+    a caller who simply forgets axis= must still be caught. Calls that
+    omit bucket_min/bucket_max entirely (the legacy no-argument form,
+    falling back to config.BUCKET_MIN_C/BUCKET_MAX_C) are exempt, since
+    there the span IS config's own default and nothing was forgotten.
+
+    station is optional and purely a secondary rail: this function
+    (unlike probability.bucket_probabilities(), which takes a
+    CalibratedEstimate carrying station_icao) has no station identity of
+    its own, so when a caller does supply one this produces a better
+    error message (the station's icao and its real unit/step) than the
+    bounds check alone can -- but the bounds check above is what actually
+    catches a caller who forgot axis=, station or not.
     """
+    if axis is None and bucket_min is not None and bucket_max is not None:
+        span = bucket_max - bucket_min + 1
+        if span != config.EXPECTED_BUCKET_COUNT:
+            detail = ""
+            if station is not None:
+                station_axis = bucket_axis.for_station(station)
+                icao = getattr(station, "icao", station)
+                detail = (
+                    f" {icao} is on a {station_axis.unit}/step-"
+                    f"{station_axis.step} bucket axis."
+                )
+            raise ValueError(
+                f"bucket_for_temp() was called with bounds ({bucket_min}, "
+                f"{bucket_max}) spanning {span} buckets, not "
+                f"config.EXPECTED_BUCKET_COUNT ({config.EXPECTED_BUCKET_COUNT}), "
+                f"but no axis.{detail} Refusing to settle it on the Celsius "
+                f"whole-degree clamp: key_for_temp_c() would then clamp "
+                f"every reading this station can actually report into the "
+                f"bottom catch-all bucket, silently, because that bucket's "
+                f"number never lines up with a real Celsius reading. Pass "
+                f"axis=bucket_axis.for_station(station)."
+            )
     lo = config.BUCKET_MIN_C if bucket_min is None else bucket_min
     hi = config.BUCKET_MAX_C if bucket_max is None else bucket_max
-    if edge_mode == "floor":
-        bucket = math.floor(t)
-    else:
-        bucket = math.floor(t + 0.5)
-    return max(lo, min(hi, bucket))
+    resolved = BucketAxis(edge_mode=edge_mode) if axis is None else axis
+    return resolved.key_for_temp_c(t, lo, hi)
 
 
 def observation_visible(obs_target_date: date, sim_local_dt: datetime) -> bool:

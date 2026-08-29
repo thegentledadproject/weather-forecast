@@ -98,6 +98,7 @@ import config
 import storage
 import risk_manager
 import market_discovery
+import bucket_axis
 from clients import market_client
 from models import Position, ExitDecision
 import executor
@@ -184,9 +185,16 @@ def check_and_exit_positions(
         try:
             decision = _check_one_position(position, capture_fidelity_min)
         except Exception as exc:  # noqa: BLE001 - one row must never strand the others
+            station = _station_for(position)
+            axis = bucket_axis.for_station(station)
+            bucket_label = axis.label(
+                position.bucket_c,
+                getattr(station, "bucket_min_c", 25),
+                getattr(station, "bucket_max_c", 35),
+            )
             print(
                 f"[position_manager] ERROR checking {position.position_id} ({position.station_icao} "
-                f"{position.bucket_c}°{position.side}, ${position.size_usd:.2f} open): {exc} -- skipping "
+                f"{bucket_label} {position.side}, ${position.size_usd:.2f} open): {exc} -- skipping "
                 f"THIS position only, the rest of the cycle continues. This position is not being "
                 f"monitored and has no working stop-loss until the cause is fixed."
             )
@@ -647,7 +655,9 @@ def _event_bounds(position: Position, station) -> Optional[tuple]:
 
     if not token_map:
         return None
-    return market_discovery.derive_bucket_bounds(token_map)
+    return market_discovery.derive_bucket_bounds(
+        token_map, step=bucket_axis.for_station(station).step
+    )
 
 
 def _close_from_recorded_settlement(
@@ -698,7 +708,7 @@ def _close_from_recorded_settlement(
     if record is None:
         return None
 
-    winning_bucket, bucket_min, bucket_max = record
+    winning_bucket, bucket_min, bucket_max, *_ = record
 
     # The recorded settlement describes one event. If this position's
     # bucket is not in that event's window, the two are not about the same
@@ -794,18 +804,22 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
         return None
 
     bucket_min, bucket_max = bounds
+    axis = bucket_axis.for_station(station)
     if (bucket_min, bucket_max) != (station.bucket_min_c, station.bucket_max_c):
         print(
             f"[position_manager] {position.position_id}: settling on the LIVE event bounds "
-            f"{bucket_min}-{bucket_max}C, not config's {station.bucket_min_c}-"
-            f"{station.bucket_max_c}C (bounds drift)."
+            f"{axis.label(bucket_min, bucket_min, bucket_max)} to "
+            f"{axis.label(bucket_max, bucket_min, bucket_max)}, not config's "
+            f"{axis.label(station.bucket_min_c, station.bucket_min_c, station.bucket_max_c)} to "
+            f"{axis.label(station.bucket_max_c, station.bucket_min_c, station.bucket_max_c)} "
+            f"(bounds drift)."
         )
 
     winning_bucket = settlement.bucket_for_temp(
         obs.max_temp_c,
         bucket_min,
         bucket_max,
-        station.bucket_edge_mode,
+        axis=axis,
     )
     exit_price = settlement.resolution_exit_price(
         position.side, position.bucket_c, winning_bucket,
@@ -813,7 +827,8 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
 
     basis = (
         f"no book left to read; settled from {obs.source} {obs.max_temp_c:.1f}C "
-        f"-> winning bucket {winning_bucket}C, so {position.bucket_c}C "
+        f"-> winning bucket {axis.label(winning_bucket, bucket_min, bucket_max)}, so "
+        f"{axis.label(position.bucket_c, bucket_min, bucket_max)} "
         f"{position.side} pays {exit_price:.1f}"
     )
     return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)

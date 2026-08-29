@@ -13,7 +13,7 @@ a bad trade or a silently-skipped station-day.
 import config
 from clients.official.registry import _CLIENTS
 
-EXPECTED_STATION_COUNT = 20
+EXPECTED_STATION_COUNT = 35
 
 
 def test_station_count_matches_expected():
@@ -33,21 +33,32 @@ def test_wunderground_slugs_unique_and_non_empty():
 
 
 def test_bucket_span_is_eleven_for_every_station():
+    import bucket_axis
+
     for icao, st in config.STATIONS.items():
-        span = st.bucket_max_c - st.bucket_min_c + 1
+        axis = bucket_axis.for_station(st)
+        span = (st.bucket_max_c - st.bucket_min_c) // axis.step + 1
         assert span == config.EXPECTED_BUCKET_COUNT, (
-            f"{icao}: bucket span {st.bucket_min_c}-{st.bucket_max_c} is {span} values, "
-            f"expected {config.EXPECTED_BUCKET_COUNT}"
+            f"{icao}: bucket window {st.bucket_min_c}-{st.bucket_max_c} at step "
+            f"{axis.step} is {span} buckets, expected {config.EXPECTED_BUCKET_COUNT}"
+        )
+        assert (st.bucket_max_c - st.bucket_min_c) % axis.step == 0, (
+            f"{icao}: window {st.bucket_min_c}-{st.bucket_max_c} is not a whole "
+            f"number of step-{axis.step} buckets"
         )
 
 
 def test_utc_offset_hours_in_registered_timezones():
-    # 5/8/9 are the Asian registry. 0/1 are European STANDARD-time offsets
-    # (see StationConfig.iana_timezone -- the live path resolves DST via
-    # config.current_utc_offset_hours(); this static field is what the
-    # backtest reads).
+    # 5/8/9 are the Asian registry. 0/1 are European STANDARD-time offsets.
+    # -3, -5, -6, -7, -8 are the Americas cohort's STANDARD-time offsets:
+    # the four Celsius cities (CYYZ -5, MMMX -6, SBGR/SAEZ both -3) plus the
+    # eleven US Fahrenheit cities registered in Task 17 (Eastern -5,
+    # Central -6, Mountain -7, Pacific -8; see StationConfig.iana_timezone
+    # -- the live path resolves DST via config.current_utc_offset_hours();
+    # this static field is what the backtest reads). No station sits at -4.
+    allowed = (-8, -7, -6, -5, -3, 0, 1, 5, 8, 9)
     for icao, st in config.STATIONS.items():
-        assert st.utc_offset_hours in (0, 1, 5, 8, 9), (
+        assert st.utc_offset_hours in allowed, (
             f"{icao}: unexpected utc_offset_hours {st.utc_offset_hours}"
         )
 

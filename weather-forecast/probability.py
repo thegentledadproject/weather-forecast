@@ -20,7 +20,9 @@ config.py, models.py (local)
 import math
 from typing import List
 
+import bucket_axis
 import config
+from bucket_axis import BucketAxis
 from models import CalibratedEstimate, BucketProbability
 
 
@@ -32,10 +34,10 @@ def _normal_cdf(x: float, mean: float, std_dev: float) -> float:
     return 0.5 * (1 + math.erf(z))
 
 
-def _bucket_interval(bucket_c: int, edge_mode: str) -> tuple:
+def _bucket_interval(bucket: int, axis: BucketAxis) -> tuple:
     """
-    The temperature interval one bucket covers, per the settlement
-    source's own precision:
+    The temperature interval one bucket covers, IN CELSIUS, per the
+    settlement source's own precision and the market's own bucket width.
 
       "half_up" -- the source reports WHOLE degrees (METAR/Wunderground),
                    so the market's "31°C" outcome wins for any reading
@@ -48,16 +50,10 @@ def _bucket_interval(bucket_c: int, edge_mode: str) -> tuple:
     Getting this wrong is a half-degree shift of the entire distribution
     against the book -- a systematic mispricing of the two buckets either
     side of the mode, on every cycle, in the same direction.
+
+    The axis owns both the width and the unit; see bucket_axis.py.
     """
-    if edge_mode == "half_up":
-        return bucket_c - 0.5, bucket_c + 0.5
-    if edge_mode == "floor":
-        return float(bucket_c), float(bucket_c + 1)
-    raise ValueError(
-        f"unknown bucket edge_mode '{edge_mode}' -- expected 'half_up' or 'floor' "
-        f"(see models.StationConfig.bucket_edge_mode). Refusing to guess a bucket "
-        f"mapping: a wrong one silently mis-prices every bucket."
-    )
+    return axis.interval_c(bucket)
 
 
 def bucket_probabilities(
@@ -65,12 +61,14 @@ def bucket_probabilities(
     bucket_min: int = config.BUCKET_MIN_C,
     bucket_max: int = config.BUCKET_MAX_C,
     edge_mode: str = "half_up",
+    *,
+    axis: BucketAxis = None,
 ) -> List[BucketProbability]:
     """
-    Return probability mass for each whole-degree bucket in
-    [bucket_min, bucket_max], plus implicit tails folded into the end
-    buckets (mirroring how Polymarket lists "X or below" / "Y or above"
-    catch-all outcomes at the distribution's edges).
+    Return probability mass for each listed bucket in
+    [bucket_min, bucket_max] on the axis's own grid, plus implicit tails
+    folded into the end buckets (mirroring how Polymarket lists "X or
+    below" / "Y or above" catch-all outcomes at the distribution's edges).
 
     edge_mode selects what a bucket's number MEANS -- "half_up" (the
     default, and the historical behaviour of this function: intervals
@@ -84,13 +82,52 @@ def bucket_probabilities(
     discovered token map on the trading path (see
     market_discovery.derive_bucket_bounds) -- the module-level defaults
     exist for station-agnostic callers and old tests only.
+
+    axis is the market's bucket axis (unit + step + edge mode). Passing it
+    supersedes edge_mode. Omitting it is only legal for a station on the
+    default Celsius whole-degree axis: this function RAISES otherwise,
+    rather than silently pricing a Fahrenheit market on a Celsius grid.
+    That is not defensiveness -- a defaulted axis puts model_prob 0.0 on
+    ten of eleven buckets, and a 0.0 model probability is a ~0.20 raw edge
+    on the NO side that clears every risk gate. Fail closed.
     """
+    if axis is None:
+        station = config.STATIONS.get(estimate.station_icao)
+        # A registered station's own unit/step decides whether this call is
+        # even legal to default (is_default below) -- that part cannot come
+        # from the caller, or a Fahrenheit station would silently pass. But
+        # edge_mode stays the function's own argument, not the station's:
+        # this branch is what every pre-axis positional call site (and the
+        # legacy tests pinning them) already relies on to control rounding
+        # via edge_mode= directly, including registered floor-mode stations
+        # like VHHH. Only the four axis-aware call sites (which pass
+        # axis=bucket_axis.for_station(station) explicitly) get the
+        # station's own edge_mode; this fallback never does.
+        axis = (
+            BucketAxis(
+                unit=getattr(station, "bucket_unit", bucket_axis.UNIT_C),
+                step=getattr(station, "bucket_step", 1),
+                edge_mode=edge_mode,
+            )
+            if station is not None
+            else BucketAxis(edge_mode=edge_mode)
+        )
+        if not axis.is_default:
+            raise ValueError(
+                f"{estimate.station_icao} is on a {axis.unit}/step-{axis.step} "
+                f"bucket axis but bucket_probabilities() was called with no "
+                f"axis. Refusing to price it on the Celsius whole-degree grid: "
+                f"that puts model_prob 0.0 on ten of eleven buckets, and each "
+                f"of those is a ~0.20 phantom edge on the NO side. Pass "
+                f"axis=bucket_axis.for_station(station)."
+            )
+
     mean = estimate.central_estimate_c
     sd = estimate.std_dev_c
 
     results = []
-    for b in range(bucket_min, bucket_max + 1):
-        lower, upper = _bucket_interval(b, edge_mode)
+    for b in axis.keys(bucket_min, bucket_max):
+        lower, upper = _bucket_interval(b, axis)
         if b == bucket_min:
             # fold left tail into the lowest listed bucket
             prob = _normal_cdf(upper, mean, sd)

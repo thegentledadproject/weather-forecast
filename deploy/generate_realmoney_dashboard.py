@@ -35,6 +35,61 @@ PKG = os.environ.get("DASHBOARD_PKG_DIR", "/home/ubuntu/weather-forecast/weather
 if PKG not in sys.path:
     sys.path.insert(0, PKG)
 
+import bucket_axis
+
+
+def _bucket_label_html(icao, bucket_c):
+    """
+    The label the market itself prints for one bucket, as HTML -- entity
+    form (&deg;) to match every hardcoded suffix this replaces, not the
+    literal degree sign bucket_axis.label() returns by default.
+
+    No discovered bounds travel through an EV snapshot or an order-attempt
+    row, so this falls back to the registry's cross-check bounds
+    (station.bucket_min_c/bucket_max_c) -- see bucket_axis.for_station.
+    """
+    import config
+
+    station = config.STATIONS.get(icao)
+    axis = bucket_axis.for_station(station)
+    lo = getattr(station, "bucket_min_c", 25)
+    hi = getattr(station, "bucket_max_c", 35)
+    return axis.label(bucket_c, lo, hi).replace("°", "&deg;")
+
+
+def _bucket_range_html(icao, lo, hi):
+    """
+    HTML-entity rendering of a DISCOVERED [lo, hi] bucket range.
+
+    Labels against the station's REGISTERED bounds (bucket_min_c/
+    bucket_max_c), like _bucket_label_html does -- NOT against lo/hi
+    themselves. label() treats key<=lo and key>=hi as the market's "or
+    below"/"or higher" catch-alls, so using the discovered extremes as the
+    axis bounds would claim every discovered range reaches the market's
+    real edge, even a partial one that stops short. Labeling against the
+    registry means that wording only appears when it's true: a complete
+    discovery run's lo/hi equal the registered bounds and this renders
+    exactly as before, while a partial run gets a plain "X .. Y" instead of
+    a false "or below"/"or higher".
+
+    Registered bounds CAN drift from the live discovered window -- this is
+    not assumed away here, it is handled by a neighbor. bounds_drift()
+    above renders its own "bounds drift" badge into this same discovery
+    panel precisely when discovered != config, so the one case where
+    labeling against config could mislabel an edge (a stale registry) is
+    already flagged to the reader beside this range, not silently trusted.
+    That is what makes labeling against config safe rather than a
+    coincidence -- don't "fix" this back to discovered bounds without
+    keeping that pairing intact.
+    """
+    import config
+
+    station = config.STATIONS.get(icao)
+    axis = bucket_axis.for_station(station)
+    axis_lo = getattr(station, "bucket_min_c", 25)
+    axis_hi = getattr(station, "bucket_max_c", 35)
+    return f"{axis.label(lo, axis_lo, axis_hi)} .. {axis.label(hi, axis_lo, axis_hi)}".replace("°", "&deg;")
+
 # NOTE: no os.chdir(). generate_dashboard.py chdirs into PKG; doing that here
 # would make a relative --out resolve differently under test than in
 # production. config.DATA_DIR is absolute, so the chdir buys nothing.
@@ -259,7 +314,7 @@ def next_entry_boundary(minute_of_day, windows):
 
 
 # --- bounds drift ------------------------------------------------------------
-def bounds_drift(config_min, config_max, discovered):
+def bounds_drift(config_min, config_max, discovered, station=None):
     """The BOUNDS DRIFT check, as page state rather than a journal line.
 
     ev_engine logs "BOUNDS DRIFT for <ICAO>: live event lists X-Y" when the
@@ -275,6 +330,10 @@ def bounds_drift(config_min, config_max, discovered):
 
     Nothing discovered is not drift: that is the discovery section's story,
     and reporting it here too would double-count one fact as two problems.
+
+    `station` is optional so every existing caller/test that predates the
+    bucket axis keeps working unchanged -- None resolves to the default
+    Celsius whole-degree axis, reproducing the historical note exactly.
     """
     buckets = [b for b in (discovered or []) if isinstance(b, int)]
     if not buckets:
@@ -282,10 +341,18 @@ def bounds_drift(config_min, config_max, discovered):
     lo, hi = min(buckets), max(buckets)
     if (lo, hi) == (config_min, config_max):
         return None
+    axis = bucket_axis.for_station(station)
+    discovered_range = f"{axis.label(lo, lo, hi)} .. {axis.label(hi, lo, hi)}"
+    config_range = (
+        f"{axis.label(config_min, config_min, config_max)} .. "
+        f"{axis.label(config_max, config_min, config_max)}"
+    )
     return {
         "config": (config_min, config_max),
         "discovered": (lo, hi),
-        "note": f"registry lists {config_min}-{config_max}°C, discovery recorded {lo}-{hi}°C",
+        "note": (
+            f"registry lists {config_range}, discovery recorded {discovered_range}"
+        ).replace("°", "&deg;"),
     }
 
 
@@ -639,7 +706,7 @@ def render_ev(icaos, bar, warnings):
                 over_bar = bar is not None and ev is not None and ev >= bar
                 rows.append(
                     "<tr>"
-                    f"<td class='mono'>{'&mdash;' if bucket_c is None else str(bucket_c) + '&deg;C'}</td>"
+                    f"<td class='mono'>{'&mdash;' if bucket_c is None else _bucket_label_html(icao, bucket_c)}</td>"
                     f"<td class='mono'>{html.escape(str(r.get('side', '')))}</td>"
                     f"<td class='mono num'>{'&mdash;' if r.get('model_prob') is None else format(r['model_prob'], '.1%')}</td>"
                     f"<td class='mono num'>{'&mdash;' if price is None else format(price, '.3f')}</td>"
@@ -740,7 +807,7 @@ def discovery_state(icao, target_date, db_path=None):
     drift = None
     try:
         station = config.get_station(icao)
-        drift = bounds_drift(station.bucket_min_c, station.bucket_max_c, buckets)
+        drift = bounds_drift(station.bucket_min_c, station.bucket_max_c, buckets, station=station)
     except Exception:  # noqa: BLE001
         drift = None
 
@@ -772,13 +839,18 @@ def render_discovery(icaos, warnings):
             continue
         drift_html = ""
         if st["drift"]:
+            # note is already HTML (entity-escaped bucket labels), so it is
+            # NOT run through html.escape() -- doing so would turn the very
+            # entities this exists to render into literal "&amp;deg;".
             drift_html = (f"<span class='badge fallback'>bounds drift</span> "
-                          f"<span class='why'>{html.escape(st['drift']['note'])}</span>")
+                          f"<span class='why'>{st['drift']['note']}</span>")
+        discovered_lo, discovered_hi = min(st["buckets"]), max(st["buckets"])
+        discovered_range = _bucket_range_html(icao, discovered_lo, discovered_hi)
         blocks.append(
             f"<h3>{html.escape(icao)}</h3>"
             f"<div class='rung ok'><span class='lab'>Discovered</span>"
             f"<span class='val'>{len(st['buckets'])} bucket(s), "
-            f"{min(st['buckets'])}-{max(st['buckets'])}&deg;C</span>"
+            f"{discovered_range}</span>"
             f"<span class='why'>last recorded by capture {html.escape(str(st['last_seen'])[:16])} UTC</span></div>"
             f"<div class='rung {'ok' if st['with_book'] else 'unknown'}'>"
             f"<span class='lab'>With a live book</span>"
@@ -832,7 +904,7 @@ def render_orders(limit, warnings):
         f"<td class='mono dim2'>{html.escape(str(a.get('ts', ''))[5:16].replace('T', ' '))}</td>"
         f"<td class='mono'>{html.escape(str(a.get('kind', '')))}</td>"
         f"<td class='mono'>{html.escape(str(a.get('station_icao', '')))}</td>"
-        f"<td class='mono'>{'&mdash;' if a.get('bucket_c') is None else str(a['bucket_c']) + '&deg;C'} {html.escape(str(a.get('side', '')))}</td>"
+        f"<td class='mono'>{'&mdash;' if a.get('bucket_c') is None else _bucket_label_html(a.get('station_icao'), a['bucket_c'])} {html.escape(str(a.get('side', '')))}</td>"
         f"<td class='mono num'>{'&mdash;' if a.get('notional_usd') is None else '$' + format(a['notional_usd'], ',.2f')}</td>"
         f"<td class='mono num'>{'&mdash;' if a.get('size_shares') is None else format(a['size_shares'], ',.2f')}</td>"
         f"<td class='mono num'>{'&mdash;' if a.get('limit_price') is None else format(a['limit_price'], '.3f')}</td>"

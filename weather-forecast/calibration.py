@@ -247,9 +247,23 @@ def blend_central_estimate(
     return round(long_term_normal_c, 1)
 
 
-def _clamp_spread(value: float) -> float:
-    """Hold any spread inside config's band -- see SPREAD_FLOOR_C."""
-    return round(min(max(value, config.SPREAD_FLOOR_C), config.SPREAD_CEILING_C), 2)
+def _clamp_spread(value: float, station_icao: str = None) -> float:
+    """
+    Hold a spread inside its REGION's band -- see SPREAD_FLOOR_C and
+    config.REGION_SPREAD_CEILING_C.
+
+    The floor is global: a spread below it is the dangerous direction
+    everywhere. The ceiling is regional, and a region whose ceiling is None
+    is not clamped at all. station_icao defaults to None for
+    station-agnostic callers, which keeps the legacy global ceiling.
+    """
+    floored = max(value, config.SPREAD_FLOOR_C)
+    if station_icao is None:
+        return round(min(floored, config.SPREAD_CEILING_C), 2)
+    ceiling = config.region_spread_ceiling_c(station_icao)
+    if ceiling is None:
+        return round(floored, 2)
+    return round(min(floored, ceiling), 2)
 
 
 def measured_error_spread(station_icao: str) -> tuple:
@@ -399,7 +413,7 @@ def estimate_std_dev(
         # A real ensemble spread is the one honest physical spread available
         # -- distinct model runs of the same atmosphere. Still clamped:
         # ensembles are known to be under-dispersive at short lead times.
-        return _clamp_spread(statistics.stdev(ensemble_members)), "ensemble"
+        return _clamp_spread(statistics.stdev(ensemble_members), station_icao), "ensemble"
 
     if not allow_measured:
         # THE BACKTEST PATH. Both measured tiers read the WHOLE stored error
@@ -416,23 +430,23 @@ def estimate_std_dev(
         # entry clear a doubled edge bar that live never faces, which is a
         # live/replay divergence in the one direction the backtest exists
         # to rule out.
-        return _clamp_spread(config.POOLED_SPREAD_FALLBACK_C), "replay_constant"
+        return _clamp_spread(config.POOLED_SPREAD_FALLBACK_C, station_icao), "replay_constant"
 
     if station_icao:
         measured, _ = measured_error_spread(station_icao)
         if measured is not None:
-            return _clamp_spread(measured), "measured_error"
+            return _clamp_spread(measured, station_icao), "measured_error"
 
     pooled, _ = pooled_error_spread(
         region=config.region_of(station_icao) if station_icao else None,
     )
     if pooled is not None:
-        return _clamp_spread(pooled), "pooled_error"
+        return _clamp_spread(pooled, station_icao), "pooled_error"
 
     # Nothing measured anywhere -- an empty database. Deliberately NOT
     # derived from the forecasts or observations in hand, both of which
     # were shown to be worse than a constant.
-    return _clamp_spread(config.POOLED_SPREAD_FALLBACK_C), "fallback_default"
+    return _clamp_spread(config.POOLED_SPREAD_FALLBACK_C, station_icao), "fallback_default"
 
 
 def calibrate(
