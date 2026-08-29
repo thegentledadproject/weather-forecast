@@ -369,12 +369,46 @@ def forecast_bias_stats(station_icao: str) -> tuple:
     return bias, n, stderr
 
 
+def forecast_bias_source_mix(station_icao: str) -> Optional[frozenset]:
+    """
+    The forecast source mix this station's bias correction was fitted on --
+    the MODAL mix across the dates that carry a fitted pair, or None if it
+    cannot be read or no mix dominates.
+
+    Modal rather than "the union" or "the latest": the scalar is an average
+    across those dates, so the mix it describes is the one most of them had.
+    Measured on the live database the modal share is 100% for 17 of 19
+    stations, 97% for WSSS and 93% for WMKK, so "most" is not a close call
+    anywhere today.
+
+    Returns None on ANY doubt -- unreadable, empty, or no strict majority.
+    collection_only_reason() reads None as "do not run this check", which is
+    the fail-OPEN direction and is deliberate: see the guard's comment there.
+    """
+    try:
+        by_date = storage.forecast_source_mix_by_date(station_icao)
+    except Exception:  # noqa: BLE001 -- an unreadable mix must not break a cycle
+        return None
+    if not by_date:
+        return None
+
+    counts: dict = {}
+    for mix in by_date.values():
+        counts[mix] = counts.get(mix, 0) + 1
+    best, n = max(counts.items(), key=lambda kv: kv[1])
+    # A strict majority, so a station whose mix genuinely churns reports
+    # None and is left alone rather than being gated against a coin flip.
+    return best if n * 2 > len(by_date) else None
+
+
 def collection_only_reason(
     station_icao: str,
     obs_count: Optional[int],
     bias_n: Optional[int] = None,
     bias_stderr: Optional[float] = None,
     enforce_bias_quality: bool = False,
+    bias_source_mix: Optional[frozenset] = None,
+    today_source_mix: Optional[frozenset] = None,
 ) -> Optional[str]:
     """
     The collection-first gate, as a PURE function: None means this
@@ -499,6 +533,43 @@ def collection_only_reason(
             f"Collection-only: {station_icao}'s forecast bias is measured to +/-{shown} (standard error over "
             f"{bias_n} pair(s)), above the {config.MAX_BIAS_STANDARD_ERROR_C:.2f}C needed to correct for it -- "
             f"correcting by a number this noisy is just a different guess. Collecting, not trading."
+        )
+
+    # THE BIAS IS ONE SCALAR FITTED ON ONE FORECAST MIX.
+    #
+    # storage.forecast_error_samples() fits it on "the per-date forecast
+    # mean [that] mirrors blend_central_estimate's own forecast term", so it
+    # is exactly right while the mix is stable -- and it is: measured over
+    # the live database, 17 of 19 stations ran a single mix on 100% of their
+    # scored days, WSSS 28/29, WMKK 26/28.
+    #
+    # On a day whose mix differs, that scalar was fitted across a different
+    # blend and no longer describes today's forecast term. Measured on WSSS,
+    # per-source correction moves the central estimate past 0.05C on exactly
+    # one of 29 days -- 2026-07-31, its one single-source day -- and moves it
+    # 1.820C there, two whole buckets. Rare, and large when it bites; the
+    # realistic trigger is a source outage mid-cycle.
+    #
+    # FAILS OPEN when either mix is unknown, unlike every other branch above.
+    # Those refuse on a broken read because they cannot tell whether the
+    # station is calibrated. Not knowing the mix is instead the NORMAL state
+    # for callers that have not been taught to pass it (backtest/entry_sim.py,
+    # operator scripts), and failing closed would silently stop them trading
+    # on a check they never opted into.
+    if bias_source_mix and today_source_mix and bias_source_mix != today_source_mix:
+        missing = sorted(bias_source_mix - today_source_mix)
+        extra = sorted(today_source_mix - bias_source_mix)
+        parts = []
+        if missing:
+            parts.append(f"missing {', '.join(missing)}")
+        if extra:
+            parts.append(f"unexpected {', '.join(extra)}")
+        return (
+            f"Collection-only: {station_icao}'s forecast source mix this cycle "
+            f"({', '.join(sorted(today_source_mix))}) is not the mix its bias correction was "
+            f"fitted on ({', '.join(sorted(bias_source_mix))}) -- {'; '.join(parts)}. The "
+            f"correction is one scalar fitted on that blend's own error, so on a different "
+            f"blend it is not the number to subtract. Collecting, not trading."
         )
     return None
 
@@ -1170,6 +1241,7 @@ def decide_portfolio_entries(
     ev_results: List[EVResult],
     token_map: dict,
     min_net_ev: float = 0.15,
+    forecast_sources: Optional[list] = None,
 ) -> List[EntryDecision]:
     """
     The full, portfolio-aware entry point -- use this instead of calling
@@ -1203,6 +1275,10 @@ def decide_portfolio_entries(
         bias_n=bias_n,
         bias_stderr=bias_stderr,
         enforce_bias_quality=True,
+        bias_source_mix=forecast_bias_source_mix(station_icao),
+        # None when the caller has not been taught to pass it -- the guard
+        # then does not run. See collection_only_reason().
+        today_source_mix=frozenset(forecast_sources) if forecast_sources else None,
     )
     if gate_reason is not None:
         # Logged once per station/day: a brand-new station trips this on

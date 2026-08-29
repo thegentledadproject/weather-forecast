@@ -429,9 +429,25 @@ def _forecast_means_in_local_day(station_icao: str) -> Dict[date, float]:
     measures against the same bound, so "lookahead" and "negative lead"
     are one concept with one implementation.
     """
+    return {
+        d: sum(t for _, t in rows) / len(rows)
+        for d, rows in _forecast_rows_in_local_day(station_icao).items()
+    }
+
+
+def _forecast_rows_in_local_day(station_icao: str) -> Dict[date, List[Tuple[str, float]]]:
+    """
+    {target_date: [(source, max_temp_c)]} for rows fetched INSIDE the
+    station's own local target day.
+
+    The single implementation of that window. _forecast_means_in_local_day()
+    averages it and forecast_source_mix_by_date() takes its key set, so the
+    bias and the mix that guards it can never be measured over different
+    forecast sets.
+    """
     station = config.get_station(station_icao)
-    buckets: Dict[date, List[float]] = {}
-    for target_date_iso, fetched_at, temp_c in forecast_rows_with_fetch_time(
+    buckets: Dict[date, List[Tuple[str, float]]] = {}
+    for target_date_iso, fetched_at, temp_c, source in forecast_rows_with_fetch_time(
         station_icao
     ):
         try:
@@ -446,8 +462,8 @@ def _forecast_means_in_local_day(station_icao: str) -> Dict[date, float]:
         start, end = config.local_day_bounds_utc(station, target_date)
         if not (start <= fetched < end):
             continue
-        buckets.setdefault(target_date, []).append(temp_c)
-    return {d: sum(v) / len(v) for d, v in buckets.items()}
+        buckets.setdefault(target_date, []).append((source, temp_c))
+    return buckets
 
 
 def forecast_error_samples(station_icao: str, source: str) -> List[float]:
@@ -542,8 +558,14 @@ def forecast_means_by_date(station_icao: str) -> Dict[date, float]:
 def forecast_rows_with_fetch_time(station_icao: str) -> List[Tuple[str, str, float]]:
     """
     Every usable stored forecast for one station as
-    (target_date, fetched_at, max_temp_c), UNAGGREGATED and with no
+    (target_date, fetched_at, max_temp_c, source), UNAGGREGATED and with no
     lookahead filter of its own.
+
+    `source` was added 2026-08-28 for forecast_source_mix_by_date(). It is
+    carried here rather than fetched by a second query so that WHICH ROWS
+    COUNT -- the FORECAST_SOURCES_EXCLUDED_BY_STATION filter below -- keeps
+    exactly one implementation. Callers that do not need it unpack and
+    discard it (spread_audit.py).
 
     THE TWO OMISSIONS ARE THE POINT, and neither is a relaxation.
     forecast_error_samples() and forecast_means_by_date() both AVG per
@@ -573,12 +595,30 @@ def forecast_rows_with_fetch_time(station_icao: str) -> List[Tuple[str, str, flo
 
     with _db() as conn:
         rows = conn.execute(
-            "SELECT target_date, fetched_at, max_temp_c FROM forecasts "
+            "SELECT target_date, fetched_at, max_temp_c, source FROM forecasts "
             "WHERE station_icao = ? AND max_temp_c IS NOT NULL "
             + exclusion_sql,
             params,
         ).fetchall()
-    return [(str(r[0]), str(r[1]), float(r[2])) for r in rows]
+    return [(str(r[0]), str(r[1]), float(r[2]), str(r[3])) for r in rows]
+
+
+def forecast_source_mix_by_date(station_icao: str) -> Dict[date, frozenset]:
+    """
+    {target_date: frozenset of forecast sources} over exactly the rows the
+    bias correction is fitted on.
+
+    Shares _forecast_rows_in_local_day() with forecast_error_samples() ON
+    PURPOSE, for the reason that function's docstring gives about drift: a
+    second copy of the local-day window rule would eventually answer a
+    different question, and a mix measured over a different forecast set
+    than the bias was fitted on is exactly the mismatch this feeds
+    entry_manager.collection_only_reason() to detect.
+    """
+    return {
+        d: frozenset(src for src, _ in rows)
+        for d, rows in _forecast_rows_in_local_day(station_icao).items()
+    }
 
 
 def save_settled_bucket(
