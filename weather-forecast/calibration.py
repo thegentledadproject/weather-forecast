@@ -131,6 +131,67 @@ def bias_stats_weighted(
     return round(mean, 3), n_eff, round(stderr, 3)
 
 
+def observed_mean_weighted(dated_observations, as_of, half_life_days):
+    """
+    The OBSERVED term of the central estimate, with exponential recency
+    weighting: a reading `half_life_days` old counts half as much as today's.
+
+    dated_observations is [(target_date, max_temp_c), ...]; `as_of` is the
+    date ages are measured from. Returns None for an empty sample, so
+    blend_central_estimate()'s existing "no observed term" fallbacks fire
+    unchanged.
+
+    half_life_days=None means NO DECAY and returns statistics.fmean exactly.
+    That is the shipped default and the reason this can land without
+    changing a single stored estimate.
+
+    WHY THIS EXISTS. The observed term carries 60% of the blend for WSSS
+    (FORECAST_BLEND_WEIGHT_BY_STATION) and was a plain unweighted mean over
+    a ~30-day window, so it could not track a regime: WSSS settled 33.0 on
+    each of 2026-08-19..25 while the term sat at 32.538, and the book bought
+    32:YES and 33:NO against that run for -45.2% over nine positions.
+    blend_central_estimate's own docstring justifies WSSS's observed weight
+    on the grounds that "persistence genuinely is informative" -- true, but
+    a month-long unweighted mean is climatology, not persistence.
+
+    DECAY RATHER THAN A ROLLING WINDOW, for the reason bias_stats_weighted()
+    gives: a hard window DROPS samples, and dropping observations can push a
+    station under MIN_RESOLUTION_OBS_BEFORE_ENTRY, so a change meant to make
+    the estimate more honest would instead stop stations trading. Decay
+    keeps every sample and merely discounts it.
+
+    A SEPARATE FUNCTION rather than a flag on the existing arithmetic, again
+    mirroring bias_stats_weighted(): the unweighted mean keeps meaning what
+    it has always meant, and no stored estimate's interpretation depends on
+    how a knob happened to be set when it was computed.
+
+    Unlike bias_stats_weighted() this returns a bare float, not a
+    (value, n, stderr) triple. Nothing gates on the observed term's
+    precision today, and inventing such a gate here would be a second change
+    smuggled in beside the first. Kish's effective-n is the precedent to
+    copy if one is ever wanted.
+    """
+    if not dated_observations:
+        return None
+    if half_life_days is None:
+        return statistics.fmean(float(t) for _, t in dated_observations)
+
+    weights, temps = [], []
+    for target_date, temp in dated_observations:
+        age = (as_of - target_date).days
+        if age < 0:
+            # 0.5 ** negative is > 1. A future-dated reading is an upstream
+            # bug, not the most informative sample in the set.
+            age = 0
+        weights.append(0.5 ** (age / half_life_days))
+        temps.append(float(temp))
+
+    total_w = sum(weights)
+    if total_w <= 0:
+        return None
+    return sum(w * t for w, t in zip(weights, temps)) / total_w
+
+
 def blend_central_estimate(
     forecasts: List[PointForecast],
     observations: List[ObservedReading],
@@ -168,7 +229,14 @@ def blend_central_estimate(
     if forecast_mean is not None and forecast_bias_c:
         forecast_mean -= forecast_bias_c
 
-    observed_mean = statistics.fmean(o.max_temp_c for o in observations) if observations else None
+    # Recency-weighted; config.OBSERVED_HALF_LIFE_DAYS is None by default,
+    # which returns statistics.fmean exactly. as_of is the newest reading
+    # in the sample rather than a wall clock, so this stays PURE and a
+    # replay weights by the ages that were real at the simulated instant.
+    dated = [(o.target_date, o.max_temp_c) for o in observations]
+    observed_mean = observed_mean_weighted(
+        dated, max((d for d, _ in dated), default=None), config.OBSERVED_HALF_LIFE_DAYS
+    ) if observations else None
 
     if forecast_mean is not None and observed_mean is not None:
         return round(forecast_weight * forecast_mean + (1 - forecast_weight) * observed_mean, 1)
