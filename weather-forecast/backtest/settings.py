@@ -97,7 +97,7 @@ BACKTESTS_OUT_DIR = config.DATA_DIR / "backtests"
 
 # First tick of each simulated LOCAL day. Verified against
 # config.SCHEDULE_WINDOWS: the 00:00-04:00 window is mode "closed" with no
-# interval, and the first window that does anything ("pre_poll") starts at
+# interval, and the first window that does anything ("collection") starts at
 # 04:00 -- so 4 is exactly when a live daemon first wakes, not an
 # approximation of it.
 SIM_DAY_START_HOUR_LOCAL = 4

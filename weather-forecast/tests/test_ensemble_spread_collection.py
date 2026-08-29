@@ -8,16 +8,14 @@ every cycle -- so the measured tier is unreachable live and nothing was
 recorded that could score the two tiers against each other.
 
 pipeline.ensemble_spread_for() is the single shared assembly that fetches AND
-records, mirroring pipeline.gather_observations(). Both call sites (pipeline.run
-and scheduler._run_full_cycle) must go through it, or the record has holes on
-exactly the cycles that trade.
+records, mirroring pipeline.gather_observations(). The trading cycle must go
+through it, or the record has holes on exactly the cycles that trade. Since
+2026-08-30 there is only ONE call site to check: scheduler._run_full_cycle
+prices the estimate pipeline.run() returns instead of building a second one.
 """
 
-import ast
 import statistics
 from datetime import date
-from pathlib import Path
-
 import pytest
 
 import config
@@ -25,7 +23,6 @@ import pipeline
 import storage
 from clients import openmeteo_client
 
-PKG = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
@@ -85,39 +82,49 @@ def test_a_storage_failure_does_not_break_the_cycle(db, monkeypatch):
     assert pipeline.ensemble_spread_for(config.get_station("WSSS"), date(2026, 8, 29)) == members
 
 
-def test_scheduler_trading_path_records_the_ensemble_it_calibrates_on():
+def test_trading_path_records_the_ensemble_it_calibrates_on(monkeypatch):
     """
-    AST guard on scheduler._run_full_cycle: its calibrate() call must take
-    ensemble_members from pipeline.ensemble_spread_for, not straight from
-    openmeteo_client.get_ensemble_spread -- the latter records nothing, and
-    the trading cycle is the one whose spread the comparison needs.
+    The estimate the trading cycle prices must take its ensemble members
+    from pipeline.ensemble_spread_for -- which RECORDS them -- and not
+    straight from openmeteo_client.get_ensemble_spread, which records
+    nothing. The cycle that trades is the one whose spread the
+    measured-vs-ensemble comparison needs.
+
+    This was an AST guard on scheduler._run_full_cycle until 2026-08-30,
+    when the cycle's two calibrations were collapsed into one inside
+    pipeline.run(). The property is unchanged and now lives where the
+    single calibrate() call does; that the scheduler prices exactly what
+    run() returned is pinned in tests/test_cycle_calibration.py.
     """
-    tree = ast.parse((PKG / "scheduler.py").read_text(encoding="utf-8"))
-    fn = next(
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.FunctionDef) and n.name == "_run_full_cycle"
-    )
+    members = [30.1, 30.4, 31.2]
+    recorded = []
 
-    def called_name(call):
-        f = call.func
-        if isinstance(f, ast.Attribute):
-            parts = [f.attr]
-            while isinstance(f.value, ast.Attribute):
-                f = f.value
-                parts.append(f.attr)
-            if isinstance(f.value, ast.Name):
-                parts.append(f.value.id)
-            return ".".join(reversed(parts))
-        return f.id if isinstance(f, ast.Name) else ""
-
-    calibrate_calls = [
-        n for n in ast.walk(fn)
-        if isinstance(n, ast.Call) and called_name(n) == "calibrate"
-    ]
-    assert calibrate_calls, "calibrate() call not found in _run_full_cycle"
-    kw = next(k for k in calibrate_calls[0].keywords if k.arg == "ensemble_members")
-    assert isinstance(kw.value, ast.Call)
-    assert called_name(kw.value) == "pipeline.ensemble_spread_for", (
-        "scheduler's calibrate() must source ensemble members via "
-        "pipeline.ensemble_spread_for so the cycle that trades is recorded"
+    monkeypatch.setattr(
+        pipeline, "ensemble_spread_for",
+        lambda station, target_date: recorded.append(members) or members,
     )
+    monkeypatch.setattr(pipeline, "gather_forecasts", lambda station: [])
+    monkeypatch.setattr(pipeline, "gather_observations", lambda station, target_date: [])
+    monkeypatch.setattr(pipeline, "gather_same_day_signal", lambda station: "none")
+
+    def _no_direct_fetch(station, timeout=10):
+        raise AssertionError(
+            "the trading path fetched ensemble members directly from "
+            "openmeteo_client -- those are never recorded"
+        )
+
+    monkeypatch.setattr(openmeteo_client, "get_ensemble_spread", _no_direct_fetch)
+
+    seen = {}
+    real_calibrate = pipeline.calibrate
+
+    def _spy(**kwargs):
+        seen.update(kwargs)
+        return real_calibrate(**kwargs)
+
+    monkeypatch.setattr(pipeline, "calibrate", _spy)
+
+    pipeline.run(station_icao="WSSS", target_date=date(2026, 8, 29))
+
+    assert seen.get("ensemble_members") == members
+    assert recorded, "pipeline.ensemble_spread_for was never reached"

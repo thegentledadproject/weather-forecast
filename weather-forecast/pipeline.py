@@ -156,10 +156,34 @@ def ensemble_spread_for(station, target_date: date) -> list:
     return members
 
 
-def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
-    """Run the full pipeline for one station/date. Returns a summary dict."""
+def run(
+    station_icao: str = "WSSS",
+    target_date: date = None,
+    forecast_bias_c: float = 0.0,
+) -> dict:
+    """
+    Run the full pipeline for one station/date. Returns a summary dict,
+    including the CalibratedEstimate itself under "estimate".
+
+    forecast_bias_c IS THE TRADING PATH'S BIAS, AND THAT IS THE POINT.
+    This function used to take no bias at all, so what it printed was the
+    UNCORRECTED model while scheduler._run_full_cycle() built a second,
+    bias-corrected estimate for the EV leg seconds later. The two could
+    disagree by whole buckets: RCSS on 2026-08-28 21:28 printed
+    p(36C) = 0.41% and placed a real order on 36 YES at model_prob 0.2691
+    in the same cycle. A human reading the log to check the book was
+    reading a different model from the one spending money.
+
+    Returning `estimate` is the other half of that fix: the caller prices
+    what was printed instead of re-deriving it, which is what made the
+    second fetch-and-calibrate necessary in the first place.
+
+    The default of 0.0 is the honest one for callers that have not
+    measured a bias (main.py's one-off report), and matches what
+    calibrate() itself documents.
+    """
     station = config.get_station(station_icao)
-    # This station's own market day -- the registry spans UTC+5 to UTC+9,
+    # This station's own market day -- the registry spans UTC-7 to UTC+9,
     # so "today" is a per-station fact, not a process-wide one.
     target_date = target_date or config.local_today(station)
 
@@ -173,6 +197,7 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
         forecasts=forecasts,
         observations=observations,
         ensemble_members=ensemble,
+        forecast_bias_c=forecast_bias_c,
     )
 
     # The STATION's cross-check bounds and edge mode. Unlike the trading
@@ -196,6 +221,10 @@ def run(station_icao: str = "WSSS", target_date: date = None) -> dict:
         "station_icao": station.icao,
         "station_name": station.display_name,
         "target_date": target_date.isoformat(),
+        # The estimate object itself, so a caller that is about to price a
+        # book uses THIS model rather than building a second one. Every
+        # scalar below is derived from it.
+        "estimate": estimate,
         "central_estimate_c": estimate.central_estimate_c,
         "std_dev_c": estimate.std_dev_c,
         "monsoon_phase": estimate.monsoon_phase,
