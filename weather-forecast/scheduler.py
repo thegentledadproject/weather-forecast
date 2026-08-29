@@ -364,6 +364,9 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
 
                 entry_decisions = entry_manager.decide_portfolio_entries(
                     best, ev_run.token_map, min_net_ev=min_net_ev,
+                    # The blend's ACTUAL source list this cycle, so the gate can
+                    # refuse when it differs from the mix the bias was fitted on.
+                    forecast_sources=estimate.inputs_used,
                 )
                 entry_manager.print_entry_decisions(entry_decisions)
                 for decision in entry_decisions:

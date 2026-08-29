@@ -237,7 +237,7 @@ def forecast_means_at_lead(station_icao: str, min_lead_h: float) -> Dict[str, fl
     """
     station = config.get_station(station_icao)
     buckets: Dict[str, List[float]] = {}
-    for target_date_iso, fetched_at, temp_c in storage.forecast_rows_with_fetch_time(
+    for target_date_iso, fetched_at, temp_c, _source in storage.forecast_rows_with_fetch_time(
         station_icao
     ):
         lead = _lead_hours(station, target_date_iso, fetched_at)
