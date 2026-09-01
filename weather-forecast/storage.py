@@ -84,6 +84,15 @@ def _db():
 # closed trade by the entry fee. That asymmetry is a property of the stored
 # data, not of this view -- it is named here so a reader does not rediscover
 # it as a discrepancy.
+# `p.*` IS EXPANDED AND FROZEN AT CREATE TIME by SQLite, and the drift check
+# below compares this SQL TEXT, not the resulting column set. So a column added
+# to `positions` by the ALTER TABLE migration does NOT appear in a view that
+# already exists: a fresh database gets the new column here, an already-created
+# one does not, until this string itself changes. entry_bid (2026-09-01) is the
+# first column in that state. Nothing reads it through this view, which is why
+# it was left alone rather than forcing a rebuild on the live box for a column
+# no consumer wants -- but do not assume this view exposes every `positions`
+# column, and do not diff a dev database's view against a deployed one.
 _POSITION_ECONOMICS_VIEW_SQL = """CREATE VIEW position_economics AS
 SELECT
     p.*,

@@ -235,6 +235,30 @@ def taker_fee_per_share(price: float) -> float:
     return ev_engine.taker_fee_pct_of_notional(price) * price
 
 
+def stop_basis_price(position: Position) -> float:
+    """
+    WHERE THE STOP MEASURES FROM -- the entry-side BID, falling back to
+    entry_price when no bid was recorded.
+
+    The stop is a movement filter, and an open position is marked at the
+    bid (position_manager -> get_current_price_for_side), while entry_price
+    is the ask an entry pays. Comparing the two charges the whole bid-ask
+    spread against the stop's budget before the market has moved at all --
+    a median 24% of the distance over 511 closed positions, and 100% or
+    more of it on 7% of them. See evaluate_exit() for the full measurement.
+
+    A FUNCTION, NOT AN EXPRESSION INSIDE evaluate_exit(), because
+    stop_loss_audit.py restates this same rule in its own arithmetic to
+    score history. Two copies of "where does the stop start" is how the
+    audit ends up reporting a threshold production does not use.
+
+    None means the entry-side book was never recorded (rows predating
+    Position.entry_bid, and manual_trigger). Those keep the basis they were
+    opened under.
+    """
+    return position.entry_bid if position.entry_bid is not None else position.entry_price
+
+
 def update_high_water_mark(position: Position, current_price: float) -> float:
     """
     Returns the position's updated high-water-mark given the latest
@@ -304,9 +328,7 @@ def evaluate_exit(
     # None means the entry-side book was never recorded (rows predating
     # Position.entry_bid, and manual_trigger). Those keep the basis they were
     # opened under rather than silently gaining a spread of extra room.
-    stop_basis_price = (
-        position.entry_bid if position.entry_bid is not None else position.entry_price
-    )
+    stop_from = stop_basis_price(position)
 
     # Lottery-priced entries (see LOTTERY_PRICE_THRESHOLD in config.py)
     # skip BOTH price-noise exits. Below that entry price the threshold
@@ -386,7 +408,7 @@ def evaluate_exit(
         not is_lottery
         and not is_stop_exempt_high
         and not is_worthless_bid
-        and (stop_basis_price - current_price) >= thresholds["stop_loss_pct"] * unit
+        and (stop_from - current_price) >= thresholds["stop_loss_pct"] * unit
     ):
         return ExitDecision(
             position_id=position.position_id,

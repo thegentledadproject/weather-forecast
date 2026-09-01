@@ -299,7 +299,7 @@ def _make_dbs(tmp_path, positions, snapshots, settlements=()):
         " bucket_c int, side text, entry_price real, size_usd real,"
         " entry_time text, status text, high_water_mark real, exit_price real,"
         " exit_time text, exit_reason text, token_id text, is_paper int,"
-        " size_shares real)"
+        " size_shares real, entry_bid real)"
     )
     lc.execute(
         "create table settled_buckets ("
@@ -504,3 +504,55 @@ def test_sweep_in_stored_mode_holds_the_lottery_cohort_fixed_across_takes(tmp_pa
         market_db_path=market, stored=True, db_path=live)
 
     assert {results[pct]["lottery"]["n"] for pct in results} == {3}
+
+
+def test_stored_replay_measures_the_stop_from_the_recorded_entry_bid(tmp_path):
+    """
+    The sweep drives the real risk_manager.evaluate_exit(), so a Position it
+    rebuilds without entry_bid measures the stop from the ASK while
+    production measures it from the BID -- and the cohort this sweep exists
+    to score would then exclude positions production is still holding.
+
+    Bought at the 0.15 ask on a 0.10/0.15 book. The path never goes below
+    the entry bid, so no stop is due; on the old basis the 0.05 spread alone
+    clears the 0.045 stop distance and the position is cut on the first tick.
+    """
+    run = _replay(
+        tmp_path,
+        positions=[_position(entry_price=0.15, entry_bid=0.10, bucket_c=33)],
+        snapshots=[("T1", "2026-08-19T23:00:00+00:00", 0.10),
+                   ("T1", "2026-08-20T00:00:00+00:00", 0.10)],
+        settlements=[("WSSS", "2026-08-20", 33)],
+        take=take_sweep.NO_TAKE)
+
+    assert len(run.closed_positions) == 1
+    p = run.closed_positions[0]
+    assert p.status == "closed_resolution", (
+        f"stopped on the spread alone, exiting at {p.exit_price}"
+    )
+
+
+def test_stored_replay_still_runs_against_a_table_without_the_column(tmp_path):
+    """
+    replay_stored() reads whatever `select *` returns, and a database
+    written before Position.entry_bid existed has no such column. Those rows
+    replay on the old basis, which is what they were traded under -- what
+    they must not do is raise.
+    """
+    live, market = _make_dbs(
+        tmp_path,
+        positions=[_position(entry_price=0.15, bucket_c=33)],
+        snapshots=[("T1", "2026-08-19T23:00:00+00:00", 0.10)],
+        settlements=[("WSSS", "2026-08-20", 33)],
+    )
+    con = sqlite3.connect(live)
+    con.execute("alter table positions drop column entry_bid")
+    con.commit()
+    con.close()
+
+    run = take_sweep.replay_stored(
+        ["WSSS"], date(2026, 8, 19), date(2026, 8, 21),
+        db_path=live, market_db_path=market)
+
+    assert len(run.closed_positions) == 1
+    assert run.closed_positions[0].status == "closed_stop_loss"
