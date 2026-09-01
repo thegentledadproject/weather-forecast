@@ -192,7 +192,8 @@ def _connect() -> sqlite3.Connection:
             order_id TEXT,
             model_prob REAL,
             raw_edge REAL,
-            net_ev_at_size REAL
+            net_ev_at_size REAL,
+            entry_bid REAL
         )
         """
     )
@@ -210,6 +211,12 @@ def _connect() -> sqlite3.Connection:
     # them, and that is the honest value: those trades really do have no
     # stored prediction. Do NOT backfill them by recomputing -- today's
     # calibration has seen the outcomes those rows were entered before.
+    #
+    # entry_bid is the same kind of column and carries the same rule with more
+    # force: it is the entry-side BID, and no book from a past cycle can be
+    # re-quoted. NULL means the position was opened before the column existed
+    # (or by manual_trigger), and risk_manager falls back to the old
+    # entry_price basis for exactly those rows.
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(positions)").fetchall()}
     for column_name, column_ddl in (
         ("size_shares", "size_shares REAL"),
@@ -218,6 +225,7 @@ def _connect() -> sqlite3.Connection:
         ("model_prob", "model_prob REAL"),
         ("raw_edge", "raw_edge REAL"),
         ("net_ev_at_size", "net_ev_at_size REAL"),
+        ("entry_bid", "entry_bid REAL"),
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
@@ -807,6 +815,7 @@ def _row_to_position(r) -> Position:
     model_prob = r[18] if len(r) > 18 else None
     raw_edge = r[19] if len(r) > 19 else None
     net_ev_at_size = r[20] if len(r) > 20 else None
+    entry_bid = r[21] if len(r) > 21 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -829,6 +838,7 @@ def _row_to_position(r) -> Position:
         model_prob=model_prob,
         raw_edge=raw_edge,
         net_ev_at_size=net_ev_at_size,
+        entry_bid=entry_bid,
     )
 
 
@@ -847,8 +857,8 @@ def open_position(position: Position) -> None:
                 entry_price, size_usd, entry_time, status, high_water_mark,
                 exit_price, exit_time, exit_reason, token_id, is_paper,
                 size_shares, execution_mode, order_id,
-                model_prob, raw_edge, net_ev_at_size
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                model_prob, raw_edge, net_ev_at_size, entry_bid
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.position_id,
@@ -872,6 +882,7 @@ def open_position(position: Position) -> None:
                 position.model_prob,
                 position.raw_edge,
                 position.net_ev_at_size,
+                position.entry_bid,
             ),
         )
 

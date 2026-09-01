@@ -250,6 +250,22 @@ class Position:
     # they track that function exactly. "closed_resolution" is passed explicitly
     # instead, precisely so a resolved market can never be filed as a stop-loss.
     status: str = "open"
+    # THE BID FOR THIS SIDE AT THE INSTANT OF ENTRY. entry_price above is the
+    # ASK -- what was actually paid -- and stays the basis for P&L, sizing and
+    # the risk unit. This is the same book's other side, recorded because the
+    # STOP measures MOVEMENT and an open position is marked at the bid: taking
+    # entry_price - current_bid charged the whole spread against the stop's
+    # budget before the market had moved at all. Measured on 511 closed
+    # positions, that spread was a median 24% of the stop distance and 57% of
+    # scored fires would not have fired without it. See
+    # risk_manager.evaluate_exit().
+    #
+    # None means THE ENTRY-SIDE BOOK WAS NOT RECORDED -- every row written
+    # before this column existed, plus manual_trigger, which asserts a trade
+    # without an EV cycle behind it. Those positions keep the old basis rather
+    # than being backfilled: there is no honest way to recover a bid from a
+    # book that is hours or days gone.
+    entry_bid: Optional[float] = None
     high_water_mark: float = None  # best price seen since entry; defaults to entry_price -- drives the trailing stop
     exit_price: float = None
     exit_time: str = None
@@ -365,6 +381,16 @@ class EVResult:
     net_ev_per_dollar: Optional[float]  # (raw_edge / market_price) - slippage - fee, None if price unavailable
     spread_source: str = "fallback_default"  # from CalibratedEstimate.spread_source -- see entry_manager's
                                               # confidence-scaled MIN_ABS_RAW_EDGE gate
+    # THE OTHER SIDE OF THE SAME BOOK. market_price above is the ASK -- what an
+    # entry pays, and the only price any EV number here is computed from. This
+    # is the BID for the same side at the same instant, and it feeds NO entry
+    # decision. It exists to be carried onto the Position, because the STOP is
+    # a movement filter and needs the price this position started at expressed
+    # on the basis the position is later marked at. See
+    # risk_manager.evaluate_exit(). Already fetched every cycle by
+    # fetch_market_quotes() for snapshot capture, so carrying it costs no
+    # extra call.
+    market_bid: Optional[float] = None
     notes: str = ""
 
 
@@ -390,6 +416,9 @@ class EntryDecision:
     station_maturity: str            # "mature" or "exploratory"
     entry_price: Optional[float] = None    # price at evaluation time -- executor uses this, not a refetch,
                                              # so what gets logged matches what was actually decided on
+    entry_bid: Optional[float] = None      # the BID for this same side at evaluation time, carried from
+                                             # EVResult.market_bid purely so executor can persist it on the
+                                             # Position. Not a decision input -- nothing at entry reads it.
     token_id: Optional[str] = None         # Polymarket CLOB token id for this specific bucket/side --
                                              # carried through to Position so position_manager can price-check
                                              # it later without needing to rediscover it (closes a real gap:

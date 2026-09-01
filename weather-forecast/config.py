@@ -1582,7 +1582,25 @@ TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = TIGHTENED_PROFIT_TAKE_PCT
 #
 # WHAT DECIDED IT IS VARIANCE. Worst single loss in the band without the
 # stop was -$16.76 (WMKK 2026-08-26); with it, -$4.80. Four losses of
-# $7.73-$16.76 become four of $2.14-$4.80. Same EV, far fatter left tail,
+# $7.73-$16.76 become four of $2.14-$4.80.
+#
+#   CORRECTION 2026-09-01: THE -$4.80 IS NOT REPRODUCIBLE FROM THE PRICE
+#   PATH. That position's bid sat at 0.60 for eleven hours and never went
+#   below 0.57, then printed 0.05 at 08:01:11 UTC -- one step, 330 seconds
+#   after the previous snapshot, nothing in between. There is no fill
+#   available at the 0.519 stop level, and 0.05 is above MIN_EXIT_PRICE so
+#   the worthless-bid carve-out does not block the sale either: a re-armed
+#   stop exits at 0.05 for -$15.49. It saves $1.27, not $11.96. (-$4.80
+#   implies a fill at 0.4496; the stop level gives -$2.95 and the old
+#   entry-price-basis level -$5.03. None of the three is a price that
+#   quoted.) The reconstruction that produced these figures assumed a fill
+#   AT the stop level, which is exactly what a gap denies. The other three
+#   losses in the band have not been re-derived from paths and should be
+#   assumed to carry the same optimism. Direction unchanged -- a stop
+#   cannot make the tail fatter -- but the size of the protection is
+#   unmeasured, and this comment should not be cited as if it were.
+#
+# Same EV, far fatter left tail,
 # against live collateral of about $15. And the band is 18% of closed
 # positions but 39% of stake (avg $12.50 against $4.45), because Kelly
 # sizes UP exactly where this switched the stop off -- so the coin-flip

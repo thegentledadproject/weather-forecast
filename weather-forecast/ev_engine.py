@@ -243,9 +243,13 @@ def compute_ev_table(
         model_prob = model_probs.get(bucket_c, 0.0)
         quote = quotes[bucket_c]
 
-        for side, price, token_id in [
-            ("YES", quote.yes_price, ids["yes_token_id"]),
-            ("NO", quote.no_price, ids["no_token_id"]),
+        # Each side's own bid travels with its own ask. NO is independently
+        # quoted (NegRisk) -- 1 - the YES bid is not the NO bid, and pairing
+        # them by hand anywhere is the mistake market_client's module
+        # docstring exists to prevent.
+        for side, price, bid, token_id in [
+            ("YES", quote.yes_price, quote.yes_bid, ids["yes_token_id"]),
+            ("NO", quote.no_price, quote.no_bid, ids["no_token_id"]),
         ]:
             side_model_prob = model_prob if side == "YES" else (1 - model_prob)
 
@@ -262,6 +266,7 @@ def compute_ev_table(
                     fee_rate_pct=fee_rate_pct if fee_rate_pct is not None else 0.0,
                     net_ev_per_dollar=None,
                     spread_source=estimate.spread_source,
+                    market_bid=bid,
                     notes="No live price available this cycle.",
                 ))
                 continue
@@ -287,6 +292,7 @@ def compute_ev_table(
                 fee_rate_pct=fee_pct,
                 net_ev_per_dollar=net_ev,
                 spread_source=estimate.spread_source,
+                market_bid=bid,
             ))
 
     return results
