@@ -287,3 +287,86 @@ def test_a_replayed_position_carries_an_entry_bid_too(synthetic_scenario, quiet_
         assert position.entry_bid is not None, (
             f"{position.position_id} replayed without an entry-side bid"
         )
+
+
+# --------------------------------------------------------------------------
+# Books the basis must refuse
+# --------------------------------------------------------------------------
+
+def test_a_zero_bid_falls_back_to_the_ask_so_the_stop_still_exists():
+    """
+    CLOB answers 404 for a token with NO orderbook, but a book with asks and
+    no bids is a 200 with price 0, and market_client returns float(0) -- not
+    None. Anchoring the stop at 0.00 makes `basis - current` negative at
+    every price the token can trade at, so the stop could never fire again
+    for the life of the position. One of the 511 measured entries had a
+    recorded bid of exactly 0.0.
+    """
+    position = _position(entry_price=0.30, entry_bid=0.0)
+
+    assert risk_manager.stop_basis_price(position) == pytest.approx(0.30)
+    decision = risk_manager.evaluate_exit(
+        position, current_price=0.30 - 0.30 * 0.30, local_hour=LOOSE_HOUR,
+    )
+    assert decision.should_exit is True
+    assert decision.reason == "stop_loss"
+
+
+def test_a_bid_above_the_ask_falls_back_to_the_ask():
+    """
+    The bid and the ask are two separate HTTP calls, so a moving or stale
+    book can come back crossed -- 2 of the 511 measured entries did, by
+    0.010 and 0.025. Trusting a crossed bid would fire the stop at entry on
+    zero movement, which is the bug this whole change exists to remove,
+    inverted.
+    """
+    position = _position(entry_price=0.20, entry_bid=0.60)
+
+    assert risk_manager.stop_basis_price(position) == pytest.approx(0.20)
+    decision = risk_manager.evaluate_exit(
+        position, current_price=0.20, local_hour=LOOSE_HOUR,
+    )
+    assert decision.should_exit is False
+
+
+def test_an_equal_bid_and_ask_is_not_treated_as_an_anomaly():
+    """A zero spread is the common case on a tight book -- 71 of 511 -- and
+    it means the two bases coincide, not that the quote is bad."""
+    position = _position(entry_price=0.20, entry_bid=0.20)
+
+    assert risk_manager.stop_basis_price(position) == pytest.approx(0.20)
+
+
+# --------------------------------------------------------------------------
+# Sizing has to know the stop got further away
+# --------------------------------------------------------------------------
+
+def test_the_gap_haircut_counts_the_spread_as_part_of_the_stop_loss():
+    """
+    gap_risk_haircut() sizes every entry on "a stop costs nominal + gap".
+    Moving the stop onto the bid means it now costs nominal + gap + SPREAD
+    measured from the ask that was paid, so a haircut that ignores the
+    spread sizes the position too big -- about +23% at entry 0.16 on the
+    measured median spread of 0.020.
+    """
+    wide = entry_manager.gap_risk_haircut(0.16, "WMKK", entry_bid=0.14)
+    tight = entry_manager.gap_risk_haircut(0.16, "WMKK", entry_bid=0.16)
+
+    assert wide < tight
+
+
+def test_the_gap_haircut_is_unchanged_when_no_bid_was_recorded():
+    """No recorded bid means the stop keeps the old basis, so the sizing
+    model that went with it must not move either."""
+    assert entry_manager.gap_risk_haircut(0.16, "WMKK") == pytest.approx(
+        entry_manager.gap_risk_haircut(0.16, "WMKK", entry_bid=None)
+    )
+
+
+def test_the_gap_haircut_ignores_a_crossed_bid_like_the_stop_does():
+    """One definition of a usable entry-side bid, shared with the stop --
+    a crossed quote must not hand the sizer a negative spread and size the
+    position UP."""
+    assert entry_manager.gap_risk_haircut(0.16, "WMKK", entry_bid=0.60) == pytest.approx(
+        entry_manager.gap_risk_haircut(0.16, "WMKK")
+    )

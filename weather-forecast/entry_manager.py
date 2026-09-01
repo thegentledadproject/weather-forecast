@@ -150,7 +150,11 @@ def live_size_cap_usd(station_icao: str) -> Optional[float]:
     return config.live_size_cap_usd(station_icao, _execution_mode(station_icao))
 
 
-def gap_risk_haircut(entry_price: Optional[float], station_icao: Optional[str] = None) -> float:
+def gap_risk_haircut(
+    entry_price: Optional[float],
+    station_icao: Optional[str] = None,
+    entry_bid: Optional[float] = None,
+) -> float:
     """
     Fraction to scale a position by so a stop-out costs what the Kelly size
     was actually chosen against.
@@ -158,10 +162,25 @@ def gap_risk_haircut(entry_price: Optional[float], station_icao: Optional[str] =
     Kelly sizes against the loss you expect to take. The stop defines that
     loss as STOP_LOSS_PCT x risk_unit -- but that is the loss you take only
     if you get filled AT the trigger, and on these books you do not. The
-    real cost is the stop distance plus config.stop_gap_allowance(), so the
-    honest size is the nominal one scaled by the ratio between them:
+    real cost is the stop distance, plus config.stop_gap_allowance(), plus
+    THE ENTRY SPREAD, so the honest size is the nominal one scaled by the
+    ratio between them:
 
-        nominal / (nominal + gap)
+        nominal / (nominal + gap + spread)
+
+    THE SPREAD TERM IS NEW (2026-09-01) and it is not an improvement to an
+    old estimate -- it is this file keeping step with a change to the stop.
+    Since risk_manager.stop_basis_price() moved the stop onto the entry-side
+    bid, the trigger sits a spread further from the ask that was paid, so a
+    stop-out costs a spread more than it used to. Without this term the
+    haircut would size every entry as though it had not moved: about +23%
+    too large at entry 0.16 on the measured median spread of 0.020, +15% at
+    0.30, and worst in the cheap band that is already the book's weakest.
+
+    entry_bid is read through risk_manager.usable_entry_bid(), the SAME
+    gate the stop uses, so a crossed or zero quote cannot hand this a
+    negative spread and size the position UP. None (no bid recorded) means
+    the stop keeps the old basis, so the old haircut is the right one.
 
     Worked, at the measured 0.04 gap and the normal-regime 30% stop:
 
@@ -192,7 +211,9 @@ def gap_risk_haircut(entry_price: Optional[float], station_icao: Optional[str] =
     nominal = config.STOP_LOSS_PCT * risk_manager.risk_unit(entry_price)
     if nominal <= 0:
         return 1.0
-    return nominal / (nominal + config.stop_gap_allowance(station_icao))
+    usable_bid = risk_manager.usable_entry_bid(entry_price, entry_bid)
+    spread = (entry_price - usable_bid) if usable_bid is not None else 0.0
+    return nominal / (nominal + config.stop_gap_allowance(station_icao) + spread)
 
 
 def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
@@ -868,7 +889,7 @@ def evaluate_entry(
     # hard ceiling and the maturity multiplier so it always reduces real risk
     # rather than being swallowed by a cap above it, and BEFORE the live fixed
     # size below, which is a deliberate override rather than a risk estimate.
-    size_usd *= gap_risk_haircut(ev_result.market_price, station_icao)
+    size_usd *= gap_risk_haircut(ev_result.market_price, station_icao, ev_result.market_bid)
 
     # Cap 2b: fixed live/simulation trade size. REPLACES Kelly sizing rather
     # than capping it -- see config.LIVE_TRADE_SIZE_USD.

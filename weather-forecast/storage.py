@@ -84,15 +84,24 @@ def _db():
 # closed trade by the entry fee. That asymmetry is a property of the stored
 # data, not of this view -- it is named here so a reader does not rediscover
 # it as a discrepancy.
-# `p.*` IS EXPANDED AND FROZEN AT CREATE TIME by SQLite, and the drift check
-# below compares this SQL TEXT, not the resulting column set. So a column added
-# to `positions` by the ALTER TABLE migration does NOT appear in a view that
-# already exists: a fresh database gets the new column here, an already-created
-# one does not, until this string itself changes. entry_bid (2026-09-01) is the
-# first column in that state. Nothing reads it through this view, which is why
-# it was left alone rather than forcing a rebuild on the live box for a column
-# no consumer wants -- but do not assume this view exposes every `positions`
-# column, and do not diff a dev database's view against a deployed one.
+# `p.*` RE-EXPANDS AT PREPARE TIME, so a column added to `positions` by the
+# ALTER TABLE migration below shows up here IMMEDIATELY, on an existing view,
+# with no rebuild -- the drift check compares this SQL text, which has not
+# changed, and does not need to. Verified against SQLite 3.49: adding entry_bid
+# takes the view from 24 columns to 25 on the same connection.
+#
+# THE CONSEQUENCE IS POSITIONAL, and it is the reason this note exists: the
+# three computed columns are appended AFTER `p.*`, so every migration shifts
+# them right by one. entry_bid (2026-09-01) moved notional_shares from index 21
+# to 22. Nothing in this repo or in deploy/ reads the view positionally -- both
+# dashboards go through this module's own loaders -- but ad-hoc SQL that does
+# `select ... from position_economics` and indexes by number will read a
+# different column after a deploy that adds a positions column. Name them.
+#
+# (An earlier version of this comment claimed the opposite -- that SQLite
+# freezes the star at CREATE time and a migrated database would NOT show the
+# new column. It does not, and it does. Said plainly here because a comment
+# that is confidently wrong about schema behaviour is worse than no comment.)
 _POSITION_ECONOMICS_VIEW_SQL = """CREATE VIEW position_economics AS
 SELECT
     p.*,

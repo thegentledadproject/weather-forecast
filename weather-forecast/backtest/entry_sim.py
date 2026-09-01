@@ -319,7 +319,7 @@ def evaluate_entry_sim(
     # ceiling and maturity, before the live fixed size). Imported from
     # entry_manager, not restated: a replay that sized without the haircut
     # would report a strategy nobody is running.
-    size_usd *= gap_risk_haircut(ev.market_price, station_icao)
+    size_usd *= gap_risk_haircut(ev.market_price, station_icao, ev.market_bid)
 
     # --- Gate 8: depth unknown -------------------------------------------
     if depth_usd is None:

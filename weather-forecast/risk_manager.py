@@ -235,10 +235,14 @@ def taker_fee_per_share(price: float) -> float:
     return ev_engine.taker_fee_pct_of_notional(price) * price
 
 
-def stop_basis_price(position: Position) -> float:
+def usable_entry_bid(entry_price: float, entry_bid) -> Optional[float]:
     """
-    WHERE THE STOP MEASURES FROM -- the entry-side BID, falling back to
-    entry_price when no bid was recorded.
+    The recorded entry-side bid IF it can be trusted, else None.
+
+    ONE definition, shared by the stop (stop_basis_price() below) and by
+    entry_manager.gap_risk_haircut(), which sizes on what a stop-out costs.
+    Two copies of "is this bid usable" would drift the same way two copies
+    of "where does the stop start" already did.
 
     The stop is a movement filter, and an open position is marked at the
     bid (position_manager -> get_current_price_for_side), while entry_price
@@ -255,8 +259,57 @@ def stop_basis_price(position: Position) -> float:
     None means the entry-side book was never recorded (rows predating
     Position.entry_bid, and manual_trigger). Those keep the basis they were
     opened under.
+
+    WHAT IT REFUSES, and why `is not None` is not enough. Both ends are
+    reachable on the live API and both were found in the recorded book:
+
+      - A BID OF EXACTLY 0.0. CLOB answers 404 for a token with no
+        orderbook at all, but a book with asks and NO BIDS is a 200 whose
+        "price" field is 0, and market_client._fetch_quote() returns
+        float(0) -- not None. Anchoring here would make (basis - current)
+        negative at every price the token can trade at, so the stop could
+        never fire again for the life of the position. 1 of 511 measured
+        entries recorded a bid of exactly 0.0.
+      - A BID ABOVE THE ASK. The two sides are separate HTTP calls
+        (ev_engine fetches the ask, then the bid), so a moving or stale
+        book can come back crossed -- 2 of 511 did, by 0.010 and 0.025.
+        Trusting one would fire the stop at entry on zero movement, which
+        is precisely the defect this basis exists to remove, inverted.
+
+    An EQUAL bid and ask is not an anomaly -- 71 of 511, a tight book --
+    and it simply makes the two bases coincide.
+
+    NOT clamped against config.MIN_EXIT_PRICE. The stop's reachable window
+    does shrink by the spread, and below MIN_EXIT_PRICE the worthless-bid
+    carve-out switches the stop off entirely, so a wide enough book could in
+    principle move the trigger under that floor and leave nothing armed.
+    Measured over the 379 stop-armed positions in the record: that happens
+    ZERO times, because entries at or above LOTTERY_PRICE_THRESHOLD carry a
+    distance of at least 0.045 and the widest spread ever recorded (0.080)
+    sat on a 0.24 ask, whose trigger is still 0.088. It is a real shape and
+    an unobserved one; a guard here would be untestable against anything.
     """
-    return position.entry_bid if position.entry_bid is not None else position.entry_price
+    if entry_bid is None or entry_price is None:
+        return None
+    if entry_bid <= 0 or entry_bid > entry_price:
+        return None
+    return entry_bid
+
+
+def stop_basis_price(position: Position) -> float:
+    """
+    WHERE THE STOP MEASURES FROM -- the entry-side bid where one was
+    recorded and can be trusted (see usable_entry_bid), the entry ask
+    otherwise.
+
+    A FUNCTION, NOT AN EXPRESSION INSIDE evaluate_exit(), because
+    stop_loss_audit.py scores history against this same rule. Two copies of
+    "where does the stop start" is how that audit ends up reporting a
+    threshold production does not use -- which is exactly what review found
+    in the first cut of this change.
+    """
+    bid = usable_entry_bid(position.entry_price, position.entry_bid)
+    return bid if bid is not None else position.entry_price
 
 
 def update_high_water_mark(position: Position, current_price: float) -> float:
