@@ -92,22 +92,29 @@ class TestBothDirectionsCanNowFire:
 
 
 class TestDustBoundInvariant:
+    """
+    SUPERSEDED FOR THE EXCHANGE_ONLY DIRECTION, 2026-08-30. These pin the
+    flooring arithmetic, which is still correct and still worth pinning --
+    but flooring turned out not to be the only source of exit residue, so
+    it was never the bound that mattered. The exchange can fill under the
+    size submitted, and one extra grid step of shortfall was enough to halt
+    the live book against a tolerance set to exactly one step.
+
+    The bound that guards exchange_only now lives in
+    tests/test_exit_dust_reconciliation.py and is denominated in dollars of
+    worst-case value, with a 10x margin instead of none.
+    """
+
     def test_tolerance_covers_one_full_share_grid_step(self):
         """
-        build_exit_order() floors onto the SHARE_DECIMALS grid, so the residue
-        after any exit is strictly under one grid step. The tolerance has to
-        cover that or dust starts blocking live entries again.
-
-        These two constants live in different modules and currently agree with
-        NO margin (0.01 vs 0.01). Raising SHARE_DECIMALS without raising the
-        tolerance reintroduces the 2026-08-15 outage, so the relationship is
-        asserted rather than assumed.
+        Still true, and still asserted because the two constants live in
+        different modules -- but no longer load-bearing on its own.
         """
         grid_step = 10 ** -wallet_client.SHARE_DECIMALS
         assert config.RECONCILE_SHARE_TOLERANCE >= grid_step
 
     @pytest.mark.parametrize("shares", [5.138885, 0.999999, 12.345678, 3.010001])
-    def test_floored_exit_residue_is_always_under_tolerance(self, shares):
+    def test_flooring_alone_costs_less_than_one_grid_step(self, shares):
         """Property check over the actual flooring build_exit_order performs."""
         import math
 
@@ -116,6 +123,21 @@ class TestDustBoundInvariant:
         residue = shares - sold
         assert 0 <= residue < config.RECONCILE_SHARE_TOLERANCE
         assert sold <= shares, "an exit must never try to sell more than is held"
+
+    @pytest.mark.parametrize("shares", [5.138885, 0.999999, 12.345678, 3.010001])
+    def test_but_a_short_fill_on_top_of_it_can_exceed_that(self, shares):
+        """
+        The 2026-08-30 case, generalised: flooring plus one grid step of
+        fill shortfall breaks the old bound and must still read as dust.
+        """
+        import math
+
+        factor = 10 ** wallet_client.SHARE_DECIMALS
+        submitted = math.floor(shares * factor + 1e-9) / factor
+        filled = submitted - 10 ** -wallet_client.SHARE_DECIMALS
+        residue = shares - filled
+        assert residue > config.RECONCILE_SHARE_TOLERANCE
+        assert wallet_client._is_dust(residue)
 
 
 class _FakeLib:

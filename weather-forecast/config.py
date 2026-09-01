@@ -3471,24 +3471,43 @@ RECONCILE_TRADE_LOOKBACK_HOURS = 96
 # its age.
 RECONCILE_IGNORE_TRADES_BEFORE = "2026-08-11"
 
-# Share-count tolerance when comparing a stored position against the
-# exchange's balance. Share counts are rounded to 2 decimals by the order
-# builder, and a partial fill is a real divergence rather than noise, so this
-# only absorbs representation error.
+# Share-count tolerance for the DB_ONLY direction: comparing a stored
+# position against the exchange's balance, `held + tolerance < expected`.
+# Share counts are rounded to 2 decimals by the order builder, so this
+# absorbs representation error and nothing else -- a position whose shares
+# are actually gone still trips it.
 #
-# IT MUST COVER AN EXIT'S DUST, and it does so with zero margin. Because
-# build_exit_order() FLOORS the sell size onto the 2-decimal share grid
-# (selling more than is held fails outright), every exit can leave up to --
-# but strictly less than -- 10**-wallet_client.SHARE_DECIMALS = 0.01 shares
-# behind. This tolerance is exactly that bound, so dust never trips
-# reconciliation and a genuine partial fill still does.
-#
-# Raising SHARE_DECIMALS without raising this would silently start blocking
-# live entries on dust, which is precisely the 2026-08-15 failure mode --
-# a residue of 0.008885 shares reading as an unrecorded position. The
-# relationship is asserted in tests/test_reconciliation_units.py rather
-# than left as a coincidence between two constants in two modules.
+# THIS NO LONGER GUARDS THE EXCHANGE_ONLY DIRECTION. It used to, on the
+# reasoning that build_exit_order() FLOORS the sell size onto the
+# 2-decimal share grid and so an exit can leave at most one grid step
+# behind. The arithmetic was right and the premise was incomplete: the
+# EXCHANGE decides the fill, and on 2026-08-30 an RCSS stop-loss submitted
+# 5.10 shares of a 5.10714-share position and moved 5.09 -- a second grid
+# step of shortfall, total residue 0.01714 against a bound of exactly
+# 0.01. It read as an unrecorded position and blocked every live entry for
+# two nights. See RECONCILE_DUST_MAX_VALUE_USD for what replaced it.
 RECONCILE_SHARE_TOLERANCE = 0.01
+
+# EXCHANGE_ONLY dust bound, in DOLLARS OF WORST-CASE VALUE.
+#
+# A leftover balance whose value cannot exceed this is reported and then
+# ignored, rather than counted as unrecorded exposure. Bounding it in
+# dollars instead of shares is the whole point: exchange_only exists to
+# catch exposure the LIVE_MAX_* caps cannot see, and a share count is a
+# proxy for exposure that has now been wrong twice (0.008885 shares in
+# 2026-08-15, 0.01714 in 2026-08-30). An outcome token never settles above
+# wallet_client.MAX_SHARE_VALUE_USD, so worst-case value needs no price
+# lookup -- which matters, because a failed price read inside a check that
+# fails closed would halt the book by itself.
+#
+# WHY 0.50 AND NOT SOMETHING TIGHTER. The margin has to sit between the
+# largest residue an exit can leave and the smallest position that can
+# exist. The exchange will not trade under ASSUMED_EXCHANGE_MIN_SHARES = 5
+# shares, so the smallest real unrecorded position reads as $5.00 of
+# worst-case value: a 10x margin. The previous bound had none at all, which
+# is exactly why one unanticipated grid step took the live book down.
+# tests/test_exit_dust_reconciliation.py asserts that margin.
+RECONCILE_DUST_MAX_VALUE_USD = 0.50
 
 # Reconciliation result cache, in seconds. _live_budget_breach() runs per
 # candidate entry and several candidates can clear the screen in one cycle;
