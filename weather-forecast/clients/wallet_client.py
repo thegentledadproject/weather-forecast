@@ -129,15 +129,19 @@ KNOWN_SIGNATURE_TYPES = (0, 1, 3)
 # tick size (ROUNDING_CONFIG, order_builder/builder.py:36). Mirrored here
 # because build_entry_order() has to round UP onto the same grid.
 #
-# This also BOUNDS THE DUST an exit can leave behind. build_exit_order()
+# This is ONE source of the dust an exit leaves behind. build_exit_order()
 # floors the sell size onto this grid -- selling more shares than are held
-# fails outright -- so the residue after any exit is strictly less than
-# 10**-SHARE_DECIMALS = 0.01 shares. That is why the residue is always
-# under config.RECONCILE_SHARE_TOLERANCE and never trips reconciliation.
-# The two constants live in different modules and must stay consistent;
-# tests/test_reconciliation_units.py asserts the relationship rather than
-# leaving it to coincidence, because it currently holds EXACTLY (0.01 vs
-# 0.01) with no margin at all.
+# fails outright -- so flooring alone costs strictly less than
+# 10**-SHARE_DECIMALS = 0.01 shares.
+#
+# IT IS NOT THE ONLY SOURCE, and reading it as a total bound caused the
+# 2026-08-30 live halt. The EXCHANGE decides the fill: a stop-loss on RCSS
+# submitted 5.10 shares of a 5.10714-share position and the exchange moved
+# 5.09, one further grid step short. Residue 0.01714 -- 1.7x a
+# RECONCILE_SHARE_TOLERANCE that had been set to exactly this grid step
+# with no margin, so it read as an unrecorded position and blocked every
+# live entry for two nights. Residue is now bounded by VALUE instead; see
+# _is_dust() and tests/test_exit_dust_reconciliation.py.
 SHARE_DECIMALS = 2
 
 # Outcome-token and collateral balances come off the CLOB REST API as raw
@@ -151,6 +155,13 @@ BALANCE_BASE_UNITS = 10 ** 6
 # Polymarket has historically enforced a $1 minimum; treating an absent
 # field as "no minimum" would be the unsafe direction to guess in.
 ASSUMED_MIN_ORDER_USD = 1.0
+
+# A binary outcome token settles at 0 or 1 and never trades above par, so
+# one share can never be worth more than a dollar. This is what lets
+# reconciliation bound a leftover balance's VALUE without asking the book
+# what it is worth -- no extra API call, and no price read that could fail
+# closed and halt the book on its own.
+MAX_SHARE_VALUE_USD = 1.0
 
 _client = None
 
@@ -1321,20 +1332,22 @@ class Reconciliation:
     db_only: list = None               # DB says open, exchange shows no/too few shares
     exchange_only: list = None         # exchange holds shares, DB has no open row
     settled_unredeemed: list = None    # (token_id, shares, exit_price) resolved, still held
+    dust: list = None                  # (token_id, shares) too small to be exposure
 
     def __post_init__(self):
         self.verified = self.verified or []
         self.db_only = self.db_only or []
         self.exchange_only = self.exchange_only or []
         self.settled_unredeemed = self.settled_unredeemed or []
+        self.dust = self.dust or []
 
     def describe(self) -> str:
         if not self.checked:
             return f"NOT CHECKED ({self.reason})"
         if self.ok:
-            clean = f"clean -- {len(self.verified)} position(s) agree with the exchange"
-            settled = self.describe_settled()
-            return f"{clean}; {settled}" if settled else clean
+            parts = [f"clean -- {len(self.verified)} position(s) agree with the exchange"]
+            parts += [p for p in (self.describe_settled(), self.describe_dust()) if p]
+            return "; ".join(parts)
         bits = []
         if self.db_only:
             bits.append(
@@ -1347,6 +1360,9 @@ class Reconciliation:
                 f"{len(self.exchange_only)} held but NOT RECORDED: "
                 + ", ".join(f"{t[:10]}... ({s:.2f} sh)" for t, s in self.exchange_only)
             )
+        dust = self.describe_dust()
+        if dust:
+            bits.append(dust)
         return "; ".join(bits) or self.reason
 
     def describe_settled(self) -> str:
@@ -1362,6 +1378,48 @@ class Reconciliation:
             f"{t[:10]}... ({s:.2f} sh, worth ${s * x:.2f})"
             for t, s, x in self.settled_unredeemed
         )
+
+    def describe_dust(self) -> str:
+        """
+        Leftovers too small to be exposure, which do NOT affect `ok`. Kept
+        visible for the same reason describe_settled() is: the shares are
+        really held, and a bound that hides what it absorbs is a bound
+        nobody can check. Empty string when there is none.
+        """
+        if not self.dust:
+            return ""
+        return f"{len(self.dust)} dust holding(s) ignored: " + ", ".join(
+            f"{t[:10]}... ({s:.6f} sh, worth at most ${s * MAX_SHARE_VALUE_USD:.4f})"
+            for t, s in self.dust
+        )
+
+
+def _is_dust(held_shares: float) -> bool:
+    """
+    Is this leftover balance too small to be a position?
+
+    BOUNDED BY VALUE, NOT BY SHARE COUNT. The old bound was a share count
+    derived from build_exit_order()'s flooring, and it broke on
+    2026-08-30 because flooring is not the only thing that leaves a
+    residue -- the exchange filled one grid step under the size submitted
+    and the total came to 1.7x a bound that had no margin. Counting grid
+    steps means re-deriving the bound every time a new source of residue
+    turns up. What the check actually cares about is unrecorded EXPOSURE,
+    so bound the exposure.
+
+    An outcome token cannot be worth more than MAX_SHARE_VALUE_USD, so
+    `held * MAX_SHARE_VALUE_USD` is the most this balance could ever be
+    worth -- computed without consulting the book, which keeps a price
+    read that might fail out of a path that fails closed.
+
+    The margin comes from the exchange's own minimum: it will not trade a
+    position under config.ASSUMED_EXCHANGE_MIN_SHARES = 5 shares, which
+    reads as $5.00 of worst case against a $0.50 bound. A real unrecorded
+    position is 10x too big to be mistaken for dust.
+    """
+    import config
+
+    return held_shares * MAX_SHARE_VALUE_USD <= config.RECONCILE_DUST_MAX_VALUE_USD
 
 
 _reconcile_cache = {"at": 0.0, "result": None}
@@ -1515,6 +1573,7 @@ def reconcile_live_positions(open_live_positions, settled_tokens=None) -> Reconc
     # Holdings the database has never recorded.
     exchange_only = []
     settled_unredeemed = []
+    dust = []
     settled = settled_tokens or {}
     try:
         cutoff = int(time.time()) - config.RECONCILE_TRADE_LOOKBACK_HOURS * 3600
@@ -1554,7 +1613,13 @@ def reconcile_live_positions(open_live_positions, settled_tokens=None) -> Reconc
                 reason=(f"traded token {asset[:12]}... has an unreadable balance -- "
                         f"cannot rule out an unrecorded position"),
             )
-        if held <= config.RECONCILE_SHARE_TOLERANCE:
+        if _is_dust(held):
+            # Checked BEFORE the settled whitelist: a residue this small is
+            # not exposure whatever the position's status was, and routing it
+            # through settled_unredeemed would advertise sub-cent "winnings"
+            # nobody can redeem.
+            if held > 0:
+                dust.append((asset, held))
             continue
         if asset in settled:
             # Recorded and resolved: real shares, but not exposure. Reported,
@@ -1578,13 +1643,18 @@ def reconcile_live_positions(open_live_positions, settled_tokens=None) -> Reconc
         exchange_only.append((asset, held))
 
     diverged = bool(db_only or exchange_only)
-    return Reconciliation(
+    result = Reconciliation(
         ok=not diverged,
         checked=True,
         verified=verified, db_only=db_only, exchange_only=exchange_only,
-        settled_unredeemed=settled_unredeemed,
+        settled_unredeemed=settled_unredeemed, dust=dust,
         reason="exchange and database agree" if not diverged else "divergence",
     )
+    if dust:
+        # On the clean path describe() is never logged, so this is the only
+        # thing that will ever say what the bound absorbed.
+        logger.info(f"[wallet_client] {result.describe_dust()}")
+    return result
 
 
 def reconcile_cached(open_live_positions, settled_tokens=None) -> Reconciliation:
