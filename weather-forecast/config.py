@@ -2177,6 +2177,35 @@ MAX_POSITION_USD = 150.0
 # FORWARD-LOOKING ONLY -- no historical row can be backfilled.
 CAPTURE_EXIT_BID_DEPTH = True
 
+# Size positions on a STOPLESS book (HOLD_TO_SETTLEMENT_MODES) using pure
+# Kelly, i.e. with no gap-risk haircut.
+#
+# THE ARITHMETIC SAYS TRUE. entry_manager.gap_risk_haircut() scales a position
+# so that a stop-out costs what Kelly was sized against -- nominal / (nominal
+# + gap + spread). On a book with no stop there is no trigger to gap through
+# and no exit spread to pay: the position is held to settlement, which pays 1
+# or 0 with no fill and no fee. The loss when wrong is the whole stake, which
+# is exactly what Kelly's f* = edge / (1 - p) already assumes. The correct
+# haircut there is 1.0, and gap_risk_haircut already returns 1.0 for lottery
+# entries on precisely this argument.
+#
+# IT SHIPS FALSE ANYWAY, and the reason is not inertia. Setting it True
+# multiplies paper positions by 1.4x at entry 0.50, 2.0x at 0.20 and 2.25x at
+# 0.16 -- measured at the median 0.020 spread. The conservatism that removes
+# is doing real work for a reason that is NOT the one in the haircut's
+# docstring: Kelly takes the model's probability at face value, and this
+# model is measurably overconfident -- mean model_prob 0.432 against a 0.344
+# realised win rate over 358 traded rows, Brier 0.1930 against the market's
+# own 0.1842. Quarter-Kelly is the declared buffer for that; the haircut has
+# been an undeclared second one.
+#
+# So the fix is that the code now knows which regime it is in and says so,
+# instead of computing a stop's economics for a book with no stop. Whether to
+# BANK the resulting sizing change is a trading decision, and this is where it
+# gets made -- deliberately, in one line, rather than as a side effect of a
+# cleanup.
+SIZE_STOPLESS_BOOKS_ON_PURE_KELLY = False
+
 EXPENSIVE_ENTRY_PRICE = 0.55
 MAX_POSITION_USD_EXPENSIVE = 30.0
 

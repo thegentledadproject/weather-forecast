@@ -141,6 +141,19 @@ def _candidate_is_paper(station_icao: str) -> bool:
     return _execution_mode(station_icao) != "live"
 
 
+def _book_has_stop(station_icao: str) -> bool:
+    """
+    Whether a candidate entry for this station lands on a book that still has
+    a stop-loss, i.e. whether risk_manager.evaluate_exit() can price-exit it.
+
+    Reads config.HOLD_TO_SETTLEMENT_MODES, the same constant evaluate_exit
+    reads, so sizing and exiting can never disagree about which books have a
+    stop. "simulation" is not in that set and keeps its stop, because it
+    exists to rehearse live decisions exactly.
+    """
+    return _execution_mode(station_icao) not in config.HOLD_TO_SETTLEMENT_MODES
+
+
 def live_size_cap_usd(station_icao: str) -> Optional[float]:
     """
     The fixed notional this station must trade at, or None for normal Kelly
@@ -154,6 +167,7 @@ def gap_risk_haircut(
     entry_price: Optional[float],
     station_icao: Optional[str] = None,
     entry_bid: Optional[float] = None,
+    has_stop: bool = True,
 ) -> float:
     """
     Fraction to scale a position by so a stop-out costs what the Kelly size
@@ -197,6 +211,20 @@ def gap_risk_haircut(
     at all -- their maximum loss is the stake, already accepted at entry, and
     no amount of gapping changes it. Also 1.0 for degenerate prices.
 
+    has_stop=False SAYS THE SAME THING ABOUT A WHOLE BOOK. Since
+    config.HOLD_TO_SETTLEMENT_MODES shipped, the paper book has no stop, so
+    every term in the ratio below describes a rule that cannot fire there --
+    the position is held to settlement, which pays 1 or 0 with no fill, no
+    gap and no exit spread. The arithmetically correct answer is 1.0, the
+    same as the lottery carve-out, for the same reason.
+
+    It is NOT the default answer, and config.SIZE_STOPLESS_BOOKS_ON_PURE_KELLY
+    carries why: 1.0 multiplies paper sizes by 1.4x-2.25x, and the
+    conservatism that removes is buffering something real (a model that runs
+    +0.09 overconfident) rather than the gap risk this function is named for.
+    Off, this returns the same number it always did and no position changes
+    size. What changed is that the code now knows which regime it is in.
+
     Uses the NORMAL-regime stop. Entries only happen before 08:00 local (the
     entry window closed two hours earlier on 2026-08-17, which only widens
     the margin this argument already had), so that is the regime a position
@@ -207,6 +235,8 @@ def gap_risk_haircut(
     if entry_price is None or entry_price <= 0:
         return 1.0
     if entry_price < config.LOTTERY_PRICE_THRESHOLD:
+        return 1.0
+    if not has_stop and config.SIZE_STOPLESS_BOOKS_ON_PURE_KELLY:
         return 1.0
     nominal = config.STOP_LOSS_PCT * risk_manager.risk_unit(entry_price)
     if nominal <= 0:
@@ -892,7 +922,10 @@ def evaluate_entry(
     # hard ceiling and the maturity multiplier so it always reduces real risk
     # rather than being swallowed by a cap above it, and BEFORE the live fixed
     # size below, which is a deliberate override rather than a risk estimate.
-    size_usd *= gap_risk_haircut(ev_result.market_price, station_icao, ev_result.market_bid)
+    size_usd *= gap_risk_haircut(
+        ev_result.market_price, station_icao, ev_result.market_bid,
+        has_stop=_book_has_stop(station_icao),
+    )
 
     # Cap 2b: fixed live/simulation trade size. REPLACES Kelly sizing rather
     # than capping it -- see config.LIVE_TRADE_SIZE_USD.
