@@ -23,7 +23,7 @@ THE UPPER CARVE-OUT IS OFF AGAIN (added 2026-08-20, REVERTED 2026-08-27).
 It came from the same finding as the lottery one read at the other end: the
 stop is a price-noise filter, worth having only where the noise it filters
 is smaller than the move it reacts to. Below 0.15 the threshold distance is
-under Polymarket's 1-cent tick, so it fires on book wobble. At 0.45 and
+small enough to be swallowed by the book, so it fires on wobble. At 0.45 and
 above the distance is large in cents but small against a bucket's intraday
 range before the day's maximum is set, so it fires on positions that go on
 to WIN -- 45% precision post-deploy against 68-77% below 0.45, replicating
@@ -37,6 +37,29 @@ from -$4.80 with the stop to -$16.76 without, and Kelly sizes UP exactly
 where the carve-out switched the stop off, so the coin-flip band held the
 biggest positions and none of the protection. config.STOP_EXEMPT_ABOVE_PRICE
 carries both measurements and what would justify turning it back on.
+
+THAT -$4.80 DOES NOT REPRODUCE (2026-09-01). It is the WMKK 2026-08-26 b32
+NO @0.63, and its recorded path has no quote anywhere near the 0.519 stop
+level: the bid sat at 0.60 for eleven hours, never below 0.57, and then
+printed 0.05 at 08:01:11 UTC, 330 seconds after the previous snapshot. A
+re-armed stop fills at 0.05, not at a level -- -$15.49 against -$16.76 held,
+so it saves $1.27, not $11.96. -$4.80 implies a fill at 0.4496, a price that
+never quoted. The variance argument for the revert is not wrong in direction,
+but its one worked example is off by roughly 12x, and the number is worth
+re-deriving from paths rather than from stop levels before it decides
+anything else. See config.STOP_EXEMPT_ABOVE_PRICE, which carries the same
+correction.
+
+THE SUB-TICK CLAIM ABOVE WAS ALSO WRONG, and is corrected in the wording
+now. The distance is 0.30 x min(entry, 1 - entry), so at entry 0.149 it is
+4.5 cents -- ten times a tick. It is under one tick only below entry 0.033.
+What actually swallows the stop down there is the SPREAD, which on this book
+runs a median 2 cents: at entry 0.15 the distance is 4.5 cents and the spread
+alone has been measured at 5. LOTTERY_PRICE_THRESHOLD is sited about right
+and was justified by the wrong quantity. Note it is a strict `<`, so an entry
+at exactly 0.15 is armed -- deliberately left alone rather than moved to
+`<=`, because the spread fix below removes the reason that boundary was
+hurting and a threshold move needs its own evidence.
 
 The code path below is intact and reads the constant at call time, so
 re-enabling is a one-value change rather than a revert of a revert.
@@ -212,6 +235,83 @@ def taker_fee_per_share(price: float) -> float:
     return ev_engine.taker_fee_pct_of_notional(price) * price
 
 
+def usable_entry_bid(entry_price: float, entry_bid) -> Optional[float]:
+    """
+    The recorded entry-side bid IF it can be trusted, else None.
+
+    ONE definition, shared by the stop (stop_basis_price() below) and by
+    entry_manager.gap_risk_haircut(), which sizes on what a stop-out costs.
+    Two copies of "is this bid usable" would drift the same way two copies
+    of "where does the stop start" already did.
+
+    The stop is a movement filter, and an open position is marked at the
+    bid (position_manager -> get_current_price_for_side), while entry_price
+    is the ask an entry pays. Comparing the two charges the whole bid-ask
+    spread against the stop's budget before the market has moved at all --
+    a median 24% of the distance over 511 closed positions, and 100% or
+    more of it on 7% of them. See evaluate_exit() for the full measurement.
+
+    A FUNCTION, NOT AN EXPRESSION INSIDE evaluate_exit(), because
+    stop_loss_audit.py restates this same rule in its own arithmetic to
+    score history. Two copies of "where does the stop start" is how the
+    audit ends up reporting a threshold production does not use.
+
+    None means the entry-side book was never recorded (rows predating
+    Position.entry_bid, and manual_trigger). Those keep the basis they were
+    opened under.
+
+    WHAT IT REFUSES, and why `is not None` is not enough. Both ends are
+    reachable on the live API and both were found in the recorded book:
+
+      - A BID OF EXACTLY 0.0. CLOB answers 404 for a token with no
+        orderbook at all, but a book with asks and NO BIDS is a 200 whose
+        "price" field is 0, and market_client._fetch_quote() returns
+        float(0) -- not None. Anchoring here would make (basis - current)
+        negative at every price the token can trade at, so the stop could
+        never fire again for the life of the position. 1 of 511 measured
+        entries recorded a bid of exactly 0.0.
+      - A BID ABOVE THE ASK. The two sides are separate HTTP calls
+        (ev_engine fetches the ask, then the bid), so a moving or stale
+        book can come back crossed -- 2 of 511 did, by 0.010 and 0.025.
+        Trusting one would fire the stop at entry on zero movement, which
+        is precisely the defect this basis exists to remove, inverted.
+
+    An EQUAL bid and ask is not an anomaly -- 71 of 511, a tight book --
+    and it simply makes the two bases coincide.
+
+    NOT clamped against config.MIN_EXIT_PRICE. The stop's reachable window
+    does shrink by the spread, and below MIN_EXIT_PRICE the worthless-bid
+    carve-out switches the stop off entirely, so a wide enough book could in
+    principle move the trigger under that floor and leave nothing armed.
+    Measured over the 379 stop-armed positions in the record: that happens
+    ZERO times, because entries at or above LOTTERY_PRICE_THRESHOLD carry a
+    distance of at least 0.045 and the widest spread ever recorded (0.080)
+    sat on a 0.24 ask, whose trigger is still 0.088. It is a real shape and
+    an unobserved one; a guard here would be untestable against anything.
+    """
+    if entry_bid is None or entry_price is None:
+        return None
+    if entry_bid <= 0 or entry_bid > entry_price:
+        return None
+    return entry_bid
+
+
+def stop_basis_price(position: Position) -> float:
+    """
+    WHERE THE STOP MEASURES FROM -- the entry-side bid where one was
+    recorded and can be trusted (see usable_entry_bid), the entry ask
+    otherwise.
+
+    A FUNCTION, NOT AN EXPRESSION INSIDE evaluate_exit(), because
+    stop_loss_audit.py scores history against this same rule. Two copies of
+    "where does the stop start" is how that audit ends up reporting a
+    threshold production does not use -- which is exactly what review found
+    in the first cut of this change.
+    """
+    bid = usable_entry_bid(position.entry_price, position.entry_bid)
+    return bid if bid is not None else position.entry_price
+
+
 def update_high_water_mark(position: Position, current_price: float) -> float:
     """
     Returns the position's updated high-water-mark given the latest
@@ -246,7 +346,42 @@ def evaluate_exit(
 
     # Every threshold below is a DISTANCE in dollars/share: the configured
     # fraction times this position's risk unit. See the module docstring.
+    #
+    # The unit stays on entry_price -- the ASK, the price actually paid, which
+    # is what this position can lose. Only the stop's STARTING POINT moves
+    # onto the bid below; the size of the move it waits for does not.
     unit = risk_unit(position.entry_price)
+
+    # WHERE THE STOP MEASURES FROM, AND WHY IT IS NOT entry_price.
+    #
+    # The stop is a movement filter (see the module docstring). current_price
+    # is the BID -- position_manager marks an open position at what it could
+    # be sold for -- while entry_price is the ASK, what the entry paid. Both
+    # are individually right, and subtracting one from the other is not: it
+    # charges the whole bid-ask spread against the stop's budget before the
+    # market has moved at all.
+    #
+    # MEASURED over 511 closed positions with a book snapshot within 15 min of
+    # entry (2026-08-01..09-01): entry_ask - bid_at_entry is positive on 86%,
+    # median 0.020, max 0.080, against stop distances of 1.2c-13.8c. That is a
+    # median 24% of the budget gone at entry, and 100% or more of it on 7% of
+    # positions -- two of which stopped 0 seconds after entry with no market
+    # movement whatsoever (WMKK 2026-08-31 b34 YES @0.15, spread 0.050 against
+    # a distance of 0.045; RKSI 2026-08-25 b29 YES @0.24, 0.080 against 0.072).
+    # Of the 207 fires scoreable against settlement, 117 (57%) do not fire on
+    # this basis, 46 of those were eventual WINNERS, and together they carry
+    # -$401.74 across 13 of 17 stations.
+    #
+    # NOT MIRRORED ONTO THE TAKE-PROFIT, deliberately. That rule cashes a
+    # REALIZABLE gain, and what a sale realizes really is current_bid minus
+    # what was paid -- the spread there is a cost genuinely incurred, not a
+    # measurement error. Moving it too would make it fire EARLIER by the
+    # spread, on the rule already measured as the expensive one.
+    #
+    # None means the entry-side book was never recorded (rows predating
+    # Position.entry_bid, and manual_trigger). Those keep the basis they were
+    # opened under rather than silently gaining a spread of extra room.
+    stop_from = stop_basis_price(position)
 
     # Lottery-priced entries (see LOTTERY_PRICE_THRESHOLD in config.py)
     # skip BOTH price-noise exits. Below that entry price the threshold
@@ -326,7 +461,7 @@ def evaluate_exit(
         not is_lottery
         and not is_stop_exempt_high
         and not is_worthless_bid
-        and (position.entry_price - current_price) >= thresholds["stop_loss_pct"] * unit
+        and (stop_from - current_price) >= thresholds["stop_loss_pct"] * unit
     ):
         return ExitDecision(
             position_id=position.position_id,

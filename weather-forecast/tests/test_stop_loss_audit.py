@@ -12,6 +12,8 @@ would keep passing while the audit silently measured the wrong threshold.
 """
 from datetime import date
 
+import pytest
+
 import config
 import risk_manager
 import stop_loss_audit as sla
@@ -256,3 +258,40 @@ def test_header_still_reports_a_real_tightening(monkeypatch):
     """And it must not hide one that IS configured."""
     monkeypatch.setattr(config, "TIGHTENED_STOP_LOSS_PCT", 0.15)
     assert sla.tightening_label() == "tightened to 15%"
+
+
+# --- the basis the audit measures against -----------------------------------
+
+def test_the_audit_measures_from_the_same_price_the_stop_does():
+    """
+    The audit restates the stop rule in its own arithmetic, so it has to
+    restate the CURRENT rule. Since 2026-09-01 the stop measures movement
+    from the entry-side bid, not from the ask that was paid; an audit still
+    anchored on entry_price would print a level production never uses and
+    would classify fires against it.
+    """
+    bid = ENTRY - 0.02
+    position = _stop()
+    position.entry_bid = bid
+
+    assert sla.loose_trigger_price(position) == pytest.approx(bid - config.STOP_LOSS_PCT * UNIT)
+
+
+def test_a_position_with_no_recorded_bid_is_still_audited_on_the_ask():
+    """Rows predating the column were traded on the old basis and must be
+    scored on it -- the audit reads history, not today's rule."""
+    assert sla.loose_trigger_price(_stop()) == pytest.approx(ENTRY - config.STOP_LOSS_PCT * UNIT)
+
+
+def test_would_fire_anyway_uses_the_bid_basis_too():
+    """
+    This exit bid clears the loose distance measured from the ASK and does
+    not clear it measured from the BID, so the two bases disagree and only
+    the current one can be right: the position never fell the full distance
+    from where it started.
+    """
+    entry_bid = ENTRY - 0.02
+    position = _stop(bid=ENTRY - LOOSE_D - 0.001)
+    position.entry_bid = entry_bid
+
+    assert sla.classify(position) != sla.WOULD_FIRE_ANYWAY

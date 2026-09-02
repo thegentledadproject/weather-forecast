@@ -84,6 +84,24 @@ def _db():
 # closed trade by the entry fee. That asymmetry is a property of the stored
 # data, not of this view -- it is named here so a reader does not rediscover
 # it as a discrepancy.
+# `p.*` RE-EXPANDS AT PREPARE TIME, so a column added to `positions` by the
+# ALTER TABLE migration below shows up here IMMEDIATELY, on an existing view,
+# with no rebuild -- the drift check compares this SQL text, which has not
+# changed, and does not need to. Verified against SQLite 3.49: adding entry_bid
+# takes the view from 24 columns to 25 on the same connection.
+#
+# THE CONSEQUENCE IS POSITIONAL, and it is the reason this note exists: the
+# three computed columns are appended AFTER `p.*`, so every migration shifts
+# them right by one. entry_bid (2026-09-01) moved notional_shares from index 21
+# to 22. Nothing in this repo or in deploy/ reads the view positionally -- both
+# dashboards go through this module's own loaders -- but ad-hoc SQL that does
+# `select ... from position_economics` and indexes by number will read a
+# different column after a deploy that adds a positions column. Name them.
+#
+# (An earlier version of this comment claimed the opposite -- that SQLite
+# freezes the star at CREATE time and a migrated database would NOT show the
+# new column. It does not, and it does. Said plainly here because a comment
+# that is confidently wrong about schema behaviour is worse than no comment.)
 _POSITION_ECONOMICS_VIEW_SQL = """CREATE VIEW position_economics AS
 SELECT
     p.*,
@@ -192,7 +210,8 @@ def _connect() -> sqlite3.Connection:
             order_id TEXT,
             model_prob REAL,
             raw_edge REAL,
-            net_ev_at_size REAL
+            net_ev_at_size REAL,
+            entry_bid REAL
         )
         """
     )
@@ -210,6 +229,12 @@ def _connect() -> sqlite3.Connection:
     # them, and that is the honest value: those trades really do have no
     # stored prediction. Do NOT backfill them by recomputing -- today's
     # calibration has seen the outcomes those rows were entered before.
+    #
+    # entry_bid is the same kind of column and carries the same rule with more
+    # force: it is the entry-side BID, and no book from a past cycle can be
+    # re-quoted. NULL means the position was opened before the column existed
+    # (or by manual_trigger), and risk_manager falls back to the old
+    # entry_price basis for exactly those rows.
     existing_columns = {row[1] for row in conn.execute("PRAGMA table_info(positions)").fetchall()}
     for column_name, column_ddl in (
         ("size_shares", "size_shares REAL"),
@@ -218,6 +243,7 @@ def _connect() -> sqlite3.Connection:
         ("model_prob", "model_prob REAL"),
         ("raw_edge", "raw_edge REAL"),
         ("net_ev_at_size", "net_ev_at_size REAL"),
+        ("entry_bid", "entry_bid REAL"),
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
@@ -807,6 +833,7 @@ def _row_to_position(r) -> Position:
     model_prob = r[18] if len(r) > 18 else None
     raw_edge = r[19] if len(r) > 19 else None
     net_ev_at_size = r[20] if len(r) > 20 else None
+    entry_bid = r[21] if len(r) > 21 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -829,6 +856,7 @@ def _row_to_position(r) -> Position:
         model_prob=model_prob,
         raw_edge=raw_edge,
         net_ev_at_size=net_ev_at_size,
+        entry_bid=entry_bid,
     )
 
 
@@ -847,8 +875,8 @@ def open_position(position: Position) -> None:
                 entry_price, size_usd, entry_time, status, high_water_mark,
                 exit_price, exit_time, exit_reason, token_id, is_paper,
                 size_shares, execution_mode, order_id,
-                model_prob, raw_edge, net_ev_at_size
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                model_prob, raw_edge, net_ev_at_size, entry_bid
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.position_id,
@@ -872,6 +900,7 @@ def open_position(position: Position) -> None:
                 position.model_prob,
                 position.raw_edge,
                 position.net_ev_at_size,
+                position.entry_bid,
             ),
         )
 

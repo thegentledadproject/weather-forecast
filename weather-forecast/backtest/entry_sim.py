@@ -195,6 +195,7 @@ def evaluate_entry_sim(
             approved=False, reason=reason,
             station_maturity=maturity,
             entry_price=ev.market_price,
+            entry_bid=ev.market_bid,
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
@@ -297,6 +298,7 @@ def evaluate_entry_sim(
             approved=False, reason="No positive edge (Kelly fraction <= 0).",
             station_maturity=maturity,
             entry_price=ev.market_price,
+            entry_bid=ev.market_bid,
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
@@ -317,7 +319,7 @@ def evaluate_entry_sim(
     # ceiling and maturity, before the live fixed size). Imported from
     # entry_manager, not restated: a replay that sized without the haircut
     # would report a strategy nobody is running.
-    size_usd *= gap_risk_haircut(ev.market_price, station_icao)
+    size_usd *= gap_risk_haircut(ev.market_price, station_icao, ev.market_bid)
 
     # --- Gate 8: depth unknown -------------------------------------------
     if depth_usd is None:
@@ -330,6 +332,7 @@ def evaluate_entry_sim(
             approved=False, reason="Order book depth unavailable -- cannot size safely, skipping.",
             station_maturity=maturity,
             entry_price=ev.market_price,
+            entry_bid=ev.market_bid,
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
@@ -350,6 +353,7 @@ def evaluate_entry_sim(
             approved=False, reason=f"Depth-capped size (${depth_capped_usd:.2f}) too small to trade -- book too thin.",
             station_maturity=maturity,
             entry_price=ev.market_price,
+            entry_bid=ev.market_bid,
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
@@ -373,6 +377,7 @@ def evaluate_entry_sim(
             reason=f"Slippage at this size ({slippage_at_size:.1%}) exceeds the {config.MAX_ACCEPTABLE_SLIPPAGE_PCT:.0%} hard gate -- book too thin to trust the fill.",
             station_maturity=maturity,
             entry_price=ev.market_price,
+            entry_bid=ev.market_bid,
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
@@ -391,6 +396,7 @@ def evaluate_entry_sim(
             reason=f"Net EV at actual size ({net_ev_at_size:+.1%}) no longer clears the {min_net_ev:.0%} threshold once real slippage is applied.",
             station_maturity=maturity,
             entry_price=ev.market_price,
+            entry_bid=ev.market_bid,
             token_id=token_id,
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
@@ -408,6 +414,7 @@ def evaluate_entry_sim(
         reason=f"Approved: {net_ev_at_size:+.1%} net EV at ${depth_capped_usd:.2f} ({maturity} station).",
         station_maturity=maturity,
         entry_price=ev.market_price,
+        entry_bid=ev.market_bid,
         token_id=token_id,
         model_prob=ev.model_prob,
         raw_edge=ev.raw_edge,

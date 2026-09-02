@@ -588,6 +588,12 @@ def open_position(decision: EntryDecision) -> None:
             bucket_c=decision.bucket_c,
             side=decision.side,
             entry_price=entry_price if entry_price is not None else decision.entry_price,
+            # The bid on the same book at decision time, for the stop to
+            # measure movement against -- see Position.entry_bid. NOT
+            # overridden by a live fill the way entry_price is: a fill tells
+            # you what the ask cost, not where the bid was, and the two sides
+            # are what this pair exists to keep apart.
+            entry_bid=decision.entry_bid,
             size_usd=size_usd,
             entry_time=entry_time,
             status="open",

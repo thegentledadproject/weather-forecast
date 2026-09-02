@@ -232,6 +232,16 @@ def replay_stored(stations, start: date, end: date,
             status="open",
             high_water_mark=entry,
             token_id=r["token_id"],
+            # The recorded entry-side bid, because evaluate_exit() below
+            # measures the stop from it. Rebuilding without it would replay
+            # every row on the pre-2026-09-01 basis -- a more trigger-happy
+            # stop than production has -- and the cohort this sweep exists to
+            # score would then exclude positions the live book still holds.
+            #
+            # Read defensively: `select *` against a database written before
+            # the column existed returns rows without it, and those rows were
+            # genuinely traded on the old basis.
+            entry_bid=r["entry_bid"] if "entry_bid" in r.keys() else None,
         )
 
         for ts, price in _price_path(r["token_id"], int(entered_at.timestamp()),

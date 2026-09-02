@@ -1039,6 +1039,7 @@ def _entry_pass(
                     fee_rate_pct=fee_rate_pct if fee_rate_pct is not None
                     else ev_engine.taker_fee_pct_of_notional(None),
                     net_ev_per_dollar=None,
+                    market_bid=prices.price(token_id, tick.ts),
                     notes="No live price available this cycle.",
                 ))
                 continue
@@ -1069,6 +1070,13 @@ def _entry_pass(
                 estimated_slippage_pct=slippage,
                 fee_rate_pct=fee_pct,
                 net_ev_per_dollar=net_ev,
+                # The BID from the same snapshot the ask came from. Feeds no
+                # decision here either -- it rides to the replayed Position so
+                # the stop measures movement on the same basis it does live.
+                # A replay whose positions carried entry_bid=None would keep
+                # the OLD basis while the live book used the new one, which is
+                # the divergence Position.model_prob exists to expose.
+                market_bid=prices.price(token_id, tick.ts),
             ))
 
     screened = ev_engine.best_opportunities(rows, min_net_ev=tick.min_net_ev)
@@ -1184,6 +1192,7 @@ def _entry_pass(
             # writes decision.entry_price, which entry_manager sets to
             # ev_result.market_price. Slippage is carried below instead.
             entry_price=decision.entry_price,
+            entry_bid=decision.entry_bid,
             size_usd=decision.recommended_size_usd,
             entry_time=entry_time,
             status="open",

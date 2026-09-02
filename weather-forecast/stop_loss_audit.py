@@ -10,7 +10,13 @@ WHAT IT MEASURES
 ----------------
 risk_manager.evaluate_exit() stops out a position when
 
-    entry_price - bid  >=  stop_pct * risk_unit(entry_price)
+    stop_basis_price - bid  >=  stop_pct * risk_unit(entry_price)
+
+where stop_basis_price is the ENTRY-SIDE BID (Position.entry_bid) where one
+was recorded and the entry ask otherwise -- the stop measures movement, and
+`bid` above is a bid, so starting from the ask charged the spread against
+the distance. Everything below reads that price through
+risk_manager.stop_basis_price() rather than restating it.
 
 and `stop_pct` is not constant: config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL swaps
 STOP_LOSS_PCT for the smaller TIGHTENED_STOP_LOSS_PCT for the rest of the
@@ -159,7 +165,12 @@ def classify(position: Position) -> Optional[str]:
     if hour < config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL:
         return BEFORE_TIGHTEN
     loose_distance = config.STOP_LOSS_PCT * risk_manager.risk_unit(position.entry_price)
-    return (WOULD_FIRE_ANYWAY if (position.entry_price - bid) >= loose_distance
+    # From the same price the live rule starts at -- the entry-side bid where
+    # one was recorded, the ask otherwise. Delegated rather than restated: a
+    # second copy of "where does the stop start" is how this audit would come
+    # to score history against a threshold production does not use.
+    return (WOULD_FIRE_ANYWAY
+            if (risk_manager.stop_basis_price(position) - bid) >= loose_distance
             else TIGHTENING_ONLY)
 
 
@@ -185,8 +196,15 @@ def tightening_label() -> str:
 
 def loose_trigger_price(position: Position) -> float:
     """The bid the LOOSE threshold was waiting for -- the level a
-    tightening-only stop never reached."""
-    return position.entry_price - config.STOP_LOSS_PCT * risk_manager.risk_unit(position.entry_price)
+    tightening-only stop never reached.
+
+    Measured down from risk_manager.stop_basis_price(), not from
+    entry_price: since 2026-09-01 the stop starts at the entry-side bid, so
+    anchoring here on the ask would print a level a cycle never waits for.
+    The DISTANCE is still a fraction of the risk unit, which stays on the
+    price actually paid."""
+    return (risk_manager.stop_basis_price(position)
+            - config.STOP_LOSS_PCT * risk_manager.risk_unit(position.entry_price))
 
 
 def realized_pnl(position: Position) -> Optional[float]:
