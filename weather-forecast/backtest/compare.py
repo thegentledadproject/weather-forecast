@@ -123,8 +123,28 @@ def _legacy_all():
         yield
 
 
+@contextlib.contextmanager
+def _armed_exits():
+    """
+    The stop and the take back on for the paper book, i.e. config.py as it
+    stood before 2026-09-02.
+
+    The control for the hold-to-settlement change. An empty
+    HOLD_TO_SETTLEMENT_MODES is the documented revert (config.py), and a
+    replay position is created is_paper=True on the Position default mode,
+    so emptying the tuple re-arms exactly the cohort the change disarmed.
+    """
+    modes = config.HOLD_TO_SETTLEMENT_MODES
+    config.HOLD_TO_SETTLEMENT_MODES = ()
+    try:
+        yield
+    finally:
+        config.HOLD_TO_SETTLEMENT_MODES = modes
+
+
 ARMS: Dict[str, Tuple[str, Callable]] = {
     "shipped": ("current config.py", _shipped),
+    "armed-exits": ("stop + take back on for paper (pre-2026-09-02)", _armed_exits),
     "legacy-spread": ("pre-2026-08-10 estimate_std_dev", _legacy_spread),
     "legacy-blend": ("blend weight 0.40 everywhere", _legacy_blend),
     "legacy-all": ("both of the above", _legacy_all),

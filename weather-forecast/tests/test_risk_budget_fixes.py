@@ -43,6 +43,10 @@ def _pos(entry_price: float, hwm: float) -> Position:
         entry_time="2026-08-02T00:00:00+00:00",
         high_water_mark=hwm,
         is_paper=True,
+        # An ARMED book -- see tests/test_hold_to_settlement_modes.py. The
+        # take-profit these tests pin as reachable does not exist on the
+        # paper book any more.
+        execution_mode="live",
     )
 
 

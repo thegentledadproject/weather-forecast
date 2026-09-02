@@ -1499,6 +1499,72 @@ LOTTERY_PROFIT_TAKE_PCT = PROFIT_TAKE_PCT
 # silently keeps the old number for half the trading day.
 TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = TIGHTENED_PROFIT_TAKE_PCT
 
+# EXECUTION MODES THAT IGNORE BOTH PRICE-BASED EXITS AND ARE CLOSED ONLY BY
+# RESOLUTION. The fourth and widest carve-out, and the only one keyed on WHOSE
+# BOOK the position is on rather than on a price.
+#
+# MEASURED 2026-09-02 over every closed position carrying a recorded
+# settlement -- 514 rows, $4,049.93 staked, entries 2026-08-03..09-01. Each
+# row's actual P&L against the same row held to settlement at the same entry
+# price:
+#
+#     as traded (stop + take)   -$295.15    -7.3%
+#     stop only, no take        +$186.81    +4.6%
+#     take only, no stop        +$283.37    +7.0%
+#     neither                   +$765.33   +18.9%
+#
+# Day-clustered bootstrap over 252 station-days: held +18.4% [+5.2, +31.5],
+# as traded -7.4% [-13.1, -1.8]. Both exclude zero. The result survives
+# dropping WSSS (+16.0% on the other 18 stations) and 16 of 19 stations are
+# positive held -- the exceptions are VHHH, RJTT and RPLL, all three already
+# flagged or stopped for their own reasons.
+#
+# The two rules cost $1,038.82 between them:
+#   - the stop, 222 fires, mean entry 0.380 -> mean exit 0.240, median held
+#     3h56m, and 36% OF THE TRADES IT KILLED WOULD HAVE WON AT SETTLEMENT.
+#     -$600.61 against holding.
+#   - the take, 197 fires, mean exit 0.468 against a 0.543 settlement win
+#     rate on the same rows -- ~7.5c/share given away, reliably.
+#     -$481.96 against holding.
+#
+# THIS IS NOT A CLAIM THAT THE MODEL IMPROVED. On the 358 traded rows with a
+# stored prediction, Brier is 0.1930 for the model against 0.1842 for the
+# entry ask: the model is still WORSE calibrated than the market it trades
+# against, and mean model_prob 0.432 against a 0.344 realised win rate is ~9
+# points of residual overconfidence. What holds up is a PRICE edge -- mean
+# entry 0.306 against that 0.344 -- which is why a month of calibration work
+# moved Brier and did not move P&L. It also means this edge can decay without
+# any calibration metric noticing, so the cohort needs re-scoring on the same
+# hold-vs-actual basis, not on Brier.
+#
+# WHY A MODE SET AND NOT A GLOBAL OFF SWITCH. The live book is armed with real
+# money and CANNOT hold to settlement today: nothing in this codebase redeems a
+# settled winning token, so a held live winner strands the book exactly as the
+# dust halts did. Redemption is the prerequisite for adding "live" here, and
+# until it exists the real-money path keeps both rules. "simulation" is left
+# armed for the opposite reason -- it exists to rehearse live decisions
+# faithfully, and a rehearsal of a book that does not exist is worth nothing.
+#
+# WHAT THIS DOES NOT DISABLE. Resolution closing is a different path entirely
+# (position_manager._close_from_settlement_source and friends, evaluated BEFORE
+# evaluate_exit), so a disarmed position still closes when its market settles.
+# That is the whole intent: the exit becomes settlement.
+#
+# THE ONE ENTRY-SIDE COUPLING, stated rather than assumed away. Veto 0c
+# (MAX_STOP_OUTS_PER_BUCKET_PER_DAY) counts stop-outs, so with no stops it
+# never fires. It does not need to: veto 0b caps OPEN positions per
+# bucket/side, and a position that is never price-exited stays open until
+# resolution -- so the bucket is held for the rest of the day by 0b instead.
+# The cooldown only ever mattered because the stop FREED the bucket to be
+# re-bought. Exposure does rise: peak concurrent open notional over the
+# measured month is $432.95 as traded against $748.18 held, inside
+# BANKROLL_USD ($1000) but no longer with much room, so the portfolio caps
+# bind sooner and the entry set will not be identical to the measured one.
+#
+# An empty tuple restores the previous behaviour everywhere, which is what
+# makes the revert a one-value change.
+HOLD_TO_SETTLEMENT_MODES: tuple = ("paper",)
+
 # THE MIRROR OF LOTTERY_PRICE_THRESHOLD: entries AT OR ABOVE this price
 # also skip the percentage stop-loss.
 #

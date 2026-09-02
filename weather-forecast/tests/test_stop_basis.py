@@ -69,6 +69,12 @@ def _position(entry_price: float = ASK, entry_bid=BID, side: str = "YES") -> Pos
         side=side, entry_price=entry_price, entry_bid=entry_bid,
         size_usd=10.0, entry_time="2026-08-30T21:01:00+00:00",
         status="open", is_paper=True,
+        # An ARMED book. These tests measure the stop mechanism, and
+        # config.HOLD_TO_SETTLEMENT_MODES disarms it entirely on the paper
+        # book -- so a fixture left on the Position default ("paper") would
+        # test nothing. Stated explicitly rather than read from the constant,
+        # for the reason tests/test_stop_exempt_high.py gives.
+        execution_mode="live",
     )
 
 

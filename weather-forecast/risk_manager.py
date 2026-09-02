@@ -344,6 +344,44 @@ def evaluate_exit(
     thresholds = _active_thresholds(local_hour=local_hour)
     pnl_pct = compute_pnl_pct(position.entry_price, current_price)
 
+    # THE WHOLE-BOOK CARVE-OUT (config.HOLD_TO_SETTLEMENT_MODES, 2026-09-02).
+    # Checked before anything else because it subsumes every band below it:
+    # on a disarmed book there is no stop and no take at any price, and the
+    # only exit is resolution.
+    #
+    # Measured over 514 closed positions with a recorded settlement: the same
+    # entries held to settlement return +18.4% against the -7.3% they actually
+    # returned, and BOTH rules are individually negative (stop only +4.6%,
+    # take only +7.0%, neither +18.9%). config.py carries the full table, the
+    # bootstrap, and the reason the live book is NOT in the default set --
+    # nothing here redeems a settled winning token, so a held live winner
+    # strands the book.
+    #
+    # Returning "hold" rather than short-circuiting further up keeps the
+    # high-water mark and the exit-price capture in position_manager running
+    # exactly as before, so the disarmed book still records the price series
+    # a future re-arming would be scored on.
+    #
+    # is_paper IS CHECKED AS WELL, and it is not redundant. execution_mode was
+    # added to `positions` by migration with DEFAULT 'paper', so any row
+    # written before that column existed reads "paper" whatever it really was.
+    # No such row exists today (checked 2026-09-02: 0 rows with
+    # execution_mode='paper' and is_paper=0, across all 563), and this exists
+    # so that a future one -- a restored backup, a hand-written row, a
+    # migration re-run -- cannot silently disarm the stop on a position backed
+    # by real money. The two fields disagree only when something is wrong, and
+    # the safe answer when they disagree is the rule that protects capital.
+    # Requiring both fails SAFE in the other direction too: a genuinely paper
+    # row with is_paper unset merely keeps the old exits.
+    if position.is_paper and position.execution_mode in config.HOLD_TO_SETTLEMENT_MODES:
+        return ExitDecision(
+            position_id=position.position_id,
+            should_exit=False,
+            reason="hold",
+            current_price=current_price,
+            pnl_pct=pnl_pct,
+        )
+
     # Every threshold below is a DISTANCE in dollars/share: the configured
     # fraction times this position's risk unit. See the module docstring.
     #
