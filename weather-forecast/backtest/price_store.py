@@ -143,7 +143,10 @@ def _connect(db_path=None) -> sqlite3.Connection:
     # ask_price added 2026-08-10. CREATE TABLE IF NOT EXISTS does nothing to
     # a table that already exists, so an existing market_data.sqlite3 keeps
     # the old 6-column schema and every read of the new field fails.
-    _add_missing_columns(conn, "price_snapshots", {"ask_price": "REAL"})
+    # bid_depth_usd added 2026-09-02, same trap and same fix. The deployed
+    # market_data.sqlite3 is 177MB of rows written before it existed; every
+    # one of them is honestly NULL, meaning "bid depth was not captured".
+    _add_missing_columns(conn, "price_snapshots", {"ask_price": "REAL", "bid_depth_usd": "REAL"})
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS fetch_log (
@@ -226,8 +229,8 @@ def upsert_token(
 
 _INSERT_SNAPSHOT = (
     "INSERT OR REPLACE INTO price_snapshots "
-    "(token_id, ts, price, depth_usd, source, fidelity_min, ask_price) "
-    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+    "(token_id, ts, price, depth_usd, source, fidelity_min, ask_price, bid_depth_usd) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
 
@@ -240,6 +243,7 @@ def save_snapshot(
     fidelity_min: int,
     db_path=None,
     ask_price: Optional[float] = None,
+    bid_depth_usd: Optional[float] = None,
 ) -> None:
     """
     Persist one observed quote. INSERT OR REPLACE on (token_id, ts,
@@ -264,11 +268,20 @@ def save_snapshot(
     rather than a tidy bid_price/ask_price pair: renaming `price` would
     touch every reader and every stored row for cosmetic gain, and the
     docstring is a cheaper place to carry the meaning than a migration.
+
+    THE TWO DEPTH COLUMNS ARE OPPOSITE SIDES OF THE BOOK, and mixing them
+    would be silent. `depth_usd` is ASK-side, written by the entry scan
+    (market_client.get_available_depth_usd) -- what a PURCHASE can clear
+    into. `bid_depth_usd` is BID-side (get_bid_depth_usd) -- what a SALE
+    can. A token can have a deep ask stack and almost no bids, so an exit
+    priced against `depth_usd` would be flattered by liquidity that is not
+    on its side. Both are nullable and both mean "not captured" when NULL.
     """
     with _db(db_path) as conn:
         conn.execute(
             _INSERT_SNAPSHOT,
-            (token_id, int(ts), price, depth_usd, source, int(fidelity_min), ask_price),
+            (token_id, int(ts), price, depth_usd, source, int(fidelity_min),
+             ask_price, bid_depth_usd),
         )
 
 
@@ -285,6 +298,12 @@ def save_snapshots(rows: Iterable[tuple], source: str, fidelity_min: int, db_pat
     single traded-price series with no book behind it, so there IS no ask
     to record) and what the synthetic test scenario builds. Rejecting it
     would force every caller to pass a None that means the same thing.
+
+    NO bid_depth_usd ARITY, deliberately. Every bulk caller is a BACKFILL
+    over history, and bid depth cannot be backfilled: it is a book that is
+    hours or days gone. Only the live exit path can record it, and that goes
+    through save_snapshot() one row at a time. A 6-tuple form here would
+    exist solely to let a fetcher write a number it cannot know.
     """
     payload = []
     for row in rows:
@@ -297,7 +316,7 @@ def save_snapshots(rows: Iterable[tuple], source: str, fidelity_min: int, db_pat
                 f"save_snapshots expects 4- or 5-tuples, got {len(row)} fields: {row!r}"
             )
         payload.append(
-            (token_id, int(ts), price, depth_usd, source, int(fidelity_min), ask_price)
+            (token_id, int(ts), price, depth_usd, source, int(fidelity_min), ask_price, None)
         )
     if not payload:
         return 0

@@ -223,6 +223,23 @@ def _capture_exit_price(
     """
     if fidelity_min is None:
         return
+
+    # BID-side depth, in its OWN try. It is a second network call (the quote
+    # endpoint carries no sizes), so it gets its own failure boundary: a book
+    # that is slow, missing or malformed must cost this one column and leave
+    # the price row -- and the exit decision that row belongs to -- untouched.
+    # None is the honest value for every one of those cases, and is exactly
+    # what price_store stores for "not captured".
+    bid_depth_usd = None
+    if config.CAPTURE_EXIT_BID_DEPTH:
+        try:
+            bid_depth_usd = market_client.get_bid_depth_usd(token_id)
+        except Exception as exc:  # noqa: BLE001 - depth is never a gate
+            print(
+                f"[position_manager] bid-depth capture unavailable this cycle "
+                f"(non-fatal, exit checking unaffected): {exc}"
+            )
+
     try:
         import ev_engine
 
@@ -234,6 +251,7 @@ def _capture_exit_price(
             token_id=token_id,
             bid_price=bid_price,
             fidelity_min=fidelity_min,
+            bid_depth_usd=bid_depth_usd,
         )
     except Exception as exc:  # noqa: BLE001 - history capture is never a gate
         print(

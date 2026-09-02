@@ -292,6 +292,39 @@ class FillModel:
         slip = self.slippage(size_usd, depth_usd)
         return min(quote_price * (1.0 + slip), 1.0)
 
+    def exit_fill_price(
+        self,
+        quote_price: float,
+        size_usd: float,
+        bid_depth_usd: Optional[float],
+    ) -> float:
+        """
+        What a SALE of `size_usd` would actually have realised: the bid
+        pushed DOWN by modelled slippage, floored at 0.0 (an outcome token
+        cannot be sold for less than nothing).
+
+        THE SIGN IS THE WHOLE DIFFERENCE from entry_fill_price(), which
+        pushes the quote UP. Both share slippage(), so an inverted sign here
+        would silently make every modelled exit better than reality -- it is
+        pinned by test.
+
+        `bid_depth_usd` is BID-side depth (market_client.get_bid_depth_usd),
+        NOT the `depth_usd` column, which is ask-side and belongs to entries.
+        Passing the ask figure would price a sale against liquidity sitting on
+        the other side of the spread. None means "not captured" and costs
+        FALLBACK_SLIPPAGE_PCT, the same treatment slippage() gives an unknown
+        book anywhere else.
+
+        WHAT THIS IS FOR. The per-position loss cap question (2026-09-02)
+        could not be decided because every simulation of it assumed the whole
+        order cleared at one quote. Filling at the first bid to cross the
+        trigger is the honest quote-level answer; this is the size-level one,
+        and it only becomes usable once bid depth has actually been collected
+        -- no historical row carries it.
+        """
+        cost = self.slippage(size_usd, bid_depth_usd)
+        return max(float(quote_price) * (1.0 - cost), 0.0)
+
     def slippage_cost_usd(
         self,
         quote_price: float,

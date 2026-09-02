@@ -244,6 +244,49 @@ def get_current_price_for_side(token_id: str, side: str) -> Optional[float]:
     return price
 
 
+def get_bid_depth_usd(market_token_id: str, max_price_impact_pct: float = 0.10, timeout: int = 10) -> Optional[float]:
+    """
+    Sum the dollar value of BID-side liquidity available before price impact
+    exceeds max_price_impact_pct BELOW the top-of-book bid. What a SALE can
+    realistically clear into.
+
+    THE MIRROR OF get_available_depth_usd(), AND THE DISTINCTION IS THE POINT.
+    That function sums the ASKS, because it sizes an ENTRY, which buys. An
+    exit sells, and the two sides of a thin prediction-market book are not
+    interchangeable -- the same token can carry a $10,000 ask stack and a $5
+    bid. Using the ask figure to model a sale would overstate every modelled
+    exit, in the direction that flatters it.
+
+    Impact runs DOWNWARD here (top_bid * (1 - impact)) where the ask-side
+    function runs upward, for the same reason: a seller's price moves against
+    them as they consume bids.
+
+    Returns None if the book is unavailable or carries no bids -- "unknown
+    depth", never "zero depth". price_store records that as NULL and
+    fill_model charges the live fallback slippage for it, exactly as it does
+    for an unknown ask book.
+    """
+    book = get_order_book(market_token_id, timeout=timeout)
+    if not book or "bids" not in book or not book["bids"]:
+        return None
+
+    try:
+        bids = sorted(book["bids"], key=lambda level: float(level["price"]), reverse=True)
+        top_price = float(bids[0]["price"])
+        impact_floor = top_price * (1 - max_price_impact_pct)
+
+        depth_usd = 0.0
+        for level in bids:
+            price = float(level["price"])
+            if price < impact_floor:
+                break
+            depth_usd += float(level["size"]) * price
+        return depth_usd
+    except (KeyError, ValueError) as exc:
+        print(f"[market_client] get_bid_depth_usd parse failed for token {market_token_id}: {exc}")
+        return None
+
+
 def get_order_book(market_token_id: str, timeout: int = 10) -> Optional[dict]:
     """
     Fetch the full order book (bids/asks with sizes) for one outcome

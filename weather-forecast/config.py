@@ -2157,6 +2157,26 @@ MAX_POSITION_USD = 150.0
 # execution mode: gapping defeats a stop as thoroughly as the absence of one,
 # so the live book carries the same tail, and a ceiling only ever reduces
 # size. Raising EXPENSIVE_ENTRY_PRICE to 1.01 disables it.
+# Fetch BID-side order-book depth on the exit-monitoring path and record it
+# alongside the bid (see clients/market_client.get_bid_depth_usd).
+#
+# WHY IT IS A TOGGLE. It is a genuinely NEW network call, not a ride-along:
+# the exit path reads a top-of-book quote (/price?side=buy), which carries no
+# sizes, so depth needs the full book. Cost is one fetch per OPEN POSITION per
+# monitor cycle -- roughly 2,200/day against the ~24,500 quote fetches the
+# collector already makes, so about +10%, and it lands inside the loop that
+# carries every open position's exit decision. If it ever costs latency or
+# rate limit, this switches it off without a deploy of new code.
+#
+# WHY IT IS WORTH THE CALL. Every depth figure this system has is ASK-side
+# (get_available_depth_usd), captured to size ENTRIES, which buy. An exit
+# sells into BIDS, and no bid-side depth has ever been recorded anywhere. That
+# is what stopped the per-position loss cap being decided on 2026-09-02: the
+# quote series can say when a rule would fire and at what quote, but not what
+# a $30 sale actually clears at. This is the missing input, and it is
+# FORWARD-LOOKING ONLY -- no historical row can be backfilled.
+CAPTURE_EXIT_BID_DEPTH = True
+
 EXPENSIVE_ENTRY_PRICE = 0.55
 MAX_POSITION_USD_EXPENSIVE = 30.0
 

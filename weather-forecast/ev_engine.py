@@ -597,6 +597,7 @@ def capture_exit_snapshot(
     token_id: str,
     bid_price: float,
     fidelity_min: int,
+    bid_depth_usd: Optional[float] = None,
 ) -> None:
     """
     Capture ONE already-fetched bid from the exit path (position_manager).
@@ -616,6 +617,10 @@ def capture_exit_snapshot(
 
     The consequence is deliberate and must not be papered over: these rows
     cover only HELD buckets, and carry ask_price=None and depth_usd=None.
+    `bid_depth_usd` is the ONE thing this path now records that the entry
+    scan does not: BID-side depth, what a sale of this position could clear
+    into. depth_usd stays None because it is the ASK side and an exit never
+    touches it -- see price_store.save_snapshot() on the two columns.
     That is the honest shape of "one bid, nothing else" -- see
     price_store.save_snapshot() on why NULL means "not captured" rather than
     zero, and price_store.EXIT_SNAPSHOT_SOURCE for the coverage gap this
@@ -660,6 +665,7 @@ def capture_exit_snapshot(
             price=bid_price,
             ask_price=None,
             depth_usd=None,
+            bid_depth_usd=bid_depth_usd,
             source=price_store.EXIT_SNAPSHOT_SOURCE,
             fidelity_min=int(fidelity_min),
         )
