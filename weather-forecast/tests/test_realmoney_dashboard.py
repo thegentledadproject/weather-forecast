@@ -1235,3 +1235,67 @@ def test_render_ev_does_not_flag_a_current_snapshot(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "local_today", lambda station=None: dt.date(2026, 8, 26))
     out = gen.render_ev(["WSSS"], bar=0.15, warnings=[])
     assert "badge stale" not in out
+
+
+# --- model vs market panel ---------------------------------------------------
+# The three numbers an operator wants while the book is running -- measured
+# bias, the EV the engine is looking at now, and how the model has actually
+# scored against the market. The arithmetic is calibration_panel's (and
+# promotion_dossier's beneath it); what these pin is that the page ASKS for
+# it, for the right stations, and degrades per-station rather than losing
+# the card.
+
+
+def test_calibration_section_renders_the_live_stations(monkeypatch):
+    gen = load_gen()
+    import calibration_panel
+
+    asked = {}
+
+    def _rows(icaos, now=None, recent_days=14):
+        asked["icaos"] = list(icaos)
+        return ([{"icao": i, "bias": {"c": None, "n": None, "stderr": None},
+                  "ev": None, "alltime": None, "recent": None, "error": None}
+                 for i in icaos], [])
+
+    monkeypatch.setattr(calibration_panel, "station_rows", _rows)
+
+    warnings = []
+    out = gen.render_calibration(["WSSS", "RCSS"], warnings)
+
+    assert asked["icaos"] == ["WSSS", "RCSS"]
+    assert "WSSS" in out and "RCSS" in out
+
+
+def test_calibration_section_surfaces_its_own_warnings(monkeypatch):
+    """A station the panel could not read must reach the page's warning list,
+    not vanish into a row nobody reads."""
+    gen = load_gen()
+    import calibration_panel
+
+    monkeypatch.setattr(
+        calibration_panel, "station_rows",
+        lambda icaos, now=None, recent_days=14: ([], ["WSSS unreadable: boom"]),
+    )
+
+    warnings = []
+    gen.render_calibration(["WSSS"], warnings)
+
+    assert any("boom" in w for w in warnings)
+
+
+def test_main_includes_the_model_vs_market_card(tmp_path, monkeypatch, isolated_stores):
+    gen = load_gen()
+    import calibration_panel
+
+    monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "unknown")
+    monkeypatch.setattr(gen, "render_discovery", lambda icaos, warnings: "<div>stub</div>")
+    monkeypatch.setattr(
+        calibration_panel, "station_rows",
+        lambda icaos, now=None, recent_days=14: ([], []),
+    )
+
+    out = tmp_path / "realmoney.html"
+    assert gen.main(["--out", str(out)]) == 0
+
+    assert "Model vs market" in out.read_text(encoding="utf-8")

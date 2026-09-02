@@ -868,6 +868,29 @@ def render_discovery(icaos, warnings):
 # worst thing this codebase can produce -- so an order that was built,
 # submitted and refused leaves no trace outside the process log and this
 # table. Nothing rendered it before this page.
+def render_calibration(icaos, warnings, now=None):
+    """
+    The model-vs-market panel: measured bias, the EV the engine is looking at
+    right now, and the Brier pair with its paired gap, all time and over the
+    recent window.
+
+    THE ARITHMETIC IS DELIBERATELY NOT HERE. calibration_panel calls
+    promotion_dossier, which is the module the promotion decision itself uses
+    -- so this page and that decision cannot drift into two definitions of
+    "beats the market". This function only asks and renders.
+
+    Panel warnings are lifted into the page's warning list rather than left
+    in the rows: a station whose history could not be read shows a row saying
+    so AND is named at the top of the page, because a per-row "unreadable" is
+    exactly the kind of thing a reader's eye slides past.
+    """
+    import calibration_panel
+
+    rows, panel_warnings = calibration_panel.station_rows(icaos, now=now)
+    warnings.extend(panel_warnings)
+    return calibration_panel.render_table_html(rows)
+
+
 def render_orders(limit, warnings):
     import config
     import storage
@@ -1054,6 +1077,15 @@ def main(argv=None):
         sections, warnings, "Edge and EV",
         ev_caption,
         lambda: render_ev(icaos, bar, warnings),
+    )
+    _section(
+        sections, warnings, "Model vs market",
+        "What the model has actually been worth, per station. Positive gap means the model "
+        "scored better than the market on those entries; <b>n_days is the honest ceiling</b> "
+        "&mdash; entries taken on one station-day settle off one draw of the weather, so n "
+        "overstates the evidence. A gap in bold clears twice its own standard error; that is "
+        "not a verdict, and nothing here recommends a promotion.",
+        lambda: render_calibration(icaos, warnings, now=now_utc),
     )
     _section(
         sections, warnings, "Order activity",
