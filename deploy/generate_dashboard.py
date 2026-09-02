@@ -527,6 +527,29 @@ except Exception as exc:  # noqa: BLE001
     warnings.append(f"EV card failed: {exc}")
     ev_html, ev_cap = "<div class='empty'>EV view unavailable</div>", ""
 
+# --- model vs market panel ---------------------------------------------------
+# Measured bias, the EV the engine is looking at right now, and how the model
+# has actually scored against the market -- per station, for THIS region only.
+#
+# The arithmetic belongs to calibration_panel, which calls promotion_dossier:
+# the same module the promotion decision itself reads, so this page cannot
+# drift into a second definition of "beats the market". This block only asks.
+try:
+    import calibration_panel
+
+    calib_rows, calib_warnings = calibration_panel.station_rows(REGION_STATIONS)
+    warnings.extend(calib_warnings)
+    calib_html = calibration_panel.render_table_html(calib_rows)
+    calib_cap = (
+        "positive gap means the model scored better than the market on those entries "
+        "&middot; <b>n_days is the honest ceiling</b> &mdash; entries taken on one "
+        "station-day settle off one draw of the weather, so n overstates the evidence "
+        "&middot; a gap in bold clears twice its own standard error, which is not a verdict"
+    )
+except Exception as exc:  # noqa: BLE001
+    warnings.append(f"model-vs-market card failed: {exc}")
+    calib_html, calib_cap = "<div class='empty'>model vs market unavailable</div>", ""
+
 # --- positions detail table --------------------------------------------------
 def status_label(status):
     """Map a position status string to (label, css class), tolerant of the
@@ -1492,6 +1515,12 @@ page = """<!doctype html>
   </div>
 
   <div class="card">
+    <h2>Model vs market</h2>
+    <p class="cap">@@CALIBCAP@@</p>
+    @@CALIBCARD@@
+  </div>
+
+  <div class="card">
     <h2>Paper positions</h2>
     <p class="cap">@@POSCAP@@</p>
     @@POSTABLE@@
@@ -1564,6 +1593,8 @@ page = (
     .replace("@@PROBES@@", probes_html)
     .replace("@@EVCAP@@", ev_cap)
     .replace("@@EVCARD@@", ev_html)
+    .replace("@@CALIBCAP@@", calib_cap)
+    .replace("@@CALIBCARD@@", calib_html)
     .replace("@@POSCAP@@", positions_cap)
     .replace("@@POSTABLE@@", positions_html)
     .replace("@@MODEPILL@@", mode_pill)
