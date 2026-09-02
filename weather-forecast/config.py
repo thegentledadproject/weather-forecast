@@ -885,10 +885,11 @@ STATIONS = {
         lat=43.67611,
         lon=-79.63056,
         wunderground_slug="ca/mississauga/CYYZ",
-        long_term_normal_max_c=25.0,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (20-30) as read in AUGUST 2026, NOT
-                                       # a sourced Environment and Climate
-                                       # Change Canada 1991-2020 normal.
+        long_term_normal_max_c=30.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (25-35) as read in SEPTEMBER 2026,
+                                       # NOT a sourced Environment and
+                                       # Climate Change Canada 1991-2020
+                                       # normal.
         official_client_key="wwis",
         # Province-qualified string required -- WWIS lists this city as
         # "Toronto, Ontario", not bare "Toronto"; wwis.py's lookup is
@@ -898,8 +899,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/Toronto",
         utc_offset_hours=-5,
-        bucket_min_c=20,
-        bucket_max_c=30,
+        bucket_min_c=25,
+        bucket_max_c=35,
         bucket_unit="C",
         bucket_step=1,
         metar_ingest_mode="resolution",
@@ -912,9 +913,9 @@ STATIONS = {
         lat=19.43611,
         lon=-99.07194,
         wunderground_slug="mx/mexico-city/MMMX",
-        long_term_normal_max_c=24.0,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (19-29) as read in AUGUST 2026, NOT
-                                       # a sourced SMN (Servicio
+        long_term_normal_max_c=21.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (16-26) as read in SEPTEMBER 2026,
+                                       # NOT a sourced SMN (Servicio
                                        # Meteorologico Nacional) 1991-2020
                                        # normal.
         official_client_key="wwis",
@@ -927,8 +928,8 @@ STATIONS = {
                               # directly against tzdata (flat -6 year-round
                               # from 2024 onward).
         utc_offset_hours=-6,
-        bucket_min_c=19,
-        bucket_max_c=29,
+        bucket_min_c=16,
+        bucket_max_c=26,
         bucket_unit="C",
         bucket_step=1,
         metar_ingest_mode="resolution",
@@ -941,28 +942,32 @@ STATIONS = {
         lat=-23.43556,
         lon=-46.47306,
         wunderground_slug="br/guarulhos/SBGR",
-        long_term_normal_max_c=29.0,  # PLACEHOLDER -- midpoint of the live
-                                       # bucket window (24-34) as read in
-                                       # AUGUST 2026, which is
+        long_term_normal_max_c=19.0,  # PLACEHOLDER -- midpoint of the live
+                                       # bucket window (14-24) as read in
+                                       # SEPTEMBER 2026, which is
                                        # SOUTHERN-HEMISPHERE WINTER. NOT a
-                                       # year-round normal -- flagged
-                                       # explicitly in the research doc as
-                                       # an unusually warm window for
-                                       # Sao Paulo winter (real winter
-                                       # daily-max normals run closer to
-                                       # 22-23C). Sao Paulo's annual swing
+                                       # year-round normal. The AUGUST 2026
+                                       # window (24-34, normal 29.0) was
+                                       # flagged in the research doc as an
+                                       # unusually warm reading for Sao
+                                       # Paulo winter and explicitly warned
+                                       # not to be treated as a stable
+                                       # seasonal figure -- that warning was
+                                       # VINDICATED: by SEPTEMBER 2026 the
+                                       # live window had dropped a full 10C,
+                                       # to 14-24. Sao Paulo's annual swing
                                        # is larger than any previously
                                        # registered city's; do NOT treat
-                                       # 29.0 as a stable seasonal figure or
-                                       # reuse it once seasons turn.
+                                       # 19.0 as a stable seasonal figure or
+                                       # reuse it once seasons turn again.
         official_client_key="wwis",
         wwis_city_name="Sao Paulo",
         polymarket_city_slug="sao-paulo",
         region="americas",
         iana_timezone=None,  # Brazil abolished DST in 2019 -- verified
         utc_offset_hours=-3,
-        bucket_min_c=24,
-        bucket_max_c=34,
+        bucket_min_c=14,
+        bucket_max_c=24,
         bucket_unit="C",
         bucket_step=1,
         metar_ingest_mode="resolution",
@@ -975,8 +980,8 @@ STATIONS = {
         lat=-34.82222,
         lon=-58.53583,
         wunderground_slug="ar/ezeiza/SAEZ",
-        long_term_normal_max_c=19.0,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (14-24) as read in AUGUST 2026
+        long_term_normal_max_c=21.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (16-26) as read in SEPTEMBER 2026
                                        # (Southern-Hemisphere winter). Not a
                                        # sourced SMN (Servicio Meteorologico
                                        # Nacional) 1991-2020 normal, though
@@ -993,8 +998,8 @@ STATIONS = {
                               # offset-unchanged and does not apply to any
                               # date this codebase ever resolves) -- verified
         utc_offset_hours=-3,
-        bucket_min_c=14,
-        bucket_max_c=24,
+        bucket_min_c=16,
+        bucket_max_c=26,
         bucket_unit="C",
         bucket_step=1,
         metar_ingest_mode="resolution",
@@ -1045,20 +1050,21 @@ STATIONS = {
         lat=40.775,
         lon=-73.875,
         wunderground_slug="us/ny/east-elmhurst/KLGA",
-        long_term_normal_max_c=26.7,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (70-90F = 80F) as read in AUGUST
+        long_term_normal_max_c=25.6,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (68-88F = 78F) as read in SEPTEMBER
                                        # 2026, NOT a sourced NWS 1991-2020
-                                       # normal (the CLI report for this
-                                       # exact station/date gives 83F/28.3C
-                                       # as a cross-check only).
+                                       # normal (the CLI report sampled in
+                                       # AUGUST 2026 for this station gave
+                                       # 83F/28.3C as a cross-check only,
+                                       # not repeated for this reading).
         official_client_key="wwis",
         wwis_city_name="New York City, New York",
         polymarket_city_slug="nyc",
         region="americas",
         iana_timezone="America/New_York",
         utc_offset_hours=-5,
-        bucket_min_c=70,
-        bucket_max_c=90,
+        bucket_min_c=68,
+        bucket_max_c=88,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
@@ -1072,8 +1078,8 @@ STATIONS = {
         lat=33.63667,
         lon=-84.42806,
         wunderground_slug="us/ga/atlanta/KATL",
-        long_term_normal_max_c=32.2,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (80-100F = 90F) as read in AUGUST
+        long_term_normal_max_c=34.4,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (84-104F = 94F) as read in SEPTEMBER
                                        # 2026, NOT a sourced normal.
         official_client_key="wwis",
         wwis_city_name="Atlanta, Georgia",
@@ -1081,8 +1087,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/New_York",
         utc_offset_hours=-5,
-        bucket_min_c=80,
-        bucket_max_c=100,
+        bucket_min_c=84,
+        bucket_max_c=104,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
@@ -1120,8 +1126,8 @@ STATIONS = {
         lat=41.97861,
         lon=-87.90472,
         wunderground_slug="us/il/chicago/KORD",
-        long_term_normal_max_c=28.9,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (74-94F = 84F) as read in AUGUST
+        long_term_normal_max_c=33.3,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (82-102F = 92F) as read in SEPTEMBER
                                        # 2026, NOT a sourced normal.
         official_client_key="wwis",
         wwis_city_name="Chicago, Illinois",
@@ -1129,8 +1135,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/Chicago",
         utc_offset_hours=-6,
-        bucket_min_c=74,
-        bucket_max_c=94,
+        bucket_min_c=82,
+        bucket_max_c=102,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
@@ -1144,8 +1150,8 @@ STATIONS = {
         lat=29.64556,
         lon=-95.27889,
         wunderground_slug="us/tx/houston/KHOU",
-        long_term_normal_max_c=32.2,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (80-100F = 90F) as read in AUGUST
+        long_term_normal_max_c=31.1,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (78-98F = 88F) as read in SEPTEMBER
                                        # 2026, NOT a sourced normal.
         official_client_key="wwis",
         wwis_city_name="Houston, Texas",
@@ -1153,8 +1159,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/Chicago",
         utc_offset_hours=-6,
-        bucket_min_c=80,
-        bucket_max_c=100,
+        bucket_min_c=78,
+        bucket_max_c=98,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
@@ -1168,10 +1174,12 @@ STATIONS = {
         lat=32.84722,
         lon=-96.85167,
         wunderground_slug="us/tx/dallas/KDAL",
-        long_term_normal_max_c=37.8,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (90-110F = 100F) as read in AUGUST
-                                       # 2026 DURING A LIVE TEXAS HEAT EVENT
-                                       # -- not a stable seasonal normal, do
+        long_term_normal_max_c=35.6,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (86-106F = 96F) as read in SEPTEMBER
+                                       # 2026, still warm from the AUGUST
+                                       # 2026 LIVE TEXAS HEAT EVENT this
+                                       # window was originally read during --
+                                       # not a stable seasonal normal, do
                                        # not reuse once the event passes.
         official_client_key="wwis",
         # WWIS lists this city as "Dallas Ft Worth, Texas" -- no bare
@@ -1182,8 +1190,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/Chicago",
         utc_offset_hours=-6,
-        bucket_min_c=90,
-        bucket_max_c=110,
+        bucket_min_c=86,
+        bucket_max_c=106,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
@@ -1197,10 +1205,12 @@ STATIONS = {
         lat=30.19444,
         lon=-97.67000,
         wunderground_slug="us/tx/austin/KAUS",
-        long_term_normal_max_c=37.8,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (90-110F = 100F) as read in AUGUST
-                                       # 2026 DURING A LIVE TEXAS HEAT EVENT
-                                       # -- not a stable seasonal normal, do
+        long_term_normal_max_c=35.6,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (86-106F = 96F) as read in SEPTEMBER
+                                       # 2026, still warm from the AUGUST
+                                       # 2026 LIVE TEXAS HEAT EVENT this
+                                       # window was originally read during --
+                                       # not a stable seasonal normal, do
                                        # not reuse once the event passes.
         official_client_key="wwis",
         wwis_city_name="Austin, Texas",
@@ -1208,8 +1218,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/Chicago",
         utc_offset_hours=-6,
-        bucket_min_c=90,
-        bucket_max_c=110,
+        bucket_min_c=86,
+        bucket_max_c=106,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
@@ -1223,8 +1233,8 @@ STATIONS = {
         lat=39.70167,
         lon=-104.75167,
         wunderground_slug="us/co/aurora/KBKF",
-        long_term_normal_max_c=33.3,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (82-102F = 92F) as read in AUGUST
+        long_term_normal_max_c=27.8,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (72-92F = 82F) as read in SEPTEMBER
                                        # 2026, NOT a sourced normal.
         official_client_key="wwis",
         # WWIS lists this city as "Denver, Colorado" -- the market's own
@@ -1236,8 +1246,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/Denver",
         utc_offset_hours=-7,
-        bucket_min_c=82,
-        bucket_max_c=102,
+        bucket_min_c=72,
+        bucket_max_c=92,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
@@ -1251,8 +1261,8 @@ STATIONS = {
         lat=33.94250,
         lon=-118.40806,
         wunderground_slug="us/ca/los-angeles/KLAX",
-        long_term_normal_max_c=31.1,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (78-98F = 88F) as read in AUGUST
+        long_term_normal_max_c=23.3,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (64-84F = 74F) as read in SEPTEMBER
                                        # 2026, NOT a sourced normal.
         official_client_key="wwis",
         wwis_city_name="Los Angeles, California",
@@ -1260,8 +1270,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/Los_Angeles",
         utc_offset_hours=-8,
-        bucket_min_c=78,
-        bucket_max_c=98,
+        bucket_min_c=64,
+        bucket_max_c=84,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
@@ -1275,8 +1285,8 @@ STATIONS = {
         lat=37.61889,
         lon=-122.37500,
         wunderground_slug="us/ca/san-francisco/KSFO",
-        long_term_normal_max_c=18.9,  # PLACEHOLDER -- bucket-window midpoint
-                                       # (56-76F = 66F) as read in AUGUST
+        long_term_normal_max_c=20.0,  # PLACEHOLDER -- bucket-window midpoint
+                                       # (58-78F = 68F) as read in SEPTEMBER
                                        # 2026 -- San Francisco's ordinary
                                        # cool marine-layer summer, not an
                                        # anomaly.
@@ -1286,8 +1296,8 @@ STATIONS = {
         region="americas",
         iana_timezone="America/Los_Angeles",
         utc_offset_hours=-8,
-        bucket_min_c=56,
-        bucket_max_c=76,
+        bucket_min_c=58,
+        bucket_max_c=78,
         bucket_unit="F",
         bucket_step=2,
         expected_metar_reports_per_day=24,
