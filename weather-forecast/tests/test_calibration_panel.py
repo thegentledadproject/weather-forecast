@@ -189,6 +189,56 @@ class TestTheEVCell:
         assert rows[0]["ev"] is not None
         assert rows[0]["ev"]["net_ev"] is None
 
+    def test_a_sub_screen_price_is_not_offered_as_the_best_ev(self, stub, tmp_path):
+        """
+        net EV divides raw edge by price, so a near-zero price turns any
+        stale-model disagreement into a "+21,517% EV" phantom. The trading
+        path screens those out (config.EV_MIN_PRICE_SCREEN) and both EV
+        cards already mirror the screen; a third view that skips it puts the
+        phantoms back on the page, which is what shipped on 2026-09-02.
+        """
+        _write_snapshot(tmp_path, "WSSS", NOW.isoformat(), [
+            {"bucket_c": 31, "side": "YES", "market_price": 0.001,
+             "raw_edge": 0.20, "net_ev_per_dollar": 215.17},
+            {"bucket_c": 33, "side": "YES", "market_price": 0.44,
+             "raw_edge": 0.09, "net_ev_per_dollar": 0.18},
+        ])
+
+        rows, _ = calibration_panel.station_rows(["WSSS"], now=NOW)
+
+        assert rows[0]["ev"]["bucket_c"] == 33, (
+            "the panel offered a sub-screen price as this station's best EV"
+        )
+        assert rows[0]["ev"]["net_ev"] == pytest.approx(0.18)
+
+    def test_an_implausible_edge_is_not_offered_either(self, stub, tmp_path):
+        """The other half of the same screen: an edge bigger than the price
+        leaves room for is a stale model, not an opportunity."""
+        _write_snapshot(tmp_path, "WSSS", NOW.isoformat(), [
+            {"bucket_c": 31, "side": "YES", "market_price": 0.92,
+             "raw_edge": 0.60, "net_ev_per_dollar": 4.10},
+            {"bucket_c": 33, "side": "YES", "market_price": 0.44,
+             "raw_edge": 0.09, "net_ev_per_dollar": 0.18},
+        ])
+
+        rows, _ = calibration_panel.station_rows(["WSSS"], now=NOW)
+
+        assert rows[0]["ev"]["bucket_c"] == 33
+
+    def test_a_snapshot_of_only_phantoms_prices_nothing(self, stub, tmp_path):
+        _write_snapshot(tmp_path, "WSSS", NOW.isoformat(), [
+            {"bucket_c": 31, "side": "YES", "market_price": 0.001,
+             "raw_edge": 0.20, "net_ev_per_dollar": 215.17},
+        ])
+
+        rows, _ = calibration_panel.station_rows(["WSSS"], now=NOW)
+
+        assert rows[0]["ev"] is not None
+        assert rows[0]["ev"]["net_ev"] is None, (
+            "a snapshot containing nothing but screened-out rows must read as "
+            "'nothing priced', not as a phantom"
+        )
+
     def test_no_snapshot_at_all_is_none(self, stub):
         rows, _ = calibration_panel.station_rows(["WSSS"], now=NOW)
 

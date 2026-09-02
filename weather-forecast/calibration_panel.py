@@ -82,6 +82,41 @@ def _bias(station_icao: str) -> dict:
     return {"c": bias_c, "n": n, "stderr": stderr}
 
 
+def _tradeable(row: dict) -> bool:
+    """
+    Whether an EV row is a candidate the entry path would even look at.
+
+    NET EV DIVIDES RAW EDGE BY PRICE, so a near-zero price turns any stale
+    model disagreement into a "+21,517% EV" phantom. The trading screen
+    drops those (config.EV_MIN_PRICE_SCREEN) and so does the EV card on
+    every page -- a comment in generate_dashboard.py records that the page
+    once ranked exactly those phantoms at the top of its table.
+
+    This panel shipped without the screen on 2026-09-02 and put them
+    straight back, on three pages, in a column headed "Best net EV now".
+    The screens live in config for this reason: the dashboard keeping its
+    own idea of what counts as an opportunity is a mistake this codebase
+    has now made three times.
+
+    A row with no price recorded is KEPT -- an older snapshot predates the
+    field, and screening on a value that was never written would silently
+    empty the column rather than report what the engine computed.
+    """
+    if row.get("net_ev_per_dollar") is None:
+        return False
+
+    price = row.get("market_price")
+    if price is not None and price < config.EV_MIN_PRICE_SCREEN:
+        return False
+
+    edge = row.get("raw_edge")
+    if edge is not None and price is not None:
+        if abs(edge) > config.max_plausible_edge_for(price):
+            return False
+
+    return True
+
+
 def _ev(station_icao: str, now: datetime) -> Optional[dict]:
     """
     The best net-EV row in this station's latest EV snapshot, and how old
@@ -112,7 +147,7 @@ def _ev(station_icao: str, now: datetime) -> Optional[dict]:
             age_s = None
 
     results = payload.get("results") or []
-    priced = [r for r in results if r.get("net_ev_per_dollar") is not None]
+    priced = [r for r in results if _tradeable(r)]
     best = max(priced, key=lambda r: r["net_ev_per_dollar"]) if priced else None
 
     return {
