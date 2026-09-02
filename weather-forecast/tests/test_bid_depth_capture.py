@@ -65,15 +65,29 @@ def test_reads_the_bid_side_not_the_ask(monkeypatch):
     assert market_client.get_bid_depth_usd("tok") == pytest.approx(5.0)
 
 
-def test_no_book_or_no_bids_is_unknown_not_zero(monkeypatch):
+def test_an_unfetchable_book_is_unknown():
+    """None means "not captured". price_store stores NULL."""
+    import pytest as _p
+    from clients import market_client as mc
+    orig = mc.get_order_book
+    mc.get_order_book = lambda *a, **k: None
+    try:
+        assert mc.get_bid_depth_usd("tok") is None
+    finally:
+        mc.get_order_book = orig
+
+
+def test_a_fetched_book_with_no_bids_is_zero_not_unknown(monkeypatch):
     """
-    Same contract as the ask-side function: None means "not captured", and
-    callers must not read it as an empty book. price_store stores NULL.
+    THE DISTINCTION THE ASK-SIDE FUNCTION DOES NOT MAKE, and the reason this
+    one is not a copy of it. Probed live 2026-09-02: nine of eleven open
+    positions had an empty bid side -- nobody to sell to at any price. That
+    is a FACT about the market and the most important input an exit study
+    has. NULL would make it indistinguishable from capture being off.
     """
-    monkeypatch.setattr(market_client, "get_order_book", lambda *a, **k: None)
-    assert market_client.get_bid_depth_usd("tok") is None
-    monkeypatch.setattr(market_client, "get_order_book", lambda *a, **k: _book(bids=[], asks=[(0.5, 10)]))
-    assert market_client.get_bid_depth_usd("tok") is None
+    monkeypatch.setattr(market_client, "get_order_book",
+                        lambda *a, **k: _book(bids=[], asks=[(0.5, 10)]))
+    assert market_client.get_bid_depth_usd("tok") == 0.0
 
 
 def test_a_malformed_book_returns_none_rather_than_raising(monkeypatch):

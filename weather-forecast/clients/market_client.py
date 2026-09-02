@@ -261,14 +261,32 @@ def get_bid_depth_usd(market_token_id: str, max_price_impact_pct: float = 0.10, 
     function runs upward, for the same reason: a seller's price moves against
     them as they consume bids.
 
-    Returns None if the book is unavailable or carries no bids -- "unknown
-    depth", never "zero depth". price_store records that as NULL and
-    fill_model charges the live fallback slippage for it, exactly as it does
-    for an unknown ask book.
+    THE TWO EMPTY CASES ARE NOT THE SAME, and this function is deliberately
+    stricter than its ask-side sibling about the difference:
+
+      - book could not be fetched  -> None. Unknown. Stored NULL.
+      - book fetched, no bids      -> 0.0. KNOWN, and the most important
+                                      fact an exit study can record: there
+                                      was nobody to sell to at any price.
+
+    get_available_depth_usd() collapses both to None, which is right for an
+    ENTRY -- a missing ask book and an empty one both mean "do not size
+    against this". For an EXIT the distinction is the whole question. Probed
+    live 2026-09-02 at 22:30 local: NINE of eleven open positions had a
+    completely empty bid side, quoted 0.0, and could not have been sold at
+    any price by any rule. Recording that as NULL would make it
+    indistinguishable from capture being switched off, and would let a future
+    sweep read "no data" where the truth is "no market".
+
+    fill_model.slippage() treats 0.0 and None the same (both charge the
+    fallback), so this changes what is RECORDED rather than what is modelled
+    -- which is the point: the record is what a later study reads.
     """
     book = get_order_book(market_token_id, timeout=timeout)
-    if not book or "bids" not in book or not book["bids"]:
+    if not book or "bids" not in book:
         return None
+    if not book["bids"]:
+        return 0.0
 
     try:
         bids = sorted(book["bids"], key=lambda level: float(level["price"]), reverse=True)
