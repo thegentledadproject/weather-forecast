@@ -2102,6 +2102,78 @@ MIN_KELLY_DENOMINATOR = 0.20
 # bankroll on one bucket of one station's market.
 MAX_POSITION_USD = 150.0
 
+# A LOWER per-trade ceiling for expensive entries, and the price at which it
+# takes over from MAX_POSITION_USD above.
+#
+# WHY. With HOLD_TO_SETTLEMENT_MODES on, a paper position has no stop and its
+# maximum loss is the whole stake. The dollars sit exactly where that hurts:
+# mean position size runs $2.89 in the 0.00-0.15 band against $17.55 at 0.55+,
+# because Kelly sizes up as an edge gets cheaper to express. Measured over the
+# 513 closed positions with a recorded settlement, seven of the positions at
+# size >= $20 and entry >= 0.55 lost, six of them for the full stake.
+#
+# WHY A CEILING RATHER THAN A LOSS CAP. A price-triggered per-position loss
+# cap was measured first, over 80 (cap distance, min size, min price) cells,
+# and REJECTED: its sign is decided by the fill assumption, not by the data.
+# Assume a cap always fills at its trigger and the best cell is +$146 over
+# holding (76 of 80 cells positive); assume it fills at the lowest quote the
+# record can PROVE existed and the same cell is -$75 (45 of 80 positive). The
+# regime that triggers a loss cap is the gapping regime, which is exactly when
+# the optimistic assumption fails -- WMKK 2026-08-07 b35 NO @0.750 had its
+# stop trigger at 0.675 and filled at 0.060, a 92% loss on a "30%" stop. The
+# price history cannot narrow it: the snapshot series covers a MEDIAN 25% of
+# each position's hold window, and 365 of 514 positions under half. A ceiling
+# needs neither a price path nor a fill. It acts at entry, where gapping
+# cannot reach it.
+#
+# WHAT IT COSTS. The capped cohort is PROFITABLE held: +$49 over the 27
+# positions at size >= $20 and entry >= 0.55, +$147 at entry >= 0.50. This
+# buys a smaller worst case at a cost in expectation. It is a variance
+# choice, not a measured improvement, and it should not be defended as one.
+#
+# THE VALUE. $30 is 3% of BANKROLL_USD. It is NOT free on the record, and the
+# first draft of this comment wrongly said it was: three positions exceed it,
+# all WSSS in the first week of August, and capping them costs -$33.14
+# (+$52.06 actual -> +$18.93).
+#
+#   WSSS 2026-08-04 b33 NO  @0.580 $78.51 take_profit  +52.79 -> +20.17
+#   WSSS 2026-08-06 b32 YES @0.560 $64.26 take_profit  +18.36 ->  +8.57
+#   WSSS 2026-08-03 b33 NO  @0.550 $58.33 stop_loss    -19.09 ->  -9.82
+#
+# Read that cost with its regime attached: two of the three are TAKE-PROFIT
+# exits, and the paper book no longer has a take-profit. Scored on holding
+# instead, the one of the three with a recorded settlement (08-06, a winner)
+# costs -$26.92 rather than -$9.79. So the honest summary is that this
+# ceiling costs real money on the record and buys a bounded worst case with
+# it -- exactly the trade named above, priced.
+#
+# What it bounds is the future. MAX_POSITION_USD permits $150; the largest
+# expensive-side position yet opened is $78.51, and with no stop that is a
+# $78.51 single-trade loss already. Set this to 80.0 for a ceiling that
+# bounds the future without pruning any of the past.
+#
+# 0.55 is where the old stop's precision collapsed to 38% (config carries that
+# table above) and where mean position size steps up. GLOBAL, not keyed on
+# execution mode: gapping defeats a stop as thoroughly as the absence of one,
+# so the live book carries the same tail, and a ceiling only ever reduces
+# size. Raising EXPENSIVE_ENTRY_PRICE to 1.01 disables it.
+EXPENSIVE_ENTRY_PRICE = 0.55
+MAX_POSITION_USD_EXPENSIVE = 30.0
+
+
+def max_position_usd(entry_price=None) -> float:
+    """
+    The hard per-trade ceiling for an entry at this price.
+
+    None means no quote was supplied (manual_trigger, and any future caller
+    without one) and returns the FULL ceiling: falling back to the lower one
+    would silently shrink every such trade, while this leaves behaviour
+    exactly as it was before this function existed.
+    """
+    if entry_price is not None and entry_price >= EXPENSIVE_ENTRY_PRICE:
+        return MAX_POSITION_USD_EXPENSIVE
+    return MAX_POSITION_USD
+
 # --- Real-money execution (executor.py, clients/wallet_client.py) ----------
 # Everything below governs the ONLY path in this codebase that can spend real
 # funds. Read the mode ladder in executor.py before changing any of it.

@@ -309,7 +309,10 @@ def evaluate_entry_sim(
     bankroll_sized_usd = kelly_applied * sizing_bankroll
 
     # Cap 1: hard per-trade ceiling
-    size_usd = min(bankroll_sized_usd, config.MAX_POSITION_USD)
+    # Same ceiling as entry_manager, through the same helper -- a replay that
+    # sized expensive entries larger than live would report P&L the live book
+    # could not have made.
+    size_usd = min(bankroll_sized_usd, config.max_position_usd(ev.market_price))
 
     # Cap 2: station maturity -- exploratory stations sized down hard
     if maturity == "exploratory":

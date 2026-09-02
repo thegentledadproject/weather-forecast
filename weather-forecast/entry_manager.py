@@ -878,8 +878,11 @@ def evaluate_entry(
     # -- which is the intended state for a newly registered region.
     bankroll_sized_usd = kelly_applied * config.region_bankroll_usd(station_icao)
 
-    # Cap 1: hard per-trade ceiling
-    size_usd = min(bankroll_sized_usd, config.MAX_POSITION_USD)
+    # Cap 1: hard per-trade ceiling -- LOWER above config.EXPENSIVE_ENTRY_PRICE,
+    # where the position has no stop to bound its loss and Kelly sizes largest.
+    # See config.max_position_usd() for the measurement and for why this is a
+    # ceiling rather than the price-triggered loss cap that was tried first.
+    size_usd = min(bankroll_sized_usd, config.max_position_usd(ev_result.market_price))
 
     # Cap 2: station maturity -- exploratory stations sized down hard
     if maturity == "exploratory":
