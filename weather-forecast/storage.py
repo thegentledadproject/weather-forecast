@@ -21,7 +21,7 @@ from datetime import date, datetime, timezone
 from typing import Dict, List, Optional, Tuple
 
 import config
-from models import PointForecast, ObservedReading, Position
+from models import PointForecast, ObservedReading, Position, SettledToken
 
 
 @contextmanager
@@ -1023,10 +1023,10 @@ def load_open_positions(station_icao: Optional[str] = None, is_paper: Optional[b
     return [_row_to_position(r) for r in rows]
 
 
-def load_settled_live_tokens() -> Dict[str, Tuple[float, float]]:
+def load_settled_live_tokens() -> Dict[str, "SettledToken"]:
     """
-    token_id -> (size_shares, exit_price) for LIVE positions this database
-    closed as `closed_resolution`.
+    token_id -> SettledToken for LIVE positions this database closed as
+    `closed_resolution`.
 
     These are the holdings that legitimately outlive their position row.
     Nothing in this repo redeems -- executor.close_position() prints
@@ -1040,21 +1040,39 @@ def load_settled_live_tokens() -> Dict[str, Tuple[float, float]]:
     ONLY `closed_resolution`, deliberately. Every other closed status
     exited by SELLING, so shares still held there mean the sell did not
     happen -- a real divergence that must keep blocking entries. Widening
-    this query is how the backstop gets a hole in it.
+    this query is how the backstop gets a hole in it. This test is
+    unchanged from before the value grew a station identity -- see
+    tests/test_settled_token_identity.py, which re-asserts it against the
+    new return shape.
 
     exit_price is COALESCEd to 0.0: a NULL would propagate into the
     "uncollected money" arithmetic, and unknown is not the same as
     valuable. A row with no token_id is skipped rather than keyed on
     None -- paper rows and pre-token history both hit that case.
+
+    THE VALUE CARRIES STATION IDENTITY (station, target date, bucket,
+    side) alongside size and price -- added 2026-09-03 so every message
+    built from this map can name the position instead of a token-id
+    prefix. See models.SettledToken and the 2026-09-01 redemption design
+    doc's requirement 3. `size_shares` here is what the DATABASE expects;
+    callers that need the exchange-verified balance still read that
+    separately (reconciliation always did, and still does).
     """
     with _db() as conn:
         rows = conn.execute(
-            "SELECT token_id, size_shares, COALESCE(exit_price, 0.0) "
+            "SELECT token_id, station_icao, target_date, bucket_c, side, "
+            "size_shares, COALESCE(exit_price, 0.0) "
             "FROM positions "
             "WHERE status = 'closed_resolution' AND execution_mode = 'live' "
             "AND is_paper = 0 AND token_id IS NOT NULL"
         ).fetchall()
-    return {r[0]: (r[1] or 0.0, r[2]) for r in rows}
+    return {
+        r[0]: SettledToken(
+            station_icao=r[1], target_date=date.fromisoformat(r[2]),
+            bucket_c=r[3], side=r[4], size_shares=r[5] or 0.0, exit_price=r[6],
+        )
+        for r in rows
+    }
 
 
 def load_position_history(station_icao: str, limit: int = 100, is_paper: Optional[bool] = None) -> List[Position]:

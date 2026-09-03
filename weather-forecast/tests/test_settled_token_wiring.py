@@ -53,13 +53,12 @@ def _insert(storage, position_id, token_id, status, exit_price,
 
 
 class TestLoadSettledLiveTokens:
-    def test_a_closed_resolution_live_row_is_returned_with_shares_and_exit(self, db):
-        _insert(db, "WSSS:a", HELD_TOKEN, "closed_resolution", 0.0)
-        assert db.load_settled_live_tokens() == {HELD_TOKEN: (9.181817, 0.0)}
-
-    def test_a_winning_resolution_carries_its_exit_price(self, db):
-        _insert(db, "WSSS:w", HELD_TOKEN, "closed_resolution", 1.0, shares=5.0)
-        assert db.load_settled_live_tokens() == {HELD_TOKEN: (5.0, 1.0)}
+    """
+    The RETURN SHAPE moved to tests/test_settled_token_identity.py when the
+    value grew a station identity (models.SettledToken) -- this class keeps
+    only the filter-narrowness cases this file's docstring actually claims:
+    which rows get returned at all, not what shape the value takes.
+    """
 
     def test_a_stop_loss_row_is_not_returned(self, db):
         """The narrowness of the whitelist starts here, at the query."""
@@ -170,7 +169,7 @@ class TestPreflightSurfacesUncollectedWinnings:
 
     def test_an_unredeemed_winner_gets_a_preflight_line(self):
         lines = wallet_client.preflight(
-            settled_unredeemed=[("abc123def456789", 5.0, 1.0)],
+            settled_unredeemed=[("abc123def456789", 5.0, 1.0, "WSSS", None, 32, "NO")],
         )
         winner = [ln for ln in lines if "REDEEM" in ln.upper()]
         assert winner, f"no redemption line in preflight: {lines}"
@@ -178,7 +177,7 @@ class TestPreflightSurfacesUncollectedWinnings:
 
     def test_a_worthless_settled_holding_gets_no_preflight_line(self):
         lines = wallet_client.preflight(
-            settled_unredeemed=[("abc123def456789", 9.18, 0.0)],
+            settled_unredeemed=[("abc123def456789", 9.18, 0.0, "WSSS", None, 32, "NO")],
         )
         assert not [ln for ln in lines if "REDEEM" in ln.upper()]
 
@@ -195,3 +194,51 @@ class TestPreflightSurfacesUncollectedWinnings:
 
     def test_preflight_without_the_argument_is_unchanged(self):
         assert not [ln for ln in wallet_client.preflight() if "REDEEM" in ln.upper()]
+
+
+class TestStationIdentityInSettledMessages:
+    """
+    Requirement 3 of the 2026-09-01 redemption design: every place the
+    system says redemption is needed must name the position in human terms
+    -- "WSSS 2026-08-20 32°NO", not a token-id prefix that identifies
+    nothing to a human. Three of the design's four call sites live in this
+    module; the fourth (redeem.py --list) does not exist yet.
+    """
+
+    def _unredeemed(self, station="WSSS", target_date="2026-08-20", bucket_c=32,
+                     side="NO", held=5.0, exit_price=1.0):
+        from datetime import date
+        return (HELD_TOKEN, held, exit_price, station, date.fromisoformat(target_date),
+                bucket_c, side)
+
+    def test_preflight_names_the_station_not_just_the_token(self):
+        lines = wallet_client.preflight(settled_unredeemed=[self._unredeemed()])
+        winner = [ln for ln in lines if "REDEEM" in ln.upper()]
+        assert winner, f"no redemption line: {lines}"
+        assert "WSSS" in winner[0] and "2026-08-20" in winner[0]
+
+    def test_describe_settled_names_the_station(self):
+        r = wallet_client.Reconciliation(
+            ok=True, checked=True, settled_unredeemed=[self._unredeemed()],
+        )
+        assert "WSSS" in r.describe_settled()
+
+    def test_a_dust_item_with_a_known_station_names_it(self):
+        r = wallet_client.Reconciliation(
+            ok=True, checked=True,
+            dust=[(HELD_TOKEN, 0.001, "WSSS")],
+        )
+        assert "WSSS" in r.describe_dust()
+
+    def test_a_dust_item_with_no_db_record_says_so_rather_than_guessing(self):
+        """
+        Dust can come from a trade the database never recorded at all -- an
+        honest "unrecorded" beats fabricating a station for it.
+        """
+        r = wallet_client.Reconciliation(
+            ok=True, checked=True,
+            dust=[(HELD_TOKEN, 0.001, None)],
+        )
+        d = r.describe_dust()
+        assert "unrecorded" in d.lower()
+        assert "WSSS" not in d

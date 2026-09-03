@@ -35,11 +35,23 @@ sell did not fully happen -- a genuine divergence. Only a resolution close
 never involved a sell at all.
 """
 import logging
+from datetime import date
 
 import pytest
 
 import config
 from clients import wallet_client
+from models import SettledToken
+
+
+def _settled(shares, exit_price):
+    """
+    A settled-token record with a fixed identity. These tests are about
+    reconciliation (does it block, does it warn), not the human label --
+    the station/date/bucket/side values don't matter to any assertion here.
+    """
+    return SettledToken(station_icao="WSSS", target_date=date(2026, 8, 20),
+                         bucket_c=32, side="YES", size_shares=shares, exit_price=exit_price)
 
 
 class _FakeLib:
@@ -118,7 +130,7 @@ class TestASettledLoserDoesNotBlockEntries:
         recon = wired(
             balances={LOSER_TOKEN: LOSER_SHARES},
             trades=[LOSER_TOKEN],
-            settled_tokens={LOSER_TOKEN: (LOSER_SHARES, 0.0)},
+            settled_tokens={LOSER_TOKEN: _settled(LOSER_SHARES, 0.0)},
         )
         assert recon.ok, (
             "a token whose position row is closed_resolution is recorded and "
@@ -131,9 +143,9 @@ class TestASettledLoserDoesNotBlockEntries:
         recon = wired(
             balances={LOSER_TOKEN: LOSER_SHARES},
             trades=[LOSER_TOKEN],
-            settled_tokens={LOSER_TOKEN: (LOSER_SHARES, 0.0)},
+            settled_tokens={LOSER_TOKEN: _settled(LOSER_SHARES, 0.0)},
         )
-        assert [t for t, _, _ in recon.settled_unredeemed] == [LOSER_TOKEN], (
+        assert [t for t, *_ in recon.settled_unredeemed] == [LOSER_TOKEN], (
             "whitelisted is not the same as invisible -- the holding is real "
             "and must stay auditable"
         )
@@ -147,8 +159,8 @@ class TestASettledLoserDoesNotBlockEntries:
             },
             trades=[LOSER_TOKEN, SECOND_LOSER_TOKEN],
             settled_tokens={
-                LOSER_TOKEN: (LOSER_SHARES, 0.0),
-                SECOND_LOSER_TOKEN: (SECOND_LOSER_SHARES, 0.0),
+                LOSER_TOKEN: _settled(LOSER_SHARES, 0.0),
+                SECOND_LOSER_TOKEN: _settled(SECOND_LOSER_SHARES, 0.0),
             },
         )
         assert recon.ok
@@ -158,7 +170,7 @@ class TestASettledLoserDoesNotBlockEntries:
         recon = wired(
             balances={LOSER_TOKEN: LOSER_SHARES},
             trades=[LOSER_TOKEN],
-            settled_tokens={LOSER_TOKEN: (LOSER_SHARES, 0.0)},
+            settled_tokens={LOSER_TOKEN: _settled(LOSER_SHARES, 0.0)},
         )
         assert "settled" in recon.describe().lower()
 
@@ -175,7 +187,7 @@ class TestAnUnredeemedWinnerWarnsButDoesNotBlock:
         recon = wired(
             balances={LOSER_TOKEN: 5.0},
             trades=[LOSER_TOKEN],
-            settled_tokens={LOSER_TOKEN: (5.0, 1.0)},
+            settled_tokens={LOSER_TOKEN: _settled(5.0, 1.0)},
         )
         assert recon.ok
 
@@ -184,7 +196,7 @@ class TestAnUnredeemedWinnerWarnsButDoesNotBlock:
             wired(
                 balances={LOSER_TOKEN: 5.0},
                 trades=[LOSER_TOKEN],
-                settled_tokens={LOSER_TOKEN: (5.0, 1.0)},
+                settled_tokens={LOSER_TOKEN: _settled(5.0, 1.0)},
             )
         warnings = "\n".join(
             r.message for r in caplog.records if r.levelno >= logging.WARNING
@@ -200,7 +212,7 @@ class TestAnUnredeemedWinnerWarnsButDoesNotBlock:
             wired(
                 balances={LOSER_TOKEN: LOSER_SHARES},
                 trades=[LOSER_TOKEN],
-                settled_tokens={LOSER_TOKEN: (LOSER_SHARES, 0.0)},
+                settled_tokens={LOSER_TOKEN: _settled(LOSER_SHARES, 0.0)},
             )
         assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
@@ -227,7 +239,7 @@ class TestTheWhitelistStaysNarrow:
         recon = wired(
             balances={"deadbeef": 7.5},
             trades=["deadbeef"],
-            settled_tokens={LOSER_TOKEN: (LOSER_SHARES, 0.0)},
+            settled_tokens={LOSER_TOKEN: _settled(LOSER_SHARES, 0.0)},
         )
         assert not recon.ok
         assert [t for t, _ in recon.exchange_only] == ["deadbeef"]
@@ -237,7 +249,7 @@ class TestTheWhitelistStaysNarrow:
         recon = wired(
             balances={LOSER_TOKEN: 0.008885},
             trades=[LOSER_TOKEN],
-            settled_tokens={LOSER_TOKEN: (LOSER_SHARES, 0.0)},
+            settled_tokens={LOSER_TOKEN: _settled(LOSER_SHARES, 0.0)},
         )
         assert recon.ok
         assert recon.settled_unredeemed == []
@@ -251,7 +263,7 @@ class TestTheWhitelistStaysNarrow:
             balances={LOSER_TOKEN: 0.0},
             trades=[],
             open_positions=[_Pos("WSSS:open", LOSER_TOKEN, 5.0)],
-            settled_tokens={LOSER_TOKEN: (5.0, 0.0)},
+            settled_tokens={LOSER_TOKEN: _settled(5.0, 0.0)},
         )
         assert not recon.ok
         assert [t for t, _, _ in recon.db_only] == [LOSER_TOKEN]
