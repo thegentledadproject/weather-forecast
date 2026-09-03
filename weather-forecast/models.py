@@ -291,6 +291,22 @@ class Position:
                                        # reconciled against the exchange by hand. None in every non-live
                                        # mode.
 
+    # WHY THIS POSITION CANNOT BE SOLD, or None if it can.
+    #
+    # Set at FILL TIME, and only there. wallet_client._shares_at_worst_fill()
+    # already refuses to BUILD an order whose worst-case fill lands under the
+    # market's share minimum, which is the right place for a guard that can
+    # still say no. It cannot cover this case: the exchange decides what it
+    # actually fills, and a partial fill is a real holding whatever its size.
+    # WSSS on 2026-08-20 asked for 5.00 shares, got 4.891 against a 5-share
+    # minimum, and carried no working stop for the whole life of the position
+    # -- discovered on the first stop attempt, which is far too late.
+    #
+    # The position is STILL RECORDED when this is set. An unrecorded real
+    # holding is strictly worse than a flagged one: the flag is a fact about
+    # the exit path, not a reason to forget the shares exist.
+    exit_blocked_reason: Optional[str] = None
+
     # WHAT THE MODEL BELIEVED WHEN IT ENTERED. Recorded so a closed trade can
     # be scored against its own prediction rather than only against P&L.
     #
@@ -334,6 +350,18 @@ class ExitDecision:
     reason: str
     current_price: float
     pnl_pct: float             # unrealized P&L, as a fraction (0.25 = +25%)
+    # WHICH BASIS THE STOP MEASURED FROM -- risk_manager.stop_basis_price()'s
+    # label ("entry_bid" or "entry_ask_fallback"), set only on the
+    # reason="stop_loss" branch of evaluate_exit(). None everywhere else: a
+    # hold, a take-profit or a resolution never read stop_basis_price(), so
+    # there is no basis to report. NOT part of `reason` -- executor.py
+    # derives `status` as f"closed_{reason}" and config.py's
+    # COOLDOWN_COUNTED_EXIT_STATUSES matches that string exactly, so
+    # appending the label there would silently break cooldown counting and
+    # the backtest's per-reason funnel. It is instead folded into the
+    # persisted exit_reason TEXT (see executor.close_position), which is
+    # free-form.
+    stop_basis: Optional[str] = None
 
 
 @dataclass

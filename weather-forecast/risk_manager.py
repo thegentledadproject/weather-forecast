@@ -141,7 +141,7 @@ config.py, models.py, ev_engine.py (local -- fee formula only)
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Tuple
 
 import config
 import ev_engine
@@ -296,11 +296,27 @@ def usable_entry_bid(entry_price: float, entry_bid) -> Optional[float]:
     return entry_bid
 
 
-def stop_basis_price(position: Position) -> float:
+def stop_basis_price(position: Position) -> Tuple[float, str]:
     """
     WHERE THE STOP MEASURES FROM -- the entry-side bid where one was
     recorded and can be trusted (see usable_entry_bid), the entry ask
-    otherwise.
+    otherwise -- AND WHICH OF THE TWO IT WAS.
+
+    Returns (price, basis), basis one of:
+      "entry_bid"           -- a usable bid was recorded and used.
+      "entry_ask_fallback"  -- no bid was recorded, OR one was recorded but
+                               usable_entry_bid() refused it (None, zero, or
+                               crossed above the ask). Both collapse to the
+                               same label: what matters downstream is that
+                               the stop ran on the tighter, ask-anchored
+                               distance, not why.
+
+    A bare price told a caller WHERE the stop measured from but not whether
+    that was the intended basis or a silent narrowing of it -- 117 of 207
+    scoreable stop fires (2026-08-01..09-01) would not have fired on the bid
+    basis, 46 of those eventual winners, and none of that is visible in a
+    float. See evaluate_exit(), which threads this onto ExitDecision so the
+    STORED row can say which basis fired.
 
     A FUNCTION, NOT AN EXPRESSION INSIDE evaluate_exit(), because
     stop_loss_audit.py scores history against this same rule. Two copies of
@@ -309,7 +325,9 @@ def stop_basis_price(position: Position) -> float:
     in the first cut of this change.
     """
     bid = usable_entry_bid(position.entry_price, position.entry_bid)
-    return bid if bid is not None else position.entry_price
+    if bid is not None:
+        return bid, "entry_bid"
+    return position.entry_price, "entry_ask_fallback"
 
 
 def update_high_water_mark(position: Position, current_price: float) -> float:
@@ -419,7 +437,11 @@ def evaluate_exit(
     # None means the entry-side book was never recorded (rows predating
     # Position.entry_bid, and manual_trigger). Those keep the basis they were
     # opened under rather than silently gaining a spread of extra room.
-    stop_from = stop_basis_price(position)
+    #
+    # stop_basis is carried onto the ExitDecision (below) only for the
+    # stop_loss branch -- it describes what THAT rule measured from, and has
+    # no meaning for a hold or a take-profit, which never read it.
+    stop_from, stop_basis = stop_basis_price(position)
 
     # Lottery-priced entries (see LOTTERY_PRICE_THRESHOLD in config.py)
     # skip BOTH price-noise exits. Below that entry price the threshold
@@ -507,6 +529,7 @@ def evaluate_exit(
             reason="stop_loss",
             current_price=current_price,
             pnl_pct=pnl_pct,
+            stop_basis=stop_basis,
         )
 
     # 2. Fixed profit-take -- the only upside exit, and the hard cap on

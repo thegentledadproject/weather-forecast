@@ -1255,7 +1255,8 @@ def test_calibration_section_renders_the_live_stations(monkeypatch):
     def _rows(icaos, now=None, recent_days=14):
         asked["icaos"] = list(icaos)
         return ([{"icao": i, "bias": {"c": None, "n": None, "stderr": None},
-                  "ev": None, "alltime": None, "recent": None, "error": None}
+                  "ev": None, "alltime": None, "recent": None,
+                  "max_attainable_prob": None, "error": None}
                  for i in icaos], [])
 
     monkeypatch.setattr(calibration_panel, "station_rows", _rows)

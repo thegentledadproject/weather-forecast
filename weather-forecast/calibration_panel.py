@@ -55,9 +55,12 @@ config.py, entry_manager.py, promotion_dossier.py (local)
 
 import html
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 
+import bucket_axis
+import calibration
 import config
 import entry_manager
 import promotion_dossier
@@ -159,6 +162,53 @@ def _ev(station_icao: str, now: datetime) -> Optional[dict]:
     }
 
 
+def _max_attainable_prob(station_icao: str) -> Optional[dict]:
+    """
+    The most probability the model could EVER place in one bucket, given
+    this station's real bucket width and its resolved spread:
+
+        p_max = 2 * Phi(half_width_c / sigma) - 1
+
+    sigma is calibration.estimate_std_dev's own answer for this station,
+    clamp/floor included -- SPREAD_FLOOR_C is exactly what this column
+    exists to make visible, so using anything else would hide it again.
+    half_width_c comes from bucket_axis, not a hardcoded 1C: eleven
+    Americas stations list 2F buckets (1.111C wide), and assuming 1C would
+    silently mis-report every one of them.
+
+    Returns None -- never a fabricated number -- when the station is not
+    registered or its spread cannot otherwise be resolved.
+
+    WHERE THIS CAN DISAGREE WITH THE TRADING PATH, and why that is accepted
+    here. estimate_std_dev reaches its "ensemble" tier only when handed
+    ensemble_members, and this column does not fetch them -- one book call
+    per station on every dashboard render, for a number the entry path has
+    already computed. So for a station that falls THROUGH the measured tier,
+    live resolves "ensemble" while this column reports the next tier down
+    (pooled_error, then the flat constant).
+
+    That is a real divergence and the `source` returned alongside p_max is
+    what exposes it: a row whose source reads "pooled_error" while the
+    station trades on an ensemble spread is reporting a p_max the entry path
+    does not use. After the 2026-08-29 tier reorder the measured tier sits
+    ABOVE the ensemble, so the common case agrees; this is the exception,
+    and it is written down rather than left for someone to rediscover.
+    """
+    try:
+        station = config.get_station(station_icao)
+        axis = bucket_axis.for_station(station)
+        half_width_c = axis.width_c() / 2
+        sigma, source = calibration.estimate_std_dev([], [], station_icao=station_icao)
+    except Exception:  # noqa: BLE001 - one column, not the row
+        return None
+
+    if not sigma or sigma <= 0:
+        return None
+
+    p_max = 2 * (0.5 * (1 + math.erf(half_width_c / (sigma * math.sqrt(2))))) - 1
+    return {"p_max": p_max, "sigma": sigma, "source": source, "half_width_c": half_width_c}
+
+
 def station_row(station_icao: str, now: datetime, recent_days: int = RECENT_DAYS) -> dict:
     """
     One station's row. Scores twice -- all time, then the recent window --
@@ -175,6 +225,7 @@ def station_row(station_icao: str, now: datetime, recent_days: int = RECENT_DAYS
         "ev": _ev(station_icao, now),
         "alltime": promotion_dossier.live_calibration(alltime_entries),
         "recent": promotion_dossier.live_calibration(recent_entries),
+        "max_attainable_prob": _max_attainable_prob(station_icao),
         "error": None,
     }
 
@@ -202,7 +253,8 @@ def station_rows(
             warnings.append(f"calibration panel: {icao} unreadable: {exc}")
             rows.append({
                 "icao": icao, "bias": {"c": None, "n": None, "stderr": None},
-                "ev": None, "alltime": None, "recent": None, "error": str(exc),
+                "ev": None, "alltime": None, "recent": None,
+                "max_attainable_prob": None, "error": str(exc),
             })
     return rows, warnings
 
@@ -271,6 +323,21 @@ def _fmt_gap(cal: Optional[dict]) -> str:
     return out
 
 
+def _fmt_max_prob(mabp: Optional[dict]) -> str:
+    """
+    The spread floor's cap on model confidence, made visible: the most
+    probability the model could EVER place in one bucket at this station's
+    resolved sigma. Source travels with the number -- a cap computed on
+    "fallback_default" or "pooled_error" (config.LOW_CONFIDENCE_SPREAD_
+    SOURCES) is a station-agnostic guess, not a measurement of this station.
+    """
+    if not mabp:
+        return _EM_DASH
+    out = f"{mabp['p_max']:.1%}"
+    out += f" <span class='sub'>(&sigma;={mabp['sigma']:.2f} {html.escape(mabp['source'])})</span>"
+    return out
+
+
 def render_table_html(rows: List[dict]) -> str:
     """
     The panel, as one table both dashboards can drop into a card. Uses only
@@ -286,7 +353,7 @@ def render_table_html(rows: List[dict]) -> str:
         if row.get("error"):
             body.append(
                 f"<tr><td class='mono'>{html.escape(row['icao'])}</td>"
-                f"<td colspan='5' class='sub'>unreadable: {html.escape(row['error'])}</td></tr>"
+                f"<td colspan='6' class='sub'>unreadable: {html.escape(row['error'])}</td></tr>"
             )
             continue
         body.append(
@@ -297,6 +364,7 @@ def render_table_html(rows: List[dict]) -> str:
             f"<td class='mono num'>{_fmt_brier(row['alltime'])}</td>"
             f"<td class='mono num'>{_fmt_gap(row['alltime'])}</td>"
             f"<td class='mono num'>{_fmt_gap(row['recent'])}</td>"
+            f"<td class='mono num'>{_fmt_max_prob(row['max_attainable_prob'])}</td>"
             "</tr>"
         )
 
@@ -305,6 +373,7 @@ def render_table_html(rows: List[dict]) -> str:
         "<th>Station</th><th>Bias</th><th>Best net EV now</th>"
         "<th>Brier model / market</th><th>Gap &plusmn;se (all time)</th>"
         f"<th>Gap &plusmn;se (last {RECENT_DAYS}d)</th>"
+        "<th>Max attainable bucket p</th>"
         "</tr></thead><tbody>"
         + "".join(body)
         + "</tbody></table>"
