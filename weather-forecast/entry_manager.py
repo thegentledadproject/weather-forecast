@@ -452,6 +452,45 @@ def forecast_bias_source_mix(station_icao: str) -> Optional[frozenset]:
     return best if n * 2 > len(by_date) else None
 
 
+# Keyed on the DATABASE PATH as well as the station and the day, for the
+# reason calibration._pooled_spread_cache is: the tests and backtest/engine.py
+# repoint config.DB_PATH at a throwaway database, and a cache keyed on the
+# station alone would serve a ratio computed from the LIVE record into a
+# replay that is pretending not to know those days.
+_error_width_cache = {}
+
+
+def station_error_width_ratio(station_icao: str) -> Optional[float]:
+    """
+    This station's corrected forecast error as a multiple of its own bucket
+    width, for the gate in collection_only_reason(). None when it has not
+    been measured on enough days, or could not be measured at all.
+
+    Cached per station per local day. The measurement replays the bias
+    correction once per stored day (see calibration.corrected_error_rmse),
+    which is cheap at today's ~30 days per station but is quadratic in the
+    record and would otherwise run on every cycle for every station.
+
+    NEVER RAISES. A gate input that can throw is a gate that can stop the
+    whole cycle, and this one is not worth that: the failure value is None,
+    which reads as "not measured" and leaves the station trading.
+    """
+    try:
+        key = (str(config.DB_PATH), station_icao,
+               config.local_today(config.get_station(station_icao)))
+    except Exception as exc:  # noqa: BLE001 - unregistered station
+        print(f"[entry_manager] could not key the error-width cache for {station_icao}: {exc}")
+        return None
+
+    if key not in _error_width_cache:
+        try:
+            _error_width_cache[key] = calibration.error_width_ratio(station_icao)
+        except Exception as exc:  # noqa: BLE001 - the gate must not be the thing that breaks
+            print(f"[entry_manager] could not measure {station_icao}'s error width: {exc}")
+            _error_width_cache[key] = None
+    return _error_width_cache[key]
+
+
 def collection_only_reason(
     station_icao: str,
     obs_count: Optional[int],
@@ -460,6 +499,7 @@ def collection_only_reason(
     enforce_bias_quality: bool = False,
     bias_source_mix: Optional[frozenset] = None,
     today_source_mix: Optional[frozenset] = None,
+    error_width_ratio: Optional[float] = None,
 ) -> Optional[str]:
     """
     The collection-first gate, as a PURE function: None means this
@@ -499,6 +539,14 @@ def collection_only_reason(
     override applied in live code and not in backtest/entry_sim.py would
     be the drift this purity was designed to prevent.
     Live always passes True.
+
+    error_width_ratio is the SECOND question, added 2026-09-03: not "is the
+    bias known well?" but "is what is left after correcting it narrow enough
+    to pick a bucket with?". A station whose corrected error is wider than
+    its own bucket cannot resolve one at any spread, so the gap between its
+    model probability and the market price is its own noise. Passed in
+    rather than measured here for the same reason obs_count is -- this
+    function stays pure. None means not measured and skips the check.
 
     config.FORCE_COLLECTION_ONLY_STATIONS runs in the opposite direction to
     both override sets below and is checked BEFORE either of them: it is the
@@ -543,6 +591,42 @@ def collection_only_reason(
             f"Collection-only: {station_icao}'s stored '{source}' observation count could not be read, "
             f"so the collection-first gate cannot be enforced -- refusing to open blind."
         )
+
+    # THE ERROR-WIDTH GATE (config.MAX_ERROR_RMSE_PER_BUCKET, 2026-09-03).
+    # Is what is LEFT of this station's forecast error, after the bias
+    # correction the entry path really had, narrow enough to pick a bucket
+    # with? Every other check in this function asks whether the bias is
+    # known WELL; none of them asks whether the residual is small enough to
+    # be worth trading, which is the question RPLL failed and had to be
+    # stopped by name for.
+    #
+    # ABOVE collection_gate_is_overridden(), and that ordering is the whole
+    # point of putting it here. That override exists to let an IMMATURE
+    # station skip checks it will pass once it has history. A station whose
+    # error is wider than its bucket is not immature -- another month of
+    # collection does not narrow it -- so the override must not reach this.
+    #
+    # BELOW the broken-read refusal above, which is not a measurement of the
+    # station at all but a statement that this gate cannot be enforced.
+    #
+    # None means NOT MEASURED and skips the check, exactly as bias_n does:
+    # backtest/entry_sim.py passes nothing (the ratio reads the whole stored
+    # error record and would leak days a replay has not reached), and so
+    # does every caller written before this existed.
+    if (
+        error_width_ratio is not None
+        and config.MAX_ERROR_RMSE_PER_BUCKET is not None
+        and error_width_ratio > config.MAX_ERROR_RMSE_PER_BUCKET
+    ):
+        return (
+            f"Collection-only: {station_icao}'s corrected forecast error is "
+            f"{error_width_ratio:.2f}x its own bucket width, wider than the "
+            f"{config.MAX_ERROR_RMSE_PER_BUCKET:.2f}x this station would need to resolve "
+            f"one -- so its modal bucket is a guess and the 'edge' priced against it is "
+            f"the model's own noise. Collecting, not trading; see "
+            f"config.MAX_ERROR_RMSE_PER_BUCKET."
+        )
+
     # Operator override of the WHOLE gate, per station. Deliberately below
     # the obs_count-is-None branch above: that branch is a BROKEN READ, not
     # an immature station, and "refusing to open blind" stays true no matter
@@ -1344,6 +1428,13 @@ def decide_portfolio_entries(
         # None when the caller has not been taught to pass it -- the guard
         # then does not run. See collection_only_reason().
         today_source_mix=frozenset(forecast_sources) if forecast_sources else None,
+        # Measured HERE rather than inside the gate so the gate stays pure
+        # and backtest/entry_sim.py can keep sharing it verbatim. Its own
+        # failure is None, which reads as "not measured" and leaves the
+        # station trading -- the same direction every other unreadable input
+        # here fails in, except the observation count, which is the one this
+        # function refuses to open blind without.
+        error_width_ratio=station_error_width_ratio(station_icao),
     )
     if gate_reason is not None:
         # Logged once per station/day: a brand-new station trips this on

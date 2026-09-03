@@ -293,6 +293,95 @@ def measured_error_spread(station_icao: str) -> tuple:
     return statistics.stdev(errors), len(errors)
 
 
+def _dated_error_samples(station_icao: str):
+    """
+    [(target_date, error_c), ...] oldest first, or [] if it cannot be read.
+
+    A one-line seam over storage so corrected_error_rmse() below can be
+    tested on a known series without a database, and so both readers of this
+    record go through the same lookahead-guarded query.
+    """
+    import storage  # local: keeps calibration importable without a db
+
+    try:
+        station = config.get_station(station_icao)
+        return sorted(storage.forecast_error_samples_dated(
+            station_icao, station.resolution_grade_source))
+    except Exception as exc:  # noqa: BLE001 - unregistered station or storage failure
+        print(f"[calibration] could not read error samples for {station_icao}: {exc}")
+        return []
+
+
+def corrected_error_rmse(station_icao: str) -> tuple:
+    """
+    (rmse_c, n_scored) -- how wrong this station's CORRECTED central
+    estimate actually is, or (None, n_scored) when too few days have been
+    scored to say. Feeds config.MAX_ERROR_RMSE_PER_BUCKET through
+    entry_manager.collection_only_reason().
+
+    THIS IS NOT measured_error_spread(). That one takes the standard
+    deviation about the sample's own mean, i.e. what would be left if the
+    bias correction were perfect and instantaneous. This one replays the
+    correction the entry path would REALLY have had on each day -- weighted
+    by config.BIAS_HALF_LIFE_DAYS over strictly earlier days only -- and
+    measures what that leaves. The gap between the two is the correction's
+    own lag, and a station whose bias drifts pays for it here. On
+    2026-09-03 the two differed by up to 0.14C (ZGSZ 1.07 -> 1.21).
+
+    NO DAY IS IN ITS OWN CORRECTION. Without that the number is scored
+    against a bias that saw the answer, which flatters every station and
+    flatters a drifting one most -- the same leak calibration.estimate_std_dev
+    refuses for the backtest with allow_measured=False.
+
+    The first config.MIN_BIAS_PAIRS_BEFORE_ENTRY days are SKIPPED rather
+    than scored on a thin correction. They are the days a station is gated
+    off anyway, and scoring them would charge the gate for a warm-up period
+    no live entry ever traded through.
+
+    Returns (None, n) below config.MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE.
+    "Unknown" and "fine" are different answers, and the caller must not be
+    able to confuse a new station with a resolvable one.
+    """
+    dated = _dated_error_samples(station_icao)
+    warmup = max(1, config.MIN_BIAS_PAIRS_BEFORE_ENTRY)
+
+    residuals = []
+    for i, (target_date, error_c) in enumerate(dated):
+        if i < warmup:
+            continue
+        bias, _, _ = bias_stats_weighted(
+            dated[:i], target_date, config.BIAS_HALF_LIFE_DAYS)
+        if bias is None:
+            continue
+        residuals.append(float(error_c) - bias)
+
+    if len(residuals) < config.MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE:
+        return None, len(residuals)
+    return math.sqrt(statistics.fmean(r * r for r in residuals)), len(residuals)
+
+
+def error_width_ratio(station_icao: str):
+    """
+    This station's corrected error RMSE as a MULTIPLE of its own bucket
+    width, or None when it has not been measured on enough days.
+
+    The ratio rather than the raw RMSE is what the gate compares, because
+    1.2C of error means something different on a 1C Asian bucket than on a
+    2F (1.11C) American one -- see config.bucket_step_c().
+    """
+    rmse, _ = corrected_error_rmse(station_icao)
+    if rmse is None:
+        return None
+    try:
+        step = config.bucket_step_c(station_icao)
+    except Exception as exc:  # noqa: BLE001 - unregistered station
+        print(f"[calibration] could not read {station_icao}'s bucket width: {exc}")
+        return None
+    if step <= 0:
+        return None
+    return rmse / step
+
+
 # Keyed on the database path, NOT just on time. backtest/engine.py and the
 # test fixtures repoint config.DB_PATH at a throwaway database, and a cache
 # keyed on time alone would serve a pooled spread computed from the LIVE db

@@ -3257,6 +3257,13 @@ COLLECTION_GATE_OVERRIDE_STATIONS = {
 # would catch), the honest thing is a named stop with the number written
 # next to it rather than a threshold reverse-engineered to catch one
 # station.
+#
+# THE MEASURED GATE NOW EXISTS -- see MAX_ERROR_RMSE_PER_BUCKET below, added
+# 2026-09-03, which catches RPLL at 1.49 along with seven other stations.
+# RPLL STAYS NAMED HERE ANYWAY. The gate is a measurement and measurements
+# move; this is an operator decision and does not. Keeping both means
+# disabling the gate cannot silently restart the station the paragraph above
+# was written about.
 FORCE_COLLECTION_ONLY_STATIONS = {
     "RPLL",
 }
@@ -3273,6 +3280,87 @@ def force_collection_only(station_icao: str) -> bool:
     no-op on a safety control.
     """
     return station_icao in FORCE_COLLECTION_ONLY_STATIONS
+
+
+# --- The error-width gate (2026-09-03) -------------------------------------
+# A station opens nothing when what is LEFT of its forecast error after the
+# bias correction is wider than the bucket it is being asked to resolve.
+#
+# THE QUESTION NOTHING ELSE IN THIS FILE ASKS. Every existing gate measures
+# whether the bias is known WELL -- pair counts, standard errors, source
+# mixes. None of them asks whether the residual after that correction is
+# small enough to pick a bucket with. RPLL failed exactly that question and
+# had to be stopped by name (see FORCE_COLLECTION_ONLY_STATIONS above, which
+# nominated "error spread against bucket width" as the obvious gate and
+# declined to fit a threshold to one station).
+#
+# WHY 1.0, AND WHY IT IS NOT FITTED. It is the point where the model's own
+# error is as wide as the thing it is betting on. Below it the modal bucket
+# is the most likely single outcome; above it the error distribution spans
+# neighbours and the "edge" the entry path prices is the model's noise, not
+# a mispricing. That boundary is arithmetic. It is the threshold a sweep
+# picked too, but the sweep is corroboration, not the argument.
+#
+# THE OUT-OF-SAMPLE MEASUREMENT, 2026-09-03. Split at 2026-08-22 over the 11
+# stations with >= 8 trades and >= 5 error pairs each side; the ratio is
+# computed on the FIRST half only and scored on the second, hold-to-
+# settlement basis (config.HOLD_TO_SETTLEMENT_MODES, so no exit rules in the
+# number):
+#
+#   ratio <= 1.0   keep 5 stations -> +5.0%   dropped 6 -> -26.2%
+#   ratio <= 1.1   keep 6 stations -> +3.6%   dropped 5 -> -25.8%
+#   ratio <= 1.2   keep 7 stations -> -1.4%   dropped 4 -> -23.9%
+#   (all 11 stations, same window: -12.2%)
+#
+# Five of the six dropped stations returned worse than -14%.
+#
+# WHAT THIS EVIDENCE IS NOT. One split, 11 stations, and the ratio's own
+# split-half persistence is only +0.21 -- weak. It is stronger than the
+# alternative it replaced: selecting stations on their PAST P&L has a
+# split-half correlation of -0.06 / -0.17 / -0.16 at three different cuts
+# (i.e. none, slightly reversing), and scored WORSE than keeping every
+# station in 2 of those 3 splits. That is why this gate is keyed to a
+# physical property of the forecast and not to realised return.
+#
+# STOPS LIVE STATIONS TOO, deliberately and by operator decision
+# (2026-09-03). RCSS is real-money armed and rates 1.27; it is stopped by
+# this gate like any other station, leaving WSSS as the only live-armed
+# station opening positions. A gate that exempted the stations with money on
+# them would be inverted.
+#
+# None disables the gate entirely and is the documented revert. Do not
+# "disable" it by setting a large number -- a ratio of 99 is a claim about
+# forecast error, and someone will read it as one.
+MAX_ERROR_RMSE_PER_BUCKET = 1.0
+
+# Days that must have been SCORED (not merely stored) before the ratio is
+# allowed to stop a station. Deliberately far above MIN_BIAS_PAIRS_BEFORE_ENTRY
+# (5) and MIN_SPREAD_PAIRS (5): those gates decide whether to trust a number
+# the model uses every cycle and can be revisited daily, while this one stops
+# a station outright. On 2026-09-03 the European stations carried 3 scored
+# days each against Asia's 22-28, and gating Europe on 3 days would have been
+# the same noise-fitting this gate exists to avoid. They keep trading until
+# they have a measurement.
+MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE = 15
+
+
+def bucket_step_c(station_icao: str) -> float:
+    """
+    This station's bucket width in DEGREES CELSIUS, whatever unit its market
+    is quoted in.
+
+    Every forecast error in the database is in C (see
+    storage.forecast_error_samples), while 11 of the 15 Americas markets are
+    quoted on a 2F axis -- and 2F is 1.11C, not 2C. Comparing a 1.2C error
+    against a bare step of "2" reads as comfortably inside the bucket when it
+    is in fact wider than it, which is the exact direction this file calls
+    dangerous everywhere else. See bucket_axis.py for the axis itself.
+    """
+    station = get_station(station_icao)
+    step = float(getattr(station, "bucket_step", 1) or 1)
+    if getattr(station, "bucket_unit", "C") == "F":
+        return step * 5.0 / 9.0
+    return step
 
 
 def region_authorises_live_orders(region: str) -> bool:
