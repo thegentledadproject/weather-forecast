@@ -211,7 +211,8 @@ def _connect() -> sqlite3.Connection:
             model_prob REAL,
             raw_edge REAL,
             net_ev_at_size REAL,
-            entry_bid REAL
+            entry_bid REAL,
+            exit_blocked_reason TEXT
         )
         """
     )
@@ -244,6 +245,13 @@ def _connect() -> sqlite3.Connection:
         ("raw_edge", "raw_edge REAL"),
         ("net_ev_at_size", "net_ev_at_size REAL"),
         ("entry_bid", "entry_bid REAL"),
+        # NULL means "the exit path can sell this position", which is the
+        # right value for every row written before the column existed: those
+        # positions were never checked, and the ones that were unexitable are
+        # long closed. Unlike entry_bid there is nothing here that could be
+        # backfilled even in principle -- the check reads a fill against a
+        # market minimum, and both are facts about an instant that has passed.
+        ("exit_blocked_reason", "exit_blocked_reason TEXT"),
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
@@ -351,6 +359,28 @@ def _connect() -> sqlite3.Connection:
             member_count INTEGER NOT NULL,
             fetched_at TEXT NOT NULL,
             PRIMARY KEY (station_icao, target_date)
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ev_snapshots (
+            station_icao TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            bucket_c INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            model_prob REAL,
+            market_price REAL,
+            market_bid REAL,
+            raw_edge REAL,
+            slippage_pct REAL,
+            fee_rate_pct REAL,
+            net_ev_per_dollar REAL,
+            spread_source TEXT,
+            notes TEXT,
+            PRIMARY KEY (station_icao, target_date, bucket_c, side, generated_at)
         )
         """
     )
@@ -776,6 +806,49 @@ def save_ensemble_spread(
         )
 
 
+def save_ev_snapshot_rows(
+    station_icao: str,
+    target_date: date,
+    generated_at: str,
+    results,
+) -> None:
+    """Persist one cycle's EV table, one row per (bucket, side)."""
+    with _db() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO ev_snapshots "
+            "(station_icao, target_date, bucket_c, side, generated_at, "
+            " model_prob, market_price, market_bid, raw_edge, slippage_pct, "
+            " fee_rate_pct, net_ev_per_dollar, spread_source, notes) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (station_icao, target_date.isoformat(), int(r.bucket_c), r.side,
+                 generated_at, r.model_prob, r.market_price, r.market_bid,
+                 r.raw_edge, r.estimated_slippage_pct, r.fee_rate_pct,
+                 r.net_ev_per_dollar, r.spread_source, r.notes)
+                for r in results
+            ],
+        )
+
+
+_EV_SNAPSHOT_COLUMNS = (
+    "bucket_c", "side", "generated_at", "model_prob", "market_price",
+    "market_bid", "raw_edge", "slippage_pct", "fee_rate_pct",
+    "net_ev_per_dollar", "spread_source", "notes",
+)
+
+
+def load_ev_snapshots(station_icao: str, target_date: date) -> List[dict]:
+    """Every stored EV row for one station-day, oldest cycle first."""
+    with _db() as conn:
+        rows = conn.execute(
+            f"SELECT {', '.join(_EV_SNAPSHOT_COLUMNS)} FROM ev_snapshots "
+            "WHERE station_icao = ? AND target_date = ? "
+            "ORDER BY generated_at, bucket_c, side",
+            (station_icao, target_date.isoformat()),
+        ).fetchall()
+    return [dict(zip(_EV_SNAPSHOT_COLUMNS, r)) for r in rows]
+
+
 def load_ensemble_spreads(station_icao: str) -> Dict[date, Tuple[float, int]]:
     """{target_date: (std_dev_c, member_count)} for one station."""
     with _db() as conn:
@@ -834,6 +907,7 @@ def _row_to_position(r) -> Position:
     raw_edge = r[19] if len(r) > 19 else None
     net_ev_at_size = r[20] if len(r) > 20 else None
     entry_bid = r[21] if len(r) > 21 else None
+    exit_blocked_reason = r[22] if len(r) > 22 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -857,6 +931,7 @@ def _row_to_position(r) -> Position:
         raw_edge=raw_edge,
         net_ev_at_size=net_ev_at_size,
         entry_bid=entry_bid,
+        exit_blocked_reason=exit_blocked_reason,
     )
 
 
@@ -875,8 +950,9 @@ def open_position(position: Position) -> None:
                 entry_price, size_usd, entry_time, status, high_water_mark,
                 exit_price, exit_time, exit_reason, token_id, is_paper,
                 size_shares, execution_mode, order_id,
-                model_prob, raw_edge, net_ev_at_size, entry_bid
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                model_prob, raw_edge, net_ev_at_size, entry_bid,
+                exit_blocked_reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.position_id,
@@ -901,6 +977,7 @@ def open_position(position: Position) -> None:
                 position.raw_edge,
                 position.net_ev_at_size,
                 position.entry_bid,
+                position.exit_blocked_reason,
             ),
         )
 

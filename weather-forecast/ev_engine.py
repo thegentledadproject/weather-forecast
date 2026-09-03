@@ -76,6 +76,7 @@ from clients import market_client
 import bucket_axis
 import config
 import market_discovery
+import storage
 
 # Weather-category taker fee rate, verified 2026-08-05 -- see the FEE RATE
 # section of the module docstring for the source and the full formula.
@@ -718,6 +719,36 @@ def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
         os.replace(tmp, path)
     except OSError as exc:
         print(f"[ev_engine] could not save EV snapshot for {station_icao}: {exc}")
+
+    # THE RETAINED COPY. The file above is the dashboard's handoff and is
+    # overwritten every cycle, which is right for a dashboard and is exactly
+    # why no history of the model's point-in-time belief exists -- the
+    # constraint config.calibration_vs_market()'s comment names, and the
+    # reason promotion_dossier.live_calibration() can only score positions
+    # that were actually opened. These rows are that history: every listed
+    # bucket, both sides, traded or not, so a full-book score is possible
+    # without recomputing a probability against a calibration that has since
+    # seen the outcome.
+    #
+    # AFTER the file write, and separately guarded, so a database failure
+    # cannot cost the dashboard its handoff. Nothing here is derived: the row
+    # is what the model believed at `generated_at` and no more.
+    #
+    # Skipped for an empty table. The file still records "computed and found
+    # nothing" -- a row cannot, because it is keyed by a bucket and there is
+    # no target_date to file one under.
+    if results:
+        try:
+            storage.save_ev_snapshot_rows(
+                station_icao, results[0].target_date, payload["generated_at"], results,
+            )
+        except Exception as exc:
+            # Broader than the OSError above on purpose. The file write can
+            # realistically only fail on I/O; a database write can fail on a
+            # lock, a full disk, or a schema that has drifted -- and the rule
+            # this inherits is absolute: the EV table drives trading, this
+            # record only drives reporting.
+            print(f"[ev_engine] could not record EV snapshot rows for {station_icao}: {exc}")
 
 
 def print_ev_table(results: List[EVResult]) -> None:

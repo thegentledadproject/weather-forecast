@@ -260,6 +260,34 @@ def _capture_exit_price(
         )
 
 
+# Positions whose exit_blocked_reason has already been reported this process.
+# Once per position per process, matching market_client's ghost-book log: the
+# flag never clears on its own, so printing it every cycle would bury the one
+# thing it exists to make visible.
+_exit_blocked_seen = set()
+
+
+def _report_exit_blocked(position: Position) -> None:
+    """
+    Say that this position cannot be sold, at CHECK time.
+
+    The defect this closes is one of timing, not of information: the exit
+    path already refused correctly, but it refused at the moment a stop
+    fired, which is the moment it was too late to matter.
+    """
+    if not position.exit_blocked_reason:
+        return
+    if position.position_id in _exit_blocked_seen:
+        return
+    _exit_blocked_seen.add(position.position_id)
+    print(
+        f"[position_manager] {position.station_icao} {position.bucket_c}°"
+        f"{position.side} ({position.position_id}) CANNOT BE SOLD by the exit "
+        f"path: {position.exit_blocked_reason}. It is being monitored, and any "
+        f"exit signal it raises will not be actionable."
+    )
+
+
 def _check_one_position(
     position: Position,
     capture_fidelity_min: Optional[int] = None,
@@ -275,6 +303,11 @@ def _check_one_position(
     check_and_exit_positions() so one position's failure can be contained
     to that position rather than aborting the cycle.
     """
+    # Before the price fetch: whether this position can be sold at all is a
+    # fact about the fill it was opened with, and does not depend on today's
+    # book being readable.
+    _report_exit_blocked(position)
+
     token_id = _token_id_for(position)
     current_price = market_client.get_current_price_for_side(
         token_id=token_id,

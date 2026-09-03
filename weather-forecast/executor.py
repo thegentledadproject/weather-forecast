@@ -297,20 +297,51 @@ def _resolved_size_ok(spec, decision) -> tuple:
     """
     requested = decision.recommended_size_usd or 0.0
     resolved = spec.notional_usd
-    if resolved <= requested + 1e-9:
-        return True, ""
+    moved = resolved > requested + 1e-9
 
-    note = f"${requested:.2f} -> ${resolved:.2f} by the exchange minimum"
+    # The note still distinguishes the two cases -- a journal reader needs to
+    # know whether the exchange moved the size -- but they now run the SAME
+    # checks. An unchanged size used to return here having validated nothing,
+    # on the reasoning that a size the gates already cleared needs no
+    # re-clearing. That reasoning holds only for the size. It does not hold
+    # for the book, which is re-read below and is the thing that moves.
+    note = (
+        f"${requested:.2f} -> ${resolved:.2f} by the exchange minimum" if moved
+        else f"size unchanged at ${resolved:.2f}"
+    )
 
-    depth = decision.available_depth_usd
-    if depth is not None:
-        ceiling = depth * config.MAX_DEPTH_UTILIZATION_PCT
-        if resolved > ceiling:
-            return False, (
-                f"resolved notional ${resolved:.2f} is past {config.MAX_DEPTH_UTILIZATION_PCT:.0%} "
-                f"of the ${depth:.2f} visible depth (${ceiling:.2f}); the entry was sized "
-                f"at ${requested:.2f} and never cleared the book at this size"
-            )
+    # RE-READ, not decision.available_depth_usd. That field is the fetch
+    # evaluate_entry made when the candidate was sized, which can be minutes
+    # and a whole book stale by submission -- and depth is the one input here
+    # that moves on its own, without the size changing at all. Slippage was
+    # always re-read live; depth was not, so the cheaper number was the stale
+    # one.
+    try:
+        depth = market_client.get_available_depth_usd(decision.token_id)
+    except Exception as exc:  # noqa: BLE001 -- a failed re-check must not pass by default
+        return False, f"could not re-read depth at ${resolved:.2f} ({exc}) -- refusing to guess"
+
+    if depth is None:
+        # get_available_depth_usd documents None as "unknown depth", not
+        # "zero depth", and entry_manager already treats unknown as a reason
+        # to skip rather than to assume either extreme. Same stance here: a
+        # gate that cannot be evaluated has not been passed.
+        return False, (
+            f"depth is unreadable at submission (was ${decision.available_depth_usd:.2f} "
+            f"at sizing) -- refusing to submit ${resolved:.2f} against an unknown book"
+            if decision.available_depth_usd is not None else
+            f"depth is unreadable at submission -- refusing to submit ${resolved:.2f} "
+            f"against an unknown book"
+        )
+
+    ceiling = depth * config.MAX_DEPTH_UTILIZATION_PCT
+    if resolved > ceiling:
+        return False, (
+            f"resolved notional ${resolved:.2f} is past {config.MAX_DEPTH_UTILIZATION_PCT:.0%} "
+            f"of the ${depth:.2f} visible depth (${ceiling:.2f}); the entry was sized "
+            f"at ${requested:.2f} against ${(decision.available_depth_usd or 0):.2f} "
+            f"and the book has not held"
+        )
 
     try:
         slippage = market_client.estimate_slippage(decision.token_id, resolved)
@@ -419,6 +450,86 @@ def _price_drift_ok(spec_price: float, decided_price: float) -> tuple:
             f"slippage budget the entry was sized under"
         )
     return True, f"limit {spec_price:.4f} vs approved {decided_price:.4f} ({drift:+.1%})"
+
+
+# --------------------------------------------------------------------------
+# Unfilled exits
+# --------------------------------------------------------------------------
+
+# Consecutive cycles a position's exit order has been killed unfilled, keyed
+# by position_id. In-memory and per-process, for the same reason as
+# _consecutive_live_close_refusals below: a restart re-deciding from scratch
+# is correct, because the condition being counted is about the book right
+# now, not about anything durable.
+_consecutive_exit_failures: Dict[str, int] = {}
+
+# The limit prices those attempts carried, same key. Kept alongside the count
+# rather than derived from it because the ESCALATION needs them: an operator
+# reading three failures wants to know whether the book is walking away from
+# the order or is simply empty, and only the attempted prices answer that.
+_recent_exit_limits: Dict[str, list] = {}
+
+# Failures before the log escalates from a routine line to an ACTION NEEDED
+# block. Deliberately 3, unlike LIVE_CLOSE_REFUSAL_ESCALATE_AFTER's 1: a
+# single killed FOK on a momentarily thin book is an ordinary outcome of a
+# fill-or-kill order and self-heals on the next cycle. An unauthorised
+# process does not self-heal, which is why that one shouts immediately.
+EXIT_FAILURE_ESCALATE_AFTER = 3
+
+
+def _note_exit_failure(position: Position, limit_price: float, error: str) -> int:
+    """
+    Record and announce one exit order that did not fill. Returns the new
+    consecutive count.
+
+    WHY THIS EXISTS. The unfilled branch used to print one line and return,
+    every cycle, with no counter -- and exit failure CORRELATES with a thin
+    book, so the failures cluster instead of arriving alone. A cluster then
+    produced nothing an operator could distinguish from ordinary noise, on
+    the path where a stop signal is going unhonoured against real shares.
+    """
+    count = _consecutive_exit_failures.get(position.position_id, 0) + 1
+    _consecutive_exit_failures[position.position_id] = count
+    attempts = _recent_exit_limits.setdefault(position.position_id, [])
+    attempts.append(limit_price)
+    del attempts[:-EXIT_FAILURE_ESCALATE_AFTER]
+
+    if count < EXIT_FAILURE_ESCALATE_AFTER:
+        print(
+            f"[executor] LIVE: {position.station_icao} {position.bucket_c}°"
+            f"{position.side} exit order did not fill at {limit_price:.4f} -- "
+            f"{error}. Position left OPEN (the shares are still held) and will "
+            f"be retried next cycle. Failure {count}."
+        )
+        return count
+
+    station = config.STATIONS.get(position.station_icao)
+    axis = bucket_axis.for_station(station)
+    bucket_label = axis.label(position.bucket_c, station.bucket_min_c, station.bucket_max_c)
+    shares = getattr(position, "size_shares", None)
+    shares_text = f"{shares:.2f} shares" if shares else "an unrecorded share count"
+    tried = ", ".join(f"{p:.4f}" for p in attempts)
+    print(
+        f"\n[ACTION NEEDED] {position.station_icao} {bucket_label} "
+        f"({position.side}) -- EXIT ORDER HAS NOT FILLED IN {count} CYCLES\n"
+        f"  Position:  {position.position_id}\n"
+        f"  Held:      {shares_text} @ {position.entry_price:.4f} "
+        f"(${position.size_usd:.2f}), order {position.order_id or 'unrecorded'}\n"
+        f"  Tried at:  {tried} (most recent last)\n"
+        f"  Last error: {error}\n"
+        f"  The shares are still held and the exit signal is going unhonoured.\n"
+        f"  If the prices above are walking away, the book is moving; if they are\n"
+        f"  flat, the book is empty on this side and no limit will fill.\n"
+        f"  Do one of: SELL this position on the exchange by hand, or accept that\n"
+        f"  it will be held to settlement and stop expecting the exit to clear.\n"
+    )
+    return count
+
+
+def forget_exit_failures(position_id: str) -> None:
+    """Clear a position's unfilled-exit streak, on a fill or a resolution close."""
+    _consecutive_exit_failures.pop(position_id, None)
+    _recent_exit_limits.pop(position_id, None)
 
 
 # --------------------------------------------------------------------------
@@ -580,7 +691,8 @@ def open_position(decision: EntryDecision) -> None:
     entry_time = datetime.now(timezone.utc).isoformat()
     position_id = f"{decision.station_icao}:{decision.target_date}:{decision.bucket_c}:{decision.side}:{entry_time}"
 
-    def _position(size_usd: float, size_shares=None, entry_price=None, order_id=None) -> Position:
+    def _position(size_usd: float, size_shares=None, entry_price=None, order_id=None,
+                  exit_blocked_reason=None) -> Position:
         return Position(
             position_id=position_id,
             station_icao=decision.station_icao,
@@ -615,6 +727,7 @@ def open_position(decision: EntryDecision) -> None:
             model_prob=decision.model_prob,
             raw_edge=decision.raw_edge,
             net_ev_at_size=decision.net_ev_at_size,
+            exit_blocked_reason=exit_blocked_reason,
         )
 
     if mode == "manual_review":
@@ -641,6 +754,53 @@ def open_position(decision: EntryDecision) -> None:
         return
 
     _open_via_order_path(decision, mode, _position)
+
+
+def _unexitable_fill_reason(spec, fill_shares: float) -> Optional[str]:
+    """
+    Why the exit path will not be able to sell this fill, or None if it can.
+
+    The comparison build_exit_order() makes, made at FILL time instead of at
+    exit time. Everything up to here can still refuse; from here the shares
+    exist and the only useful thing left is to say so.
+
+    A market with NO published minimum cannot fail this. Unknown is not
+    breached, and treating it as breached would flag every position on those
+    markets for life -- the same distinction get_available_depth_usd()'s
+    None/zero contract draws.
+    """
+    minimum = getattr(spec, "min_order_size", None)
+    if minimum is None or fill_shares is None or fill_shares >= minimum:
+        return None
+    return (
+        f"filled {fill_shares:g} shares, under the {minimum:g}-share market "
+        f"minimum -- build_exit_order() will refuse to sell this position"
+    )
+
+
+def _alert_unexitable_fill(decision, spec, fill_shares, fill_price, order_id, reason) -> None:
+    """
+    Say it at fill time, once, where an operator can still act cheaply.
+
+    The alternative is what happened on 2026-08-20: the position looks
+    ordinary until its first stop signal, and only then does the exit path
+    discover it cannot sell. By that point the stop has already been missed.
+    """
+    station = config.STATIONS.get(decision.station_icao)
+    axis = bucket_axis.for_station(station)
+    bucket_label = axis.label(decision.bucket_c, station.bucket_min_c, station.bucket_max_c)
+    print(
+        f"\n[ACTION NEEDED] {decision.station_icao} {bucket_label} "
+        f"({decision.side}) -- FILLED BELOW THE EXIT MINIMUM\n"
+        f"  Held:      {fill_shares:g} shares @ {fill_price:.4f} "
+        f"(${fill_shares * fill_price:.2f}), order {order_id or 'unrecorded'}\n"
+        f"  Asked for: {spec.size_shares:g} shares\n"
+        f"  Why:       {reason}\n"
+        f"  THE POSITION IS RECORDED AND THE SHARES ARE REAL -- it simply has no\n"
+        f"  working stop-loss, because no sell order can be built for it.\n"
+        f"  Do one of: top the holding up above the minimum by hand so the exit\n"
+        f"  path can sell it, or accept that it is held to settlement.\n"
+    )
 
 
 def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> None:
@@ -751,11 +911,15 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         f"[executor] LIVE FILL: {label} {fill_shares:.2f} shares @ {fill_price:.4f} "
         f"= ${fill_price * fill_shares:.2f} (order {result.order_id}). REAL MONEY."
     )
+    blocked = _unexitable_fill_reason(spec, fill_shares)
+    if blocked:
+        _alert_unexitable_fill(decision, spec, fill_shares, fill_price, result.order_id, blocked)
     storage.open_position(make_position(
         size_usd=round(fill_price * fill_shares, 4),
         size_shares=fill_shares,
         entry_price=fill_price,
         order_id=result.order_id,
+        exit_blocked_reason=blocked,
     ))
 
 
@@ -877,13 +1041,25 @@ def close_position(
         the fill price while the stored row said something else.
         """
         exit_price, net_pnl_pct, fee_note = _economics(gross_exit_price)
+        # decision.stop_basis ("entry_bid" / "entry_ask_fallback") is folded
+        # into the free-text note here, NOT into `status` above -- status is
+        # f"closed_{decision.reason}" and config.COOLDOWN_COUNTED_EXIT_STATUSES
+        # / backtest/engine.py's per-reason funnel both match that string
+        # exactly, so a suffix on decision.reason itself would silently break
+        # both. None (every non-stop_loss exit) adds nothing here.
+        basis_note = f"; basis={decision.stop_basis}" if decision.stop_basis else ""
         storage.close_position(
             position_id=position.position_id,
             exit_price=exit_price,
             exit_time=exit_time,
             status=status,
-            reason=exit_reason or f"{decision.reason} ({reason_tag}, pnl={net_pnl_pct:+.1%} net; {fee_note})",
+            reason=exit_reason or f"{decision.reason} ({reason_tag}, pnl={net_pnl_pct:+.1%} net; {fee_note}{basis_note})",
         )
+        # A closed position cannot fail an exit again, so its unfilled-exit
+        # streak must not outlive it. Cleared HERE rather than on the fill
+        # branch because this is the one place every mode's close is written
+        # -- a fill, a resolution and a manual close all pass through it.
+        forget_exit_failures(position.position_id)
 
     if mode == "manual_review":
         # A resolved market can't be sold into -- the book is gone. Telling
@@ -983,10 +1159,10 @@ def _close_via_order_path(
         return
 
     if not result.filled:
-        print(
-            f"[executor] LIVE: {label} exit order did NOT fill -- "
-            f"{result.error or 'killed unfilled'}. Position left OPEN "
-            f"(the shares are still held) and will be retried next cycle."
+        _note_exit_failure(
+            position,
+            limit_price=spec.limit_price,
+            error=result.error or "killed unfilled",
         )
         return
 

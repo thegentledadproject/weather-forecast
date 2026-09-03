@@ -10,6 +10,12 @@ venv/
 *.sqlite
 *.sqlite3
 
+# The per-station EV snapshot ev_engine.save_ev_snapshot() writes for the
+# dashboard. Overwritten every cycle, so committing it is pure churn — and it
+# carries live model probabilities and market prices, which is the same
+# runtime state the databases above are excluded for.
+ev_latest_*.json
+
 # Credentials
 .env
 *.pem

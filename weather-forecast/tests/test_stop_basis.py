@@ -310,7 +310,9 @@ def test_a_zero_bid_falls_back_to_the_ask_so_the_stop_still_exists():
     """
     position = _position(entry_price=0.30, entry_bid=0.0)
 
-    assert risk_manager.stop_basis_price(position) == pytest.approx(0.30)
+    price, basis = risk_manager.stop_basis_price(position)
+    assert price == pytest.approx(0.30)
+    assert basis == "entry_ask_fallback"
     decision = risk_manager.evaluate_exit(
         position, current_price=0.30 - 0.30 * 0.30, local_hour=LOOSE_HOUR,
     )
@@ -328,7 +330,9 @@ def test_a_bid_above_the_ask_falls_back_to_the_ask():
     """
     position = _position(entry_price=0.20, entry_bid=0.60)
 
-    assert risk_manager.stop_basis_price(position) == pytest.approx(0.20)
+    price, basis = risk_manager.stop_basis_price(position)
+    assert price == pytest.approx(0.20)
+    assert basis == "entry_ask_fallback"
     decision = risk_manager.evaluate_exit(
         position, current_price=0.20, local_hour=LOOSE_HOUR,
     )
@@ -340,7 +344,9 @@ def test_an_equal_bid_and_ask_is_not_treated_as_an_anomaly():
     it means the two bases coincide, not that the quote is bad."""
     position = _position(entry_price=0.20, entry_bid=0.20)
 
-    assert risk_manager.stop_basis_price(position) == pytest.approx(0.20)
+    price, basis = risk_manager.stop_basis_price(position)
+    assert price == pytest.approx(0.20)
+    assert basis == "entry_bid"
 
 
 # --------------------------------------------------------------------------

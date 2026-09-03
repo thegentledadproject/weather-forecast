@@ -168,9 +168,14 @@ def classify(position: Position) -> Optional[str]:
     # From the same price the live rule starts at -- the entry-side bid where
     # one was recorded, the ask otherwise. Delegated rather than restated: a
     # second copy of "where does the stop start" is how this audit would come
-    # to score history against a threshold production does not use.
+    # to score history against a threshold production does not use. The basis
+    # label is read too (not just the price) so this stays the SAME PAIR
+    # production used -- the audit and evaluate_exit cannot drift onto
+    # different bases when both read stop_basis_price() rather than each
+    # recomputing "which price".
+    basis_price, _basis = risk_manager.stop_basis_price(position)
     return (WOULD_FIRE_ANYWAY
-            if (risk_manager.stop_basis_price(position) - bid) >= loose_distance
+            if (basis_price - bid) >= loose_distance
             else TIGHTENING_ONLY)
 
 
@@ -202,9 +207,11 @@ def loose_trigger_price(position: Position) -> float:
     entry_price: since 2026-09-01 the stop starts at the entry-side bid, so
     anchoring here on the ask would print a level a cycle never waits for.
     The DISTANCE is still a fraction of the risk unit, which stays on the
-    price actually paid."""
-    return (risk_manager.stop_basis_price(position)
-            - config.STOP_LOSS_PCT * risk_manager.risk_unit(position.entry_price))
+    price actually paid. The basis LABEL is discarded here -- this function
+    only ever prints a price -- but it comes from the same call as
+    classify() above, so the two can't disagree about which basis it is."""
+    basis_price, _basis = risk_manager.stop_basis_price(position)
+    return basis_price - config.STOP_LOSS_PCT * risk_manager.risk_unit(position.entry_price)
 
 
 def realized_pnl(position: Position) -> Optional[float]:

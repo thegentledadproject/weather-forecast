@@ -34,6 +34,24 @@ def stub_book(monkeypatch, tick="0.01", min_order_size=None):
     )
 
 
+# Captured before the autouse stub below can replace it, for the one test that
+# is ABOUT the real function's behaviour on a ghost book.
+_REAL_GET_AVAILABLE_DEPTH_USD = market_client.get_available_depth_usd
+
+
+@pytest.fixture(autouse=True)
+def _live_depth(monkeypatch):
+    """
+    _resolved_size_ok() re-reads depth from the live book at submission time
+    rather than trusting decision.available_depth_usd, which is the fetch made
+    back when the candidate was sized. Every test in this file therefore
+    reaches the network unless depth is pinned, and an unreadable book is now
+    a refusal -- so the default here is a book deep enough not to bind. Tests
+    that are ABOUT depth override it.
+    """
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda t: 1000.0)
+
+
 def make_decision(size_usd=1.0, price=0.30, station="WSSS", approved=True, token_id="TOK"):
     return EntryDecision(
         station_icao=station, target_date=date(2026, 8, 10), bucket_c=32, side="YES",
@@ -895,6 +913,11 @@ def test_a_ghost_book_reads_as_no_book_at_all(monkeypatch):
 
     monkeypatch.setattr(market_client.requests, "get", lambda *a, **kw: _Resp())
     monkeypatch.setattr(market_client, "_ghost_book_seen", set())
+    # This test is about the real function, so put it back over the autouse
+    # stub that keeps every other test in this file off the network.
+    monkeypatch.setattr(
+        market_client, "get_available_depth_usd", _REAL_GET_AVAILABLE_DEPTH_USD
+    )
 
     assert market_client.get_order_book("TOK") is None
     assert market_client.get_available_depth_usd("TOK") is None
@@ -1104,10 +1127,18 @@ def _spec(notional, price=0.40, shares=5.0):
     )
 
 
-def test_an_unchanged_size_is_not_rechecked(monkeypatch):
-    monkeypatch.setattr(market_client, "estimate_slippage", _explode)
+def test_an_unchanged_size_is_still_rechecked(monkeypatch):
+    """
+    This test used to assert the opposite -- that an unchanged size returned
+    immediately, having validated nothing. The size is indeed the thing that
+    did not move; the BOOK is not, and the book is what these gates measure.
+    The note still says the size held, so the journal can tell the two paths
+    apart.
+    """
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
     ok, note = executor._resolved_size_ok(_spec(1.00), make_decision(size_usd=1.00))
-    assert ok and note == ""
+    assert ok
+    assert "size unchanged" in note
 
 
 def test_upsized_order_is_rejected_when_it_blows_the_depth_cap(monkeypatch):
@@ -1117,8 +1148,10 @@ def test_upsized_order_is_rejected_when_it_blows_the_depth_cap(monkeypatch):
     size was submitted at up to 3.75x it.
     """
     monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.01)
-    decision = make_decision(size_usd=1.00)
-    decision.available_depth_usd = 8.0          # 25% of 8 = $2.00 ceiling
+    # The LIVE book at submission, not decision.available_depth_usd -- that
+    # field is now only quoted in the refusal text for comparison.
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda t: 8.0)
+    decision = make_decision(size_usd=1.00)     # 25% of 8 = $2.00 ceiling
 
     ok, note = executor._resolved_size_ok(_spec(3.75), decision)
 

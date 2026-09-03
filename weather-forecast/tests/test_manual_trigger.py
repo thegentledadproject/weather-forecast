@@ -176,6 +176,10 @@ def test_the_size_recheck_skips_the_ev_test_when_there_is_no_model_number(monkey
     from datetime import date as _date
 
     monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.0)
+    # Depth is re-read from the live book at submission time now, not taken
+    # from decision.available_depth_usd. Pinned deep enough not to bind, so
+    # this test stays about the missing net-EV number.
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda t: 216.0)
     decision = EntryDecision(
         station_icao="WSSS", target_date=_date(2026, 8, 12), bucket_c=32, side="YES",
         kelly_fraction_raw=0.0, kelly_fraction_applied=0.0, recommended_size_usd=1.0,
