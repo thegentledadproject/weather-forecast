@@ -41,11 +41,13 @@ value against a $0.50 bound: a 10x margin, where the old bound had none.
 TestTheDustBoundKeepsItsMargin is what holds that line.
 """
 import math
+from datetime import date
 
 import pytest
 
 import config
 from clients import wallet_client
+from models import SettledToken
 
 
 class _FakeLib:
@@ -135,7 +137,7 @@ class TestTheHaltItself:
             trades=[DUST_TOKEN],
             settled_tokens={},
         )
-        assert [t for t, _ in recon.dust] == [DUST_TOKEN], (
+        assert [t for t, *_ in recon.dust] == [DUST_TOKEN], (
             "ignored is not the same as invisible -- the shares are really "
             "held and must stay auditable"
         )
@@ -242,8 +244,11 @@ class TestBackwardCompatibility:
         recon = wired(
             balances={DUST_TOKEN: 0.008885},
             trades=[DUST_TOKEN],
-            settled_tokens={DUST_TOKEN: (5.0, 0.0)},
+            settled_tokens={DUST_TOKEN: SettledToken(
+                station_icao="RCSS", target_date=date(2026, 8, 30),
+                bucket_c=35, side="NO", size_shares=5.0, exit_price=0.0,
+            )},
         )
         assert recon.ok
         assert recon.settled_unredeemed == []
-        assert [t for t, _ in recon.dust] == [DUST_TOKEN]
+        assert [t for t, *_ in recon.dust] == [DUST_TOKEN]

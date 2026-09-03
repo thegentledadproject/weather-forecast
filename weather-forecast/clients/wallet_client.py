@@ -1283,12 +1283,13 @@ def preflight(token_id: Optional[str] = None, settled_unredeemed=None) -> list:
             "directly against the spender contracts."
         )
 
-    for token, shares, exit_price in settled_unredeemed or []:
+    for token, shares, exit_price, station, tdate, bucket, side in settled_unredeemed or []:
         if (exit_price or 0.0) <= 0:
             continue
         lines.append(
-            f"[!!] {token[:12]}... won at {exit_price:.2f} and is still held: "
-            f"{shares:.6f} shares, ${shares * exit_price:.2f} uncollected. "
+            f"[!!] {_position_label(station, tdate, bucket, side, token)} won at "
+            f"{exit_price:.2f} and is still held: {shares:.6f} shares, "
+            f"${shares * exit_price:.2f} uncollected. "
             f"REDEEM IT ON THE EXCHANGE -- nothing in this system does."
         )
     return lines
@@ -1312,6 +1313,35 @@ def check_allowances_reminder() -> str:
     )
 
 
+def _position_label(station_icao, target_date, bucket_c, side, token_id) -> str:
+    """
+    "WSSS 2026-08-20 32°NO", or an honest "unrecorded" when the database has
+    no row to name -- never a fabricated station. Requirement 3 of the
+    2026-09-01 redemption design: a token-id prefix identifies nothing to a
+    human, and the identity was sitting on the same database row the whole
+    time.
+
+    Routes bucket_c through bucket_axis.label() rather than printing it
+    raw. Local imports, matching this module's existing convention
+    (_pad_limit, build_entry_order) of not carrying config/bucket_axis as a
+    module-level dependency -- this is the one place display code needs
+    them, not the whole file.
+    """
+    if station_icao is None:
+        return f"{token_id[:10]}... (unrecorded)"
+    import config
+    import bucket_axis
+
+    station = config.STATIONS.get(station_icao)
+    if station is None or bucket_c is None:
+        return f"{station_icao} {token_id[:10]}..."
+    axis = bucket_axis.for_station(station)
+    bucket_label = axis.label(bucket_c, station.bucket_min_c, station.bucket_max_c)
+    side_text = f" {side}" if side else ""
+    date_text = f" {target_date}" if target_date else ""
+    return f"{station_icao}{date_text} {bucket_label}{side_text}"
+
+
 # --------------------------------------------------------------------------
 # Reconciliation against the exchange
 # --------------------------------------------------------------------------
@@ -1331,8 +1361,11 @@ class Reconciliation:
     verified: list = None              # (token_id, shares) agreeing on both sides
     db_only: list = None               # DB says open, exchange shows no/too few shares
     exchange_only: list = None         # exchange holds shares, DB has no open row
-    settled_unredeemed: list = None    # (token_id, shares, exit_price) resolved, still held
-    dust: list = None                  # (token_id, shares) too small to be exposure
+    settled_unredeemed: list = None    # (token_id, shares, exit_price, station_icao,
+                                        #  target_date, bucket_c, side) resolved, still held
+    dust: list = None                  # (token_id, shares, station_icao_or_None)
+                                        # too small to be exposure; station is None when
+                                        # the trade that left it was never recorded at all
 
     def __post_init__(self):
         self.verified = self.verified or []
@@ -1375,8 +1408,9 @@ class Reconciliation:
         if not self.settled_unredeemed:
             return ""
         return f"{len(self.settled_unredeemed)} settled but unredeemed: " + ", ".join(
-            f"{t[:10]}... ({s:.2f} sh, worth ${s * x:.2f})"
-            for t, s, x in self.settled_unredeemed
+            f"{_position_label(station, date, bucket, side, t)} "
+            f"({s:.2f} sh, worth ${s * x:.2f})"
+            for t, s, x, station, date, bucket, side in self.settled_unredeemed
         )
 
     def describe_dust(self) -> str:
@@ -1389,8 +1423,9 @@ class Reconciliation:
         if not self.dust:
             return ""
         return f"{len(self.dust)} dust holding(s) ignored: " + ", ".join(
-            f"{t[:10]}... ({s:.6f} sh, worth at most ${s * MAX_SHARE_VALUE_USD:.4f})"
-            for t, s in self.dust
+            f"{_position_label(station, None, None, None, t)} "
+            f"({s:.6f} sh, worth at most ${s * MAX_SHARE_VALUE_USD:.4f})"
+            for t, s, station in self.dust
         )
 
 
@@ -1618,15 +1653,24 @@ def reconcile_live_positions(open_live_positions, settled_tokens=None) -> Reconc
             # not exposure whatever the position's status was, and routing it
             # through settled_unredeemed would advertise sub-cent "winnings"
             # nobody can redeem.
+            #
+            # Station identity threaded through WHEN the database has a
+            # record for it (asset in settled), else None -- an unrecorded
+            # trade genuinely has no station to name, and guessing one would
+            # be exactly the fabrication this codebase refuses elsewhere.
+            # describe_dust() renders the None case honestly.
             if held > 0:
-                dust.append((asset, held))
+                dust.append((asset, held, settled[asset].station_icao if asset in settled else None))
             continue
         if asset in settled:
             # Recorded and resolved: real shares, but not exposure. Reported,
             # never counted as divergence.
-            _, exit_price = settled[asset]
-            exit_price = exit_price or 0.0
-            settled_unredeemed.append((asset, held, exit_price))
+            record = settled[asset]
+            exit_price = record.exit_price or 0.0
+            settled_unredeemed.append((
+                asset, held, exit_price,
+                record.station_icao, record.target_date, record.bucket_c, record.side,
+            ))
             if exit_price > 0:
                 # A WINNER nobody collected. Redemption is manual in this
                 # system, so this line is the only thing that will ever say

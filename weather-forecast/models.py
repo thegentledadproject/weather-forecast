@@ -487,6 +487,27 @@ class BacktestResult:
 
 
 @dataclass
+class SettledToken:
+    """
+    An outcome token a LIVE position's `closed_resolution` closed but that
+    this repo never redeemed -- see storage.load_settled_live_tokens().
+
+    Carries the position's identity (station, target date, bucket, side)
+    alongside its size and settlement price, so every message built from it
+    can name "WSSS 2026-08-20 32°NO" instead of a token-id prefix that
+    identifies nothing to a human. Before this field set existed, the map
+    was keyed purely on token_id and threw the identity away even though it
+    sat on the same database row.
+    """
+    station_icao: str
+    target_date: date
+    bucket_c: int
+    side: str
+    size_shares: float
+    exit_price: float
+
+
+@dataclass
 class BacktestSummary:
     """Aggregated error statistics for a set of BacktestResults, optionally segmented by lead time."""
     station_icao: str
