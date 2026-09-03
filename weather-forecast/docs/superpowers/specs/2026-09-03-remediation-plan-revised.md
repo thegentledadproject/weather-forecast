@@ -8,6 +8,52 @@ queried for volume; spread-floor arithmetic recomputed independently.
 
 ---
 
+## Status addendum (2026-09-03, post-deploy)
+
+**The six NOW-wave items below (P0-0, P0-4, P1-3, P1-4, P1-5, P1-9) are DONE.**
+Committed `807da5b` on `fix/remediation-wave-1`, merged to main at `754888f`,
+pushed to origin, and deployed to the EC2 box **2026-09-03 13:40:58 UTC**.
+Everything in §0, §2, and §4 below still describes them as pending — read
+those sections as the plan that WAS executed, not as an open TODO list.
+
+**File:line citations into `ev_engine.py`, `executor.py`, `risk_manager.py`,
+and `position_manager.py` are now STALE** — the wave's own fixes edited
+exactly the functions those citations point at. Drift ranges from a couple of
+lines to over 150. Two are actively misleading rather than merely off:
+`risk_manager.py:299-312` now shows `stop_basis_price()` returning
+`Tuple[float, str]`, the opposite of what this document says it shows; and
+`executor.py:985-991` no longer contains the P1-5 defect at all — it lands on
+an unrelated, correctly-behaving block. Citations into files the wave never
+touched (`config.py`, `entry_manager.py`, `probability.py`, `calibration.py`,
+`scheduler.py`, `clients/wallet_client.py`) are still exact. **Grep for the
+quoted text, don't trust the line number, in any section below.**
+
+**P0-2's cited evidence (§1.4, §4) was drawn from an unrepresentative
+database.** "2 rows (2026-08-29, 2026-08-30)" was the local dev checkout,
+not the box. The box's real `ensemble_spread` held **198 rows across 35
+stations and 6 dates (2026-08-29 through 2026-09-03)** as of this deploy —
+~0.94 rows/station/day. The conclusion is unchanged (reaching the plan's own
+≥60-per-station bar at that rate lands at **~2026-10-31 to 2026-11-01**), it
+is now supported by the right number.
+
+**P0-1's window, dated concretely:** `ev_snapshots` began recording at the
+deploy timestamp above. Attempt P0-1 no earlier than **~2026-10-03**, and
+check the table's actual row count and date spread on the box before
+assuming the 30–60 day estimate has been reached — don't just count calendar
+days, since a data gap or a partial deploy would still show a date range
+without the row count to back it.
+
+**Unresolved, unchanged by the deploy:** all four items in §6 (fund the EOA,
+whether the daemon ever redeems, formal read-only measurement access, P2-2's
+rollout station). §6's Q3 has an informal answer now — read-only SSH queries
+against the box's live DB worked fine during this deploy — but nothing was
+built or packaged from it.
+
+See [[remediation-wave-1]] in project memory for the full deploy record,
+including the pre-deploy safety-check bug this session caught.
+
+---
+
 ## 0. What this revision changes, and what it does not
 
 **It does not overturn a defect.** Of the source plan's 24 findings, 21 verify
