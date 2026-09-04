@@ -69,6 +69,7 @@ pipeline.py, ev_engine.py, position_manager.py (local)
 """
 
 import argparse
+import sys
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
@@ -382,7 +383,9 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
         # table and the tokens being sized end up describing different
         # books, and how a station whose window has drifted gets priced
         # against Singapore's old 25-35 range.
-        ev_run = ev_engine.run_for_station_with_map(estimate)
+        ev_run = ev_engine.run_for_station_with_map(
+            estimate, execution_mode=executor.EXECUTION_MODE.get(station_icao),
+        )
         ev_results = ev_run.ev_results
         # Snapshot every computation -- including empty ones -- so the
         # status dashboard can show the latest EV table and its age.
@@ -469,7 +472,13 @@ def _run_collection_cycle(station_icao: str) -> None:
         return
 
     try:
-        ev_run = ev_engine.run_for_station_with_map(result["estimate"])
+        ev_run = ev_engine.run_for_station_with_map(
+            result["estimate"],
+            # P1-8(a): a book that SELLS pays a second taker fee, and the EV
+            # table has to see it. Passed rather than looked up inside
+            # ev_engine -- that would be a circular import.
+            execution_mode=executor.EXECUTION_MODE.get(station_icao),
+        )
         ev_engine.save_ev_snapshot(station_icao, ev_run.ev_results)
         if ev_run.veto_reason:
             print(
@@ -636,7 +645,14 @@ def run_forever(station_icaos: Optional[list] = None) -> None:
         time.sleep(sleep_seconds)
 
 
-if __name__ == "__main__":
+def _build_parser() -> argparse.ArgumentParser:
+    """
+    The CLI, as a function so its flags can be tested.
+
+    Built here rather than inline under __main__ because a flag that decides
+    whether the daemon boots is exactly the kind of thing that should have a
+    test, and nothing inside `if __name__ == "__main__"` can have one.
+    """
     parser = argparse.ArgumentParser(description="Run the weather-forecast trading scheduler.")
     parser.add_argument(
         "--mode",
@@ -663,6 +679,76 @@ if __name__ == "__main__":
         action="store_true",
         help="Required with --mode live. Without it, live is refused.",
     )
+    parser.add_argument(
+        "--require-live",
+        action="store_true",
+        help=(
+            "Refuse to start if any OPEN LIVE position belongs to a station this "
+            "run is not authorised to close. Without it the mismatch is reported "
+            "loudly and the daemon starts anyway (the default). For the systemd "
+            "unit once you trust it."
+        ),
+    )
+    return parser
+
+
+def enforce_live_requirement(require_live: bool) -> int:
+    """
+    Report every open live position this process cannot close, and decide
+    whether that is fatal. Returns the exit code: 0 to continue.
+
+    WHY THIS EXISTS AT ALL. The deployed mode lives in /etc/polyweather/mode.env,
+    which deploy_daemon.sh creates once and never rewrites. Lose that file and
+    the daemon comes up without live authorisation, at which point
+    executor.close_position() refuses to sell every live position. Safe in
+    isolation -- and the result is real money sitting on the exchange with no
+    working stop-loss behind it, in a process that runs perfectly normally and
+    prints nothing unusual until an exit signal fires that cannot be acted on.
+
+    THE WARNING IS THE DEFAULT AND THE REFUSAL IS OPT-IN. Making the refusal
+    unconditional would mean one stranded live position also stops the paper
+    book -- which risks nothing, is the larger part of the system, and is the
+    part still working. An operator who would rather not boot at all than boot
+    half-blind sets --require-live in the unit.
+
+    NEVER AUTO-PROMOTES. A live position found while in a non-live mode is not
+    authorisation to go live; it is evidence that something is inconsistent.
+    Refusing is the safe direction, promoting is the one that spends money on
+    a guess.
+
+    An UNREADABLE book is not a refusal. unmanageable_live_positions() already
+    swallows a storage failure and returns [], and turning a transient read
+    error into a boot loop would be a worse failure than the one this guards.
+    The entry path fails closed on its own.
+    """
+    stranded = executor.warn_about_unmanageable_live_positions()
+    if stranded and require_live:
+        print(
+            f"[scheduler] REFUSING TO START: --require-live was given and {stranded} open "
+            f"live position(s) above belong to stations this run cannot close.\n"
+            f"  Fix the mode (POLYWEATHER_MODE=live in /etc/polyweather/mode.env) or close\n"
+            f"  those positions and their rows, then start again. Drop --require-live to\n"
+            f"  boot anyway with the warning above.\n"
+        )
+        return 1
+    return 0
+
+
+def _check_live_acknowledgement(parser, args) -> None:
+    """
+    --mode live requires --i-understand-this-spends-real-money. Extracted so
+    the two-switch requirement can be tested; unchanged in behaviour.
+    """
+    if args.mode == "live" and not getattr(args, "i_understand_this_spends_real_money"):
+        parser.error(
+            "--mode live requires --i-understand-this-spends-real-money. "
+            "It also requires POLYMARKET_LIVE_TRADING=true in the environment; "
+            "neither switch is sufficient alone."
+        )
+
+
+if __name__ == "__main__":
+    parser = _build_parser()
     args = parser.parse_args()
 
     if args.mode in ("simulation", "live"):
@@ -670,12 +756,7 @@ if __name__ == "__main__":
         # a statement about the run, not about the registry: only stations
         # config.py already permits get the real order path, and the other
         # twelve keep paper-trading in the same process.
-        if args.mode == "live" and not getattr(args, "i_understand_this_spends_real_money"):
-            parser.error(
-                "--mode live requires --i-understand-this-spends-real-money. "
-                "It also requires POLYMARKET_LIVE_TRADING=true in the environment; "
-                "neither switch is sufficient alone."
-            )
+        _check_live_acknowledgement(parser, args)
 
         promoted, held_back = [], []
         for icao in config.STATIONS:
@@ -745,6 +826,8 @@ if __name__ == "__main__":
     # until an exit signal fires, and meanwhile real shares sit with no
     # working stop-loss. The mode chosen above is exactly what determines
     # whether that is the situation, so this is the moment to check.
-    executor.warn_about_unmanageable_live_positions()
+    exit_code = enforce_live_requirement(args.require_live)
+    if exit_code:
+        sys.exit(exit_code)
 
     run_forever()

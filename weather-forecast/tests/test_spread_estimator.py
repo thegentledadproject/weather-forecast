@@ -219,11 +219,25 @@ def test_pooled_error_counts_as_low_confidence():
     bar. Under the old chain every station got "forecast_variance", which
     never tripped this despite being the least trustworthy number in the
     model.
+
+    THE ENSEMBLE ASSERTION HERE USED TO BE THE OPPOSITE, and it was right at
+    the time. Before the 2026-08-29 tier reordering the ensemble sat at the
+    TOP of the chain and fired for every station on every cycle, so putting
+    it in the set would have doubled the edge bar for the entire book rather
+    than for the stations the gate is about.
+
+    The reorder (replay_constant -> measured_error -> ensemble ->
+    pooled_error -> fallback_default) changed what the tier MEANS: it now
+    fires only where the measured tier could not, i.e. exactly the "no
+    spread measured for this station" population. Added to the set
+    2026-09-04 (P3-4); see config.LOW_CONFIDENCE_SPREAD_SOURCES for the
+    measurement, and tests/test_low_confidence_spread_gate.py for the
+    behaviour.
     """
     assert "pooled_error" in config.LOW_CONFIDENCE_SPREAD_SOURCES
     assert "fallback_default" in config.LOW_CONFIDENCE_SPREAD_SOURCES
     assert "measured_error" not in config.LOW_CONFIDENCE_SPREAD_SOURCES
-    assert "ensemble" not in config.LOW_CONFIDENCE_SPREAD_SOURCES
+    assert "ensemble" in config.LOW_CONFIDENCE_SPREAD_SOURCES
 
 
 def test_calibrate_passes_the_station_through():

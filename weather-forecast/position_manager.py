@@ -390,7 +390,7 @@ def _check_one_position(
             market_closed = _market_reported_closed(position)
 
             if market_closed is True:
-                return _close_as_resolved(position, current_price, market_closed)
+                return _close_resolved_market(position, current_price, market_closed)
 
             if market_closed is None:
                 # Can't confirm either way. Hold THIS CYCLE ONLY -- and
@@ -711,8 +711,32 @@ def _event_bounds(position: Position, station) -> Optional[tuple]:
     )
 
 
+def _book_basis_prefix(book_quote: Optional[float]) -> str:
+    """
+    How the basis string should describe the book, given what it was quoting.
+
+    Two callers reach the settlement tiers now and they are in opposite
+    situations. The feed-down path arrives because there IS no book; the
+    resolved-market path (P1-7) arrives with a perfectly readable quote that is
+    simply not the authority. A single hardcoded "no book left to read" was true
+    for the first and false for the second, and a permanent P&L record that
+    misstates why it distrusted the book is worse than one that says nothing.
+
+    Naming the overridden quote is the point rather than a courtesy: a close
+    where the book and the thermometer AGREED and one where they disagreed by
+    the whole dollar look identical otherwise.
+    """
+    if book_quote is None:
+        return "no book left to read"
+    return (
+        f"the book quoted {book_quote:.3f}, but a resolved market pays on the "
+        f"record it settles against, not on its last quote"
+    )
+
+
 def _close_from_recorded_settlement(
-    position: Position, station, gamma_closed: Optional[bool]
+    position: Position, station, gamma_closed: Optional[bool],
+    book_quote: Optional[float] = None,
 ) -> Optional[ExitDecision]:
     """
     Close a resolved position from the bucket the MARKET settled into,
@@ -778,7 +802,8 @@ def _close_from_recorded_settlement(
         position.side, position.bucket_c, winning_bucket,
     )
     basis = (
-        f"no book left to read and no settlement-grade reading for {position.target_date} "
+        f"{_book_basis_prefix(book_quote)} and no settlement-grade reading for "
+        f"{position.target_date} "
         f"(source {getattr(station, 'resolution_grade_source', '?')} has not published it); "
         f"settled from the MARKET's own resolution -> winning bucket {winning_bucket}C, "
         f"so {position.bucket_c}C {position.side} pays {exit_price:.1f}"
@@ -786,7 +811,10 @@ def _close_from_recorded_settlement(
     return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)
 
 
-def _close_from_settlement_source(position: Position, gamma_closed: Optional[bool]) -> Optional[ExitDecision]:
+def _close_from_settlement_source(
+    position: Position, gamma_closed: Optional[bool],
+    book_quote: Optional[float] = None,
+) -> Optional[ExitDecision]:
     """
     Close a resolved position using the station's own settlement-grade
     reading, when the order book can no longer be read at all.
@@ -825,7 +853,7 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
         # SECOND TIER: what the exchange paid, when the record it paid
         # against has not published yet. Preferred order, not preference
         # by convenience -- see _close_from_recorded_settlement.
-        return _close_from_recorded_settlement(position, station, gamma_closed)
+        return _close_from_recorded_settlement(position, station, gamma_closed, book_quote)
 
     # BOUNDS COME FROM THE EVENT, NEVER FROM config.STATIONS.
     #
@@ -877,12 +905,61 @@ def _close_from_settlement_source(position: Position, gamma_closed: Optional[boo
     )
 
     basis = (
-        f"no book left to read; settled from {obs.source} {obs.max_temp_c:.1f}C "
+        f"{_book_basis_prefix(book_quote)}; settled from {obs.source} {obs.max_temp_c:.1f}C "
         f"-> winning bucket {axis.label(winning_bucket, bucket_min, bucket_max)}, so "
         f"{axis.label(position.bucket_c, bucket_min, bucket_max)} "
         f"{position.side} pays {exit_price:.1f}"
     )
     return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)
+
+
+def _close_resolved_market(
+    position: Position, book_quote: float, gamma_closed: Optional[bool]
+) -> ExitDecision:
+    """
+    Close a position whose market Gamma reports CLOSED, preferring the record
+    the market settles against over the quote still sitting on the book.
+
+    THE ORDER IS THE FIX (P1-7). This used to be a bare call to
+    _close_as_resolved(book_quote), which decides the winner by rounding the
+    book at 0.5. The market does not settle on the book -- it settles on the
+    airport thermometer, and for this station that reading is already in the
+    database. The honest path existed and ran only when the price feed was
+    down, i.e. only as a last resort, and was skipped whenever a quote happened
+    to be available.
+
+    WHAT IT WAS WORTH. The cohort monitor measured 80 resolution-closed rows
+    over 2026-08-03..09-01 booking $21.65 MORE than clean settlement value. So
+    this makes the record correct, not more profitable -- the error had been
+    flattering the book. That $21.65 is also the number to watch afterwards:
+    cohort_monitor's `other_gap` should trend toward zero as rows closed under
+    the new order accumulate.
+
+    THE FALLBACK IS NOT OPTIONAL. The settlement tiers decline for reasons that
+    have nothing to do with the quote -- a source that publishes in arrears
+    (VHHH is weeks behind), or event bounds discovery cannot supply. Those
+    positions close fine on their quote today, and leaving them open instead
+    would trade a pricing error for a stranded-position bug. So a readable
+    quote always closes; what changes is only which source is asked first.
+    """
+    from_record = _close_from_settlement_source(
+        position, gamma_closed=gamma_closed, book_quote=book_quote,
+    )
+    if from_record is not None:
+        return from_record
+
+    # Neither tier could answer. The quote is what is left, and the basis says
+    # so explicitly rather than letting the default "confirmed price" wording
+    # imply the record was consulted and agreed.
+    station = _station_for(position)
+    basis = (
+        f"no settlement-grade reading and no recorded settlement for "
+        f"{position.target_date} (source "
+        f"{getattr(station, 'resolution_grade_source', '?')}); settled from the "
+        f"book's confirmed quote {book_quote:.3f}, which is a proxy for the "
+        f"record and not the record"
+    )
+    return _close_as_resolved(position, book_quote, gamma_closed, basis=basis)
 
 
 def _note_unknown_resolution(position: Position, price: float) -> int:

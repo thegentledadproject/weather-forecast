@@ -402,3 +402,95 @@ crosses zero on noise, and a threshold that trips on noise gets ignored.
    differ in what they cost if the firing is a false alarm, which makes it a call for
    whoever is carrying the money. Worth deciding *before* ~2026-10-03, when the 30-day
    window starts being able to fire.
+
+---
+
+## 10. Addendum, 2026-09-04 — Phase 1's remaining NOW-row items
+
+Branch `fix/remediation-wave-2`, six commits, **not merged and not deployed**.
+1535 tests green. Every premise was re-verified against the deployed tree first,
+because §1 had already found seven plan items shipped — and doing so changed two
+of the six.
+
+| Item | Premise held? | What shipped |
+|---|---|---|
+| **P1-1** day budget at resolved size | yes | `executor._day_budget_breach()`, called before the mode branch |
+| **P1-2** limit pad in EV | yes | `OrderSpec.pad_cost_pct`, charged in the at-size re-derivation |
+| **P1-6** live-auth legibility | **mostly already shipped** | only `--require-live` was missing |
+| **P1-7** settlement before book | yes | `position_manager._close_resolved_market()` |
+| **P1-8(a)** exit fee in EV | yes | `ev_engine.expected_exit_fee_pct_of_notional()` |
+| **P3-4** low-confidence gate | yes, and **strengthened** by the 08-29 reorder | `"ensemble"` added to the set |
+
+**P1-8(b)** (the `entry_fee_per_share` migration) is deliberately excluded — the
+plan calls for a separate PR, and it changes the meaning of stored rows.
+
+### 10.1 Two items were not what the plan said
+
+**P1-6 was four-fifths done already.** `executor.warn_about_unmanageable_live_
+positions()` already prints the `[ACTION NEEDED]` block at boot, before the first
+cycle, naming each position and the dollar total, and never auto-promotes. Only
+the `--require-live` refusal was missing. The existing behaviour had no test at
+all; it does now.
+
+**P3-4 got stronger, not weaker, from a change made after the plan was written.**
+Before the 2026-08-29 tier reordering the ensemble sat at the *top* of the chain
+and fired for every station, so adding it to the set would have doubled the edge
+bar for the whole book — and an existing test pinned it *out* for exactly that
+reason. After the reorder it fires only where the measured tier could not, which
+is precisely the "no spread measured for this station" population the gate is
+about. The old pin was right when written and is now obsolete; it was updated in
+place with that history rather than silently flipped.
+
+### 10.2 What the measurements said
+
+- **P1-1's 55% (§5) is confirmed as the reason it moved up.** The unchecked path
+  is the common path, not an edge case.
+- **P1-7's size is now known, and it is not a windfall.** The cohort monitor
+  measured 80 resolution-closed rows booking **$21.65 more** than clean
+  settlement value over 2026-08-03..09-01. The old behaviour *flattered* the
+  book, so this makes the record correct rather than more profitable.
+  `cohort_monitor`'s `other_gap` should trend toward zero afterwards — that is
+  the verification hook.
+- **P3-4's blast radius today is one collection-only station.** 34 of 35 stations
+  resolve to `measured_error`; only OPKC does not, and it is not
+  live-allowlisted. It also removes a real inconsistency: OPKC's confidence class
+  flipped on whether an ensemble *fetch succeeded* — `"ensemble"` (normal bar)
+  when it worked, `"pooled_error"` (doubled bar) when it did not.
+
+### 10.3 What changes live trading behaviour
+
+Unlike P0-5, which was measurement-only, **four of these six change what the
+daemon does**, all in the conservative direction:
+
+- **P1-1** refuses entries that would breach a day budget at the resolved size.
+  On every order path, including simulation.
+- **P1-2** and **P1-8(a)** both *lower* the net-EV number the entry gate tests
+  against an unchanged bar, so fewer entries clear it. P1-8(a) affects live and
+  simulation only; the paper book holds to settlement and correctly pays one fee.
+- **P1-7** changes which source decides a resolved position's payout.
+- **P3-4** doubles the edge bar for one collection-only station.
+
+P1-6 changes nothing unless `--require-live` is added to the systemd unit, which
+this does not do.
+
+### 10.4 Sequencing after this wave
+
+```
+DONE   P0-0(retention) P0-4 P1-3 P1-4 P1-5 P1-9   deployed 09-03
+       P2-1                                        deployed 09-03
+       P0-5 cohort monitor                         deployed 09-04
+       P1-1 P1-2 P1-6 P1-7 P1-8a P3-4              built 09-04, NOT deployed
+
+NOW    P1-8b  ← the storage migration, its own PR by design
+
+NEXT   P3-6   ← unblocked: the cohort monitor exists
+       P2-2   ← unblocked on P0-5; still needs prereqs A/B/C
+       └── §4's B-before-P3-6 question is STILL UNDECIDED
+       P1-10  P1-11
+
+DEFER  P0-1 ~2026-10-03   P0-2 ~November   P0-3 needs prod DB access
+       P3-1 P3-2 P3-3 P3-5
+```
+
+§4's gating gap and §9.5's "what does firing mean" are both still open, and
+neither is affected by this wave.

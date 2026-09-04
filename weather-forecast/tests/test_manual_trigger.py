@@ -180,6 +180,15 @@ def test_the_size_recheck_skips_the_ev_test_when_there_is_no_model_number(monkey
     # from decision.available_depth_usd. Pinned deep enough not to bind, so
     # this test stays about the missing net-EV number.
     monkeypatch.setattr(market_client, "get_available_depth_usd", lambda t: 216.0)
+    # The day-budget re-check (P1-1) reads stored exposure, so without this the
+    # test's result would depend on whatever the ambient database happens to
+    # hold. Pinned to zero spend for the same reason depth is pinned deep: this
+    # test is about the missing net-EV number and nothing else.
+    import entry_manager
+    monkeypatch.setattr(entry_manager, "station_day_exposure_usd",
+                        lambda icao, target_date, is_paper=None: 0.0)
+    monkeypatch.setattr(entry_manager, "portfolio_day_exposure_usd",
+                        lambda is_paper=None, region=None: 0.0)
     decision = EntryDecision(
         station_icao="WSSS", target_date=_date(2026, 8, 12), bucket_c=32, side="YES",
         kelly_fraction_raw=0.0, kelly_fraction_applied=0.0, recommended_size_usd=1.0,
