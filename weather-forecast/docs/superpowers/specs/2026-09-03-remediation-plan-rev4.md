@@ -636,3 +636,46 @@ All four dashboards render.
 **Still to observe:** the first position opened after this deploy should carry a
 non-NULL `entry_fee_per_share` written by `open_position()` rather than by the
 backfill. The unit tests cover it; production has not yet written a row.
+
+---
+
+## 12. §4 RESOLVED — prerequisite B is gated on P3-6
+
+**Operator decision, 2026-09-04.** Of the two resolutions §4 offered, the first
+is taken: **prerequisite B is gated on P3-6, and therefore on the cohort
+monitor.** `SIZE_STOPLESS_BOOKS_ON_PURE_KELLY` is not to be decided on its own.
+
+Why this is the right way round, restated so the gate is not later mistaken for
+caution: B asks whether to remove `gap_risk_haircut()` on a stopless book. The
+arithmetic answer is yes — the haircut scales a position so that a *stop-out*
+costs what Kelly was sized against, and a book with no stop has no trigger to
+gap through and no exit spread to pay. The reason it ships `False` anyway is
+that the conservatism is doing real work for a reason **not stated in the
+haircut's own docstring**: Kelly takes the model's probability at face value,
+and this model is measurably overconfident (0.432 mean `model_prob` against a
+0.344 realised rate). Quarter-Kelly is the *declared* buffer; the haircut has
+been an undeclared second one.
+
+Answering B alone therefore means choosing between two stacked corrections and
+one, with no measurement of the bias either is correcting. P3-6 measures it and
+corrects it once, which turns B from a judgement call into a consequence. So B
+is answered inside P3-6, and the answer is conditional rather than a flag flip:
+
+> The haircut retires on a book that holds to settlement **only where the
+> probability being sized on is actually calibrated.** Where the map is not
+> estimable and sizing falls back to the raw `model_prob`, the existing double
+> buffer stays, because in that case it is still standing in for a bias nothing
+> has measured.
+
+`P2-2` inherits this: it may not be started until P3-6 lands, since B is one of
+its prerequisites.
+
+### 12.1 A constraint on P3-6 found before writing any of it
+
+**numpy and scipy are not installed in the box's venv**, and no module in this
+repo imports either — `requirements.txt` is `requests` + `beautifulsoup4` +
+`py-clob-client-v2`. So the calibration map must be **pure Python**. Isotonic
+regression via pool-adjacent-violators is about thirty lines and fully
+deterministic, which is a better trade than adding a numerical dependency to a
+daemon for one function. Recorded because reaching for `sklearn.isotonic` is the
+obvious first move and it would have broken the deploy rather than the tests.
