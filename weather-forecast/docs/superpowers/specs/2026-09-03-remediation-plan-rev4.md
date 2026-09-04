@@ -684,8 +684,9 @@ obvious first move and it would have broken the deploy rather than the tests.
 
 ## 13. Addendum, 2026-09-04 — P3-6 built, and the measurement that should gate it
 
-Branch `feat/p3-6-calibrated-sizing`, **not merged, not deployed**. 1588 tests
-green, all three acceptance conditions met. Prerequisite B is answered inside it
+Branch `feat/p3-6-calibrated-sizing`, **merged `c2887af` and DEPLOYED 2026-09-04
+15:10:27 UTC** (option 1 of §13.4, operator decision). 1590 tests green, all three
+acceptance conditions met. Prerequisite B is answered inside it
 per §12.
 
 ### 13.1 The expected effect was "could go either way". It does not.
@@ -763,3 +764,54 @@ Not recommended: deploying **and** treating the 40% as validated. The number is
 computed with the map fitted on the full record and applied across it, which
 flatters the fit; the production path is out-of-sample per day and will be
 noisier than this.
+
+### 13.5 Deploy record, 2026-09-04 15:10:27 UTC
+
+**Option 1 was chosen** — deploy as built, on the measured effect rather than a
+projected one. §13.1's 40% stands as the expectation, not as a validated result.
+
+Two restarts, both with the unit md5 unchanged (`9506ce61`), resolved args
+unchanged, `NRestarts=0`, LIVE for WSSS + RCSS only, preflight green, zero
+tracebacks. 0 open live positions, every entry window shut (WSSS/RCSS's opens
+21:00 UTC).
+
+- **15:10:27** — the feature.
+- **15:16:38** — `calibrated_prob` and `calibration_source` added to the EV
+  snapshot. Deployed separately because without them the change is invisible in
+  production: the snapshot is what the dashboard EV card reads, and the only
+  alternative was a hand-run probe.
+
+**A cache fix went in before the merge.** `load_cohort()` reads every station,
+two storage queries each; caching only the fitted maps per station-day meant 35
+full cohort loads a day for one unchanging set of rows. The cohort now caches
+per day and the maps per station-day.
+
+Verified on production before the restart, and again after:
+
+```
+production calibration tier: pooled_isotonic  n = 416
+  YES  model_prob 0.3829 -> calibrated 0.3030
+       raw_edge +0.0829  ->  sizing_edge +0.0030
+```
+
+An 8.3-point raw edge now sizes as 0.3 points. Tier coverage: **32 stations
+pooled, 3 on their own** (RKSI, ZGSZ, ZSPD). Neither live station has its own map.
+
+### 13.6 What to watch, and what would say this was wrong
+
+The cohort monitor is the instrument, and it is already on every dashboard page.
+
+- **Entry count.** If ~40% of entries stop, that shows up within days as a
+  visible drop in rows per station-day. If it does not, the map is not binding
+  where the measurement said it would.
+- **The net price edge**, `cohort_monitor`'s trailing-14d line. It stood at
+  **-0.0049** before this change. Calibration is meant to remove the entries
+  whose edge was illusory, so this line should rise. **If it falls, P3-6 is
+  cutting good entries along with bad ones** and should be reverted to shadow.
+- **The `station_isotonic` count.** 3 today; as history accrues more stations
+  graduate off the pooled map, and each graduation changes that station's sizing
+  regime. Worth noticing rather than discovering.
+
+The revert is a one-line change: pass `calibration=None` in
+`run_for_station_with_map`, which restores raw `model_prob` sizing and the double
+buffer exactly.
