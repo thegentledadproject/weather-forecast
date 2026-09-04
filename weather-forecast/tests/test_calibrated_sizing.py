@@ -534,3 +534,25 @@ def test_the_calibrated_value_is_side_adjusted(monkeypatch):
     no = next(r for r in rows if r.side == "NO")
     assert yes.calibrated_prob == pytest.approx(pc.apply_map(fitted, yes.model_prob))
     assert no.calibrated_prob == pytest.approx(pc.apply_map(fitted, no.model_prob))
+
+
+def test_the_cohort_itself_is_read_once_per_day_not_once_per_station(monkeypatch):
+    """
+    load_cohort() reads EVERY station -- two storage queries each, 35 stations.
+    Caching only the fitted map per station-day would re-read the whole book
+    once per station, i.e. 35 full cohort loads a day for one unchanging set
+    of rows. The rows are shared; only the fit is per station.
+    """
+    calls = {"n": 0}
+
+    def _fake_cohort(**kwargs):
+        calls["n"] += 1
+        return [], {}
+
+    monkeypatch.setattr(pc.cohort_monitor, "load_cohort", _fake_cohort)
+    pc.clear_cache()
+
+    for station in ("WSSS", "RCSS", "WMKK", "RJTT"):
+        pc.calibration_for(station, DAY_N)
+
+    assert calls["n"] == 1

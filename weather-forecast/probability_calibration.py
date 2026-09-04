@@ -265,11 +265,20 @@ def haircut_applies(has_stop: bool, calibration_source: str) -> bool:
 # so it is not worth evicting.
 _CACHE: Dict[Tuple[str, date], Tuple[Optional[Tuple[List[float], List[float]]], str, int]] = {}
 
+# {day: cohort rows}. SEPARATE from the map cache above, and the separation is
+# the point: load_cohort() reads EVERY station -- two storage queries each,
+# across 35 stations -- while the fit is per station. Caching only the maps
+# would re-read the whole book once per station, i.e. 35 full cohort loads a
+# day for one unchanging set of rows. The rows are shared; only the fit is not.
+_COHORT_CACHE: Dict[date, List[dict]] = {}
+
 
 def clear_cache() -> None:
-    """Drop the fitted maps. For tests, and for a long-lived process that
-    wants to pick up rows written since it last fitted."""
+    """Drop the fitted maps and the cohort behind them. For tests, and for a
+    long-lived process that wants to pick up rows written since it last
+    fitted."""
     _CACHE.clear()
+    _COHORT_CACHE.clear()
 
 
 def calibration_for(station_icao: str, target_day: date):
@@ -291,8 +300,10 @@ def calibration_for(station_icao: str, target_day: date):
         return _CACHE[key]
 
     try:
-        rows, _ = cohort_monitor.load_cohort(until=target_day)
-        result = fit_for_day(rows, target_day, station_icao)
+        if target_day not in _COHORT_CACHE:
+            rows, _ = cohort_monitor.load_cohort(until=target_day)
+            _COHORT_CACHE[target_day] = rows
+        result = fit_for_day(_COHORT_CACHE[target_day], target_day, station_icao)
     except Exception as exc:  # noqa: BLE001 -- must not take the entry path down
         print(
             f"[probability_calibration] could not fit a map for {station_icao} "
