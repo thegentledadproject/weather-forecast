@@ -275,6 +275,12 @@ def cohort_rows(
             "outcome": outcome,
             "model_prob": position.model_prob,
             "execution_mode": position.execution_mode,
+            # THE ENTRY-SIDE FEE, from the ledger where it was recorded. None
+            # means the row predates the column and was never backfilled;
+            # summarize() estimates those at today's schedule and COUNTS them,
+            # because one un-backfilled row must not void the whole net column
+            # and an estimate must never pass as a record.
+            "entry_fee_per_share": position.entry_fee_per_share,
             "cluster": (position.station_icao, position.target_date),
         })
 
@@ -297,6 +303,25 @@ def scenario_pnl_usd(row: dict, scenario: str) -> float:
     revalued = _REVALUED_CLASSES[scenario]
     exit_value = row["outcome"] if row["exit_class"] in revalued else row["exit_price"]
     return (exit_value - row["entry_price"]) * row["shares"]
+
+
+def _entry_fee_usd(row: dict) -> float:
+    """
+    What this row paid in entry-side taker fee, in dollars.
+
+    Prefers the RECORDED per-share fee (storage.positions.entry_fee_per_share),
+    which is the fee actually charged on the day. Falls back to today's
+    schedule for a row that never carried one -- otherwise a single
+    un-backfilled row would void the net figure for the whole cohort -- and
+    summarize() reports how many rows needed that fallback, so an estimate is
+    never mistaken for a record.
+    """
+    per_share = row.get("entry_fee_per_share")
+    if per_share is None:
+        per_share = (
+            ev_engine.taker_fee_pct_of_notional(row["entry_price"]) * row["entry_price"]
+        )
+    return per_share * row["shares"]
 
 
 def _totals(rows: Sequence[dict], scenario: str) -> Tuple[float, float]:
@@ -419,12 +444,29 @@ def summarize(rows: Sequence[dict]) -> Optional[dict]:
         return None
 
     staked = sum(row["size_usd"] for row in rows)
+
+    # THE FEE THE LEDGER NEVER CHARGED. exit_price is stored net of the exit
+    # taker fee; the entry leg was recorded gross, so every scenario above is
+    # flattered by this. Measured over the published window it is $104.99 on
+    # $4,049.93 staked -- 2.59%, which takes held-to-settlement from +18.4% to
+    # +15.8%. The edge survives and the number was wrong, so both are reported.
+    #
+    # GROSS STAYS THE PRIMARY FIGURE and net travels beside it. The published
+    # 2026-09-02 totals were computed gross; redefining pnl_usd as net would
+    # make reproduction_check() report a MISMATCH that is really two correct
+    # answers to different questions, and that failure would be
+    # indistinguishable from a real regression.
+    entry_fee_usd = sum(_entry_fee_usd(row) for row in rows)
+    n_estimated = sum(1 for row in rows if row.get("entry_fee_per_share") is None)
+
     scenarios = {}
     for scenario in SCENARIOS:
         pnl, _ = _totals(rows, scenario)
         scenarios[scenario] = {
             "pnl_usd": pnl,
             "return_pct": (pnl / staked) if staked else None,
+            "pnl_usd_net": pnl - entry_fee_usd,
+            "return_pct_net": ((pnl - entry_fee_usd) / staked) if staked else None,
         }
 
     def _cost(group: Sequence[dict]) -> float:
@@ -464,6 +506,8 @@ def summarize(rows: Sequence[dict]) -> Optional[dict]:
         "n": len(rows),
         "n_days": len(_clusters(rows)),
         "staked_usd": staked,
+        "entry_fee_usd": entry_fee_usd,
+        "n_estimated_entry_fees": n_estimated,
         "first_date": min(row["target_date"] for row in rows),
         "last_date": max(row["target_date"] for row in rows),
         "scenarios": scenarios,

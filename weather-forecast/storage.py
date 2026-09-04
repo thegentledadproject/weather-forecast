@@ -84,6 +84,23 @@ def _db():
 # closed trade by the entry fee. That asymmetry is a property of the stored
 # data, not of this view -- it is named here so a reader does not rediscover
 # it as a discrepancy.
+#
+# "SLIGHTLY" WAS WRONG, and P1-8(b) measured it: $104.99 over the published
+# 2026-08-03..09-01 window, 2.59% of the $4,049.93 staked. Held-to-settlement
+# goes from +18.4% to +15.8%. The edge survives; the adjective did not.
+#
+# realized_pnl_usd_net is that corrected figure, and BOTH ARE KEPT rather than
+# one replacing the other. The gross column is what the ledger says and what
+# every published measurement to date was computed on -- cohort_monitor
+# reproduces the 2026-09-02 totals against it to the cent, and silently
+# redefining it would invalidate that reproduction without changing a single
+# number in the document it reproduces. The net column is what the trade
+# actually returned. Different questions, both worth asking, named apart.
+#
+# NULL PROPAGATES on both new columns. "Fee unknown" and "fee zero" are
+# different facts and only one of them means net equals gross, so a row with no
+# recorded fee reports NULL rather than quietly handing back the flattered
+# number under the honest name.
 # `p.*` RE-EXPANDS AT PREPARE TIME, so a column added to `positions` by the
 # ALTER TABLE migration below shows up here IMMEDIATELY, on an existing view,
 # with no rebuild -- the drift check compares this SQL text, which has not
@@ -112,7 +129,15 @@ SELECT
          END AS realized_pnl_usd,
     CASE WHEN p.exit_price IS NOT NULL AND p.entry_price > 0
          THEN (p.exit_price - p.entry_price) / p.entry_price
-         END AS realized_pnl_pct
+         END AS realized_pnl_pct,
+    CASE WHEN p.entry_fee_per_share IS NOT NULL AND p.entry_price > 0
+         THEN p.entry_fee_per_share * (p.size_usd / p.entry_price)
+         END AS entry_fee_usd,
+    CASE WHEN p.exit_price IS NOT NULL AND p.entry_price > 0
+              AND p.entry_fee_per_share IS NOT NULL
+         THEN (p.exit_price - p.entry_price) * (p.size_usd / p.entry_price)
+              - p.entry_fee_per_share * (p.size_usd / p.entry_price)
+         END AS realized_pnl_usd_net
 FROM positions p"""
 
 
@@ -212,7 +237,8 @@ def _connect() -> sqlite3.Connection:
             raw_edge REAL,
             net_ev_at_size REAL,
             entry_bid REAL,
-            exit_blocked_reason TEXT
+            exit_blocked_reason TEXT,
+            entry_fee_per_share REAL
         )
         """
     )
@@ -252,9 +278,63 @@ def _connect() -> sqlite3.Connection:
         # backfilled even in principle -- the check reads a fill against a
         # market minimum, and both are facts about an instant that has passed.
         ("exit_blocked_reason", "exit_blocked_reason TEXT"),
+        # THE ENTRY-SIDE TAKER FEE, in dollars per share, as charged at entry.
+        # exit_price is already NET of the exit fee; the entry leg was recorded
+        # GROSS, so every stored return was flattered. Measured over the
+        # published 2026-08-03..09-01 window: $104.99 on $4,049.93 staked --
+        # 2.59% of stake, roughly double the top of the plan's own estimate,
+        # because the fee is 0.05 x (1 - p) of notional and this book's mean
+        # entry is 0.32.
+        #
+        # WHY STORED AND NOT DERIVED. It is a pure function of entry_price
+        # TODAY, so this looks redundant. It is not, and the reason is the same
+        # one that forbids backfilling model_prob above: THE SCHEDULE IS A FACT
+        # ABOUT THE DAY THE TRADE HAPPENED. If Polymarket changes the rate, a
+        # consumer that recomputes restates every historical row at a rate
+        # nobody was ever charged. This column is the record.
+        ("entry_fee_per_share", "entry_fee_per_share REAL"),
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
+
+    # BACKFILL THE ENTRY FEE, once. ALTER TABLE gives every pre-existing row
+    # NULL, and unlike model_prob this one CAN be recovered honestly: the fee
+    # is a function of entry_price, which is stored NOT NULL on every row, and
+    # the schedule has not changed since the first trade.
+    #
+    # `WHERE entry_fee_per_share IS NULL` is what makes this idempotent AND
+    # non-destructive: it runs on every connection, updates zero rows after the
+    # first, and NEVER overwrites a recorded value. That second property is the
+    # important one -- a stored fee is what was CHARGED, and a backfill that
+    # overwrote it would restate history under today's rate the moment the
+    # schedule changes.
+    #
+    # The arithmetic is inlined rather than calling risk_manager.taker_fee_per_
+    # share: this module must not import risk_manager (which imports ev_engine,
+    # which imports this one). The rate lives in ev_engine.
+    # POLYMARKET_WEATHER_TAKER_FEE_RATE and is duplicated here as a literal
+    # ONLY for this one-time backfill of historical rows; every live write goes
+    # through open_position() below, which calls the real function.
+    # GUARDED BY A READ, because this runs on every connection and the daemon
+    # opens one per storage call. An unconditional UPDATE would take a write
+    # lock every time -- on a table that needs it exactly once -- and a write
+    # lock on the connection path is how a read-heavy daemon starts contending
+    # with itself. The SELECT costs nothing after the first run and stops the
+    # UPDATE from ever being issued again.
+    #
+    # Guarding on "did we just ALTER the column in?" would be cheaper still and
+    # is deliberately NOT what this does: a row inserted with a NULL fee by
+    # anything other than open_position() -- ad-hoc SQL, a restore, a future
+    # writer that forgets -- would then never be backfilled at all.
+    needs_backfill = conn.execute(
+        "SELECT 1 FROM positions "
+        "WHERE entry_fee_per_share IS NULL AND entry_price IS NOT NULL LIMIT 1"
+    ).fetchone()
+    if needs_backfill:
+        conn.execute(
+            "UPDATE positions SET entry_fee_per_share = 0.05 * (1.0 - entry_price) * entry_price "
+            "WHERE entry_fee_per_share IS NULL AND entry_price IS NOT NULL"
+        )
 
     # Every real-money order SUBMISSION, filled or not. Separate from
     # `positions` because an unfilled FOK deliberately writes no position --
@@ -908,6 +988,7 @@ def _row_to_position(r) -> Position:
     net_ev_at_size = r[20] if len(r) > 20 else None
     entry_bid = r[21] if len(r) > 21 else None
     exit_blocked_reason = r[22] if len(r) > 22 else None
+    entry_fee_per_share = r[23] if len(r) > 23 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -932,7 +1013,29 @@ def _row_to_position(r) -> Position:
         net_ev_at_size=net_ev_at_size,
         entry_bid=entry_bid,
         exit_blocked_reason=exit_blocked_reason,
+        entry_fee_per_share=entry_fee_per_share,
     )
+
+
+def _entry_fee_for(position: Position) -> Optional[float]:
+    """
+    The entry-side taker fee to record for this position, in dollars/share.
+
+    An explicitly-set value on the Position wins: a caller that knows what was
+    charged -- a replay, or a future schedule change -- must not have it
+    silently recomputed. Otherwise it is derived from entry_price at today's
+    schedule, which is correct for every position this code opens.
+
+    risk_manager is imported HERE rather than at module scope: it imports
+    ev_engine, which imports this module, so a top-level import is circular.
+    """
+    if position.entry_fee_per_share is not None:
+        return position.entry_fee_per_share
+    if not position.entry_price or position.entry_price <= 0:
+        return None
+    import risk_manager
+
+    return risk_manager.taker_fee_per_share(position.entry_price)
 
 
 def open_position(position: Position) -> None:
@@ -951,8 +1054,8 @@ def open_position(position: Position) -> None:
                 exit_price, exit_time, exit_reason, token_id, is_paper,
                 size_shares, execution_mode, order_id,
                 model_prob, raw_edge, net_ev_at_size, entry_bid,
-                exit_blocked_reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                exit_blocked_reason, entry_fee_per_share
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 position.position_id,
@@ -978,6 +1081,13 @@ def open_position(position: Position) -> None:
                 position.net_ev_at_size,
                 position.entry_bid,
                 position.exit_blocked_reason,
+                # RECORDED AT INSERT, not left to the backfill. Relying on the
+                # backfill would work -- it runs on the next connection -- but
+                # it would mean the ledger is briefly wrong on every single
+                # write and correct only afterwards. The live path calls the
+                # real fee function; the backfill's inlined literal exists only
+                # for rows written before this column did.
+                _entry_fee_for(position),
             ),
         )
 
