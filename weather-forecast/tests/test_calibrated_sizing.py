@@ -556,3 +556,24 @@ def test_the_cohort_itself_is_read_once_per_day_not_once_per_station(monkeypatch
         pc.calibration_for(station, DAY_N)
 
     assert calls["n"] == 1
+
+
+def test_the_ev_snapshot_records_the_calibration(tmp_path, monkeypatch):
+    """
+    The snapshot is the only production window onto what the map is doing --
+    the dashboard EV card reads it, and without these two fields the change is
+    invisible outside a hand-run probe. spread_source is already carried for
+    exactly this reason.
+    """
+    import json
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    row = _ev(model_prob=0.383, price=0.30, calibrated=0.303, source=pc.POOLED_TIER)
+    ev_engine.save_ev_snapshot("WSSS", [row])
+
+    payload = json.loads((tmp_path / "ev_latest_WSSS.json").read_text(encoding="utf-8"))
+    saved = payload["results"][0]
+
+    assert saved["model_prob"] == pytest.approx(0.383)
+    assert saved["calibrated_prob"] == pytest.approx(0.303)
+    assert saved["calibration_source"] == pc.POOLED_TIER

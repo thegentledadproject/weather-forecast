@@ -827,6 +827,14 @@ def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
                 "slippage_pct": r.estimated_slippage_pct,
                 "net_ev_per_dollar": r.net_ev_per_dollar,
                 "spread_source": r.spread_source,
+                # THE SNAPSHOT IS THE ONLY PRODUCTION WINDOW onto what the P3-6
+                # map is doing -- the dashboard EV card reads this file, and
+                # without these two the change is invisible outside a hand-run
+                # probe. Carried for the same reason spread_source is: a number
+                # whose provenance is not recorded beside it gets read as
+                # though it had none.
+                "calibrated_prob": r.calibrated_prob,
+                "calibration_source": r.calibration_source,
                 "notes": r.notes,
             }
             for r in results
