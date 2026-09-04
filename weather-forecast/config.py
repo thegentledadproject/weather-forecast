@@ -3840,7 +3840,49 @@ POOLED_SPREAD_CACHE_TTL_S = 3600
 # multiplier even though it was the least trustworthy number in the model.
 # A station with fewer than MIN_SPREAD_PAIRS pairs now correctly has to
 # clear a higher bar. WSSS is unaffected -- it has its own measured spread.
-LOW_CONFIDENCE_SPREAD_SOURCES = {"fallback_default", "pooled_error"}
+#
+# "ensemble" ADDED 2026-09-04 (P3-4), and the 2026-08-29 tier reordering is
+# what makes it belong here rather than being a judgement call.
+#
+#   WHY IT IS NOT A MEASURED SPREAD. It is the dispersion across ECMWF
+#   ensemble members -- a property of the forecast model, not of this
+#   station's own forecast-error history. It is fetched FOR the station's
+#   location, which is not the same thing as being measured FROM the
+#   station's record, and this set is about the latter. Ensembles are also
+#   known to be under-dispersive at short lead times, which is the direction
+#   this file repeatedly calls the dangerous one: a too-narrow spread makes
+#   the model look certain, which inflates the gap against market price,
+#   which the entry gates then size into.
+#
+#   IT IS ALREADY MEASURED WORSE. Brier over 248 unselected station-days put
+#   measured ahead of ensemble by 0.035 (t = -3.15), which is why the chain
+#   was inverted on 2026-08-29 to replay_constant -> measured_error ->
+#   ensemble -> pooled_error -> fallback_default. After that inversion
+#   "ensemble" fires in exactly one situation: a station with too few error
+#   pairs to measure its own spread. That is precisely the population this
+#   gate exists to protect against, and it was the only tier in that
+#   position without the multiplier.
+#
+#   THE INCONSISTENCY IT REMOVES, measured on the deployed registry
+#   2026-09-04. 34 of 35 stations resolve to measured_error. Exactly one --
+#   OPKC, and it is not live-allowlisted -- does not, and which tier it
+#   lands on depended on whether the ensemble fetch happened to succeed:
+#
+#       ensemble present  -> "ensemble"     -> normal edge bar
+#       ensemble absent   -> "pooled_error" -> DOUBLED edge bar
+#
+#   Same station, same absent measurement, and the confidence gate flipped
+#   on the outcome of a network call. A fetch succeeding does not make a
+#   spread station-specific.
+#
+#   BLAST RADIUS TODAY: that one collection-only station. This is a gap
+#   being closed before it matters, not a change to what the live book does.
+#
+# "replay_constant" STAYS OUT, for the reason already documented in
+# calibration.estimate_std_dev's backtest branch: it is a real measured
+# pooled value, and gating on it would create a live/replay divergence in
+# the one direction the backtest exists to rule out.
+LOW_CONFIDENCE_SPREAD_SOURCES = {"fallback_default", "pooled_error", "ensemble"}
 
 
 # --- Order-book and balance defects in Polymarket's own API ---------------
