@@ -239,6 +239,11 @@ not an error.
 
 ## 7. Revised sequencing
 
+> **STALE as of 2026-09-04 evening — superseded by §15.** Everything in this
+> section's NOW row shipped that day, and the sequencing changed twice more
+> (§12 gated prerequisite B on P3-6; §14 found P2-2 blocked on its own gate).
+> Left in place because it is what the day was planned against.
+
 ```
 DONE (deployed 2026-09-03)
     P0-0(retention)  P0-4  P1-3  P1-4  P1-5  P1-9        13:40:58 UTC
@@ -273,6 +278,10 @@ building rather than a formality.
 ---
 
 ## 8. Open questions for the operator
+
+> **PARTLY ANSWERED — see §15.2 for the live list.** Questions 1 and 3 below
+> are still open and question 1 is now the thing blocking P2-2; questions 2,
+> 4 and 5 are unchanged. Two new ones arrived (§13.4, §14.5).
 
 Carried forward, with status:
 
@@ -924,3 +933,89 @@ window to be readable at all.
 4. Then the flip itself, WSSS first, per-station override rather than a global
    change, with the `is_paper` conjunction in `risk_manager.evaluate_exit()`
    removed deliberately and its reasoning rewritten.
+
+---
+
+## 15. WHERE THIS STANDS — 2026-09-04, end of day
+
+Supersedes §7's sequencing and §8's question list. Everything below is deployed
+to the box unless it says otherwise.
+
+### 15.1 What shipped, in order
+
+| item | merged | deployed | what it does |
+|---|---|---|---|
+| **P0-5** cohort monitor | `1a6b686` | 12:50 UTC | reproduces all five published totals to $0.00; resolves the $43.74 residual; pre-commits the price-edge kill criterion |
+| **P1-1** day budget at resolved size | `39ab36f` | 14:11 UTC | re-checks both day budgets at the notional the exchange forces, on every order path |
+| **P1-2** limit pad in EV | `39ab36f` | 14:11 UTC | charges the pad against the number the approval is tested against |
+| **P1-6** `--require-live` | `39ab36f` | 14:11 UTC | a stranded live position can refuse the boot |
+| **P1-7** settlement before book | `39ab36f` | 14:11 UTC | a resolved market pays on the record, not the last quote |
+| **P1-8(a)** exit fee in EV | `39ab36f` | 14:11 UTC | books that sell pay two taker fees, and the EV table knows |
+| **P3-4** ensemble gate | `39ab36f` | 14:11 UTC | the ensemble tier is not a spread measured for this station |
+| **P1-8(b)** entry-fee migration | `466d973` | 14:11 UTC | `entry_fee_per_share` on 607 rows; gross and net reported side by side |
+| **P3-6** calibrated sizing | `c2887af` | 15:10 UTC | isotonic map on `model_prob`, sizing path only; prerequisite B answered |
+
+Nine items. 1590 tests green. The daemon's unit md5 is unchanged (`9506ce61`)
+across every restart, and `cohort_monitor --reproduce` still returns
+**MATCHES: True** on the migrated, calibrated production database.
+
+### 15.2 Open questions, live list
+
+1. **Fund the EOA with POL.** §8.1 deferred this. It is now **the single thing
+   blocking P2-2** (§14.1): redemption has never been exercised against a real
+   winner, and it cannot be until there is gas and a winner.
+2. **Does the daemon ever redeem?** Unchanged. Design and code both say no;
+   revision 3 says once daily.
+3. **Does redemption share the trading gate?** Unchanged. As built it requires
+   `POLYMARKET_LIVE_TRADING=true`.
+4. **What does a kill-criterion firing mean?** (§9.5) Halt the station, halt the
+   book, or drop to paper. Worth deciding before ~2026-10-03, when the 30-day
+   window first becomes able to fire.
+5. **Should P3-6's map be smoothed?** (§13.4 option 3) Isotonic at n≈400 gives a
+   15-level staircase with a hard zero below `model_prob` 0.096. Platt was the
+   alternative the plan itself offered.
+6. **Accept 84% of bankroll at peak, or move the caps?** (§14.3) Only live once
+   P2-2 is unblocked, but the number is measured now.
+
+### 15.3 What to watch, and what each would falsify
+
+Three instruments are now live on every dashboard page. Each has a stated
+failure signal, so none of them is a chart to be rationalised at:
+
+- **`cohort_monitor` trailing-14d net price edge.** Stood at **−0.0049** before
+  P3-6. Calibration is meant to remove illusory edge, so it should **rise**. If
+  it falls, P3-6 is cutting good entries with bad ones — revert is one line
+  (`calibration=None` in `run_for_station_with_map`).
+- **`cohort_monitor` `other_gap`.** Stood at **−$21.65**. P1-7 should drive it
+  toward zero as resolution closes settle on the record rather than the quote.
+  If it does not move, P1-7 is not doing what it claims.
+- **Entries per station-day.** P3-6 predicts roughly a 40% drop. If it does not
+  appear, the map is not binding where the measurement said it would.
+
+Two things are also worth noticing rather than discovering: the
+**`station_isotonic` count** (3 stations today — each graduation changes that
+station's sizing regime), and the **first position opened after 14:11 UTC**,
+which should carry a non-NULL `entry_fee_per_share` written by
+`open_position()` rather than by the backfill.
+
+### 15.4 What is left
+
+```
+BLOCKED  P2-2   on funding the EOA and redeeming one real winner (§14)
+
+NEXT     P1-10  record what a stop actually cost, not what it was set to
+         P1-11  re-examine the post-decision exit cadence
+
+DEFER    P0-1   ~2026-10-03 earliest (ev_snapshots began 2026-09-03)
+         P0-2   ~November (ensemble history)
+         P0-3   needs prod DB access
+         P3-1 P3-2 P3-3 P3-5
+```
+
+**A note on sequencing that outlived the plan.** Three separate items today were
+not what the plan said they were — P1-6 was four-fifths shipped, P3-4 was
+strengthened by a change made after the plan was written, and P2-2's gate turned
+out to be unmet. In each case the cost of checking first was minutes and the
+cost of not checking would have been a wrong change deployed. That is now the
+third consecutive revision where re-verifying the premise changed the work, and
+it should be assumed to keep being true.
