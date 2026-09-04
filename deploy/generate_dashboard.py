@@ -550,6 +550,32 @@ except Exception as exc:  # noqa: BLE001
     warnings.append(f"model-vs-market card failed: {exc}")
     calib_html, calib_cap = "<div class='empty'>model vs market unavailable</div>", ""
 
+# --- cohort monitor card (P0-5) ----------------------------------------------
+# BOOK-WIDE, not per region, and deliberately a separate card from the one
+# above. "Model vs market" answers how the model has scored; this answers
+# whether the PRICE edge the book actually lives on is still there. config.py's
+# measurement block is explicit that those are different questions with
+# different answers -- the model loses to the market on Brier while the book
+# makes money on price -- so a healthy Gap column is not evidence about this
+# card and vice versa.
+#
+# Book-wide because the price edge is a property of the whole exploit, not of a
+# region, and the day-clustered interval needs every station-day it can get.
+try:
+    import calibration_panel as _cohort_panel
+
+    cohort_html = _cohort_panel.cohort_card()
+    cohort_cap = (
+        "every closed position with a settled bucket, re-scored at its own entry price "
+        "&middot; <b>the net price edge is the decay alarm, not Brier</b> &mdash; a bias "
+        "exploit closes without any calibration metric moving "
+        "&middot; the kill criterion reports NO VERDICT rather than reassurance on a thin "
+        "sample, and implies no action: see config.COHORT_KILL_NET_PRICE_EDGE"
+    )
+except Exception as exc:  # noqa: BLE001
+    warnings.append(f"cohort monitor card failed: {exc}")
+    cohort_html, cohort_cap = "<div class='empty'>cohort monitor unavailable</div>", ""
+
 # --- positions detail table --------------------------------------------------
 def status_label(status):
     """Map a position status string to (label, css class), tolerant of the
@@ -1515,6 +1541,12 @@ page = """<!doctype html>
   </div>
 
   <div class="card">
+    <h2>Cohort monitor &mdash; hold vs actual</h2>
+    <p class="cap">@@COHORTCAP@@</p>
+    @@COHORTCARD@@
+  </div>
+
+  <div class="card">
     <h2>Model vs market</h2>
     <p class="cap">@@CALIBCAP@@</p>
     @@CALIBCARD@@
@@ -1595,6 +1627,8 @@ page = (
     .replace("@@EVCARD@@", ev_html)
     .replace("@@CALIBCAP@@", calib_cap)
     .replace("@@CALIBCARD@@", calib_html)
+    .replace("@@COHORTCAP@@", cohort_cap)
+    .replace("@@COHORTCARD@@", cohort_html)
     .replace("@@POSCAP@@", positions_cap)
     .replace("@@POSTABLE@@", positions_html)
     .replace("@@MODEPILL@@", mode_pill)

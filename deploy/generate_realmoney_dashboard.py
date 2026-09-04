@@ -868,6 +868,27 @@ def render_discovery(icaos, warnings):
 # worst thing this codebase can produce -- so an order that was built,
 # submitted and refused leaves no trace outside the process log and this
 # table. Nothing rendered it before this page.
+def render_cohort(warnings, now=None):
+    """
+    The cohort monitor (P0-5): the whole closed book re-scored hold-vs-actual,
+    and the net price edge that is the only thing here that would notice the
+    exploit closing.
+
+    BOOK-WIDE, deliberately -- unlike every other section on this page, which
+    is scoped to the real-money stations. The price edge is a property of the
+    exploit, not of a station, and the day-clustered interval needs every
+    station-day there is. Scoping it to the two armed stations would report an
+    interval so wide it could never say anything.
+
+    THE ARITHMETIC IS NOT HERE, for the same reason render_calibration's is
+    not: cohort_monitor owns it and is tested, and this page must not become a
+    second definition of what the edge is.
+    """
+    import calibration_panel
+
+    return calibration_panel.cohort_card(as_of=None if now is None else now.date())
+
+
 def render_calibration(icaos, warnings, now=None):
     """
     The model-vs-market panel: measured bias, the EV the engine is looking at
@@ -1077,6 +1098,16 @@ def main(argv=None):
         sections, warnings, "Edge and EV",
         ev_caption,
         lambda: render_ev(icaos, bar, warnings),
+    )
+    _section(
+        sections, warnings, "Cohort monitor -- hold vs actual",
+        "Every closed position with a settled bucket, re-scored at its own entry price. "
+        "<b>The net price edge is the decay alarm, not Brier</b> &mdash; this book makes "
+        "money on price, not on forecasting, and a bias exploit closes without moving any "
+        "calibration metric. Book-wide, not just the armed stations. The kill criterion "
+        "reports NO VERDICT rather than reassurance on a thin sample, and implies no "
+        "action: see config.COHORT_KILL_NET_PRICE_EDGE.",
+        lambda: render_cohort(warnings, now=now_utc),
     )
     _section(
         sections, warnings, "Model vs market",

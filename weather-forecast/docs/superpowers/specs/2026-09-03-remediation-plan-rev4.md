@@ -292,3 +292,113 @@ Carried forward, with status:
 5. **P2-2's rollout station.** Unchanged: the plan says WSSS, which is also the
    station carrying the book and therefore the highest-variance place to test a
    policy change.
+
+---
+
+## 9. Addendum, 2026-09-04 — the cohort monitor is built, and it found the residual
+
+Executes §7's "if you do only one thing". New module `cohort_monitor.py`, wired into
+`calibration_panel.py` as a book-wide card, kill criterion pre-committed in `config.py`,
+`tests/test_cohort_monitor.py` (35 tests) plus 7 added to `tests/test_calibration_panel.py`.
+Full suite green.
+
+### 9.1 Acceptance met exactly
+
+Scored against the deployed book over `2026-08-03..09-01`, read-only:
+
+| | published | measured | delta |
+|---|---|---|---|
+| as traded | −295.15 | −295.15 | 0.00 |
+| stop only | +186.81 | +186.81 | 0.00 |
+| take only | +283.37 | +283.37 | 0.00 |
+| neither | +765.33 | +765.33 | 0.00 |
+| held | +743.68 | +743.68 | 0.00 |
+| staked | 4,049.93 | 4,049.93 | 0.00 |
+
+514 rows over 252 station-days — both counts also exact. The 0.306 / 0.344 price-edge
+pair reproduces on the 358-row `model_prob` subset.
+
+### 9.2 The $43.74 residual is fully accounted for, and it was two things
+
+§3 left this as the one unexplained figure and offered exit fees plus book-quote closes
+as a hypothesis. **Neither is the answer, and the hypothesis has the sign backwards.**
+
+The decomposition that closes exactly, by construction:
+
+```
+held − as_traded  =  stop cost + take cost + resolution-close gap
+```
+
+Measured cost against holding, per exact status (positive = the rule lost money):
+
+| status | rows | cost |
+|---|---|---|
+| `closed_stop_loss` | 222 | **+600.61** |
+| `closed_take_profit` | 197 | +481.96 |
+| `closed_trailing_stop` | 15 | **−22.09** |
+| `closed_resolution` | 80 | **−21.65** |
+
+- **−$21.65** is the resolution-close gap. Resolution closes booked *above* clean
+  settlement value — the **opposite** direction to the exit-fee hypothesis, which
+  §3 said "would push that way". The table contradicted it all along.
+- **+$22.09** is the trailing stop. `$600.61` is correct and is the **fixed stop alone**;
+  the table's "take only" column re-valued the 15 trailing rows too, and the per-rule
+  figure did not. Two correct numbers over two different row sets — which is why
+  re-reconciling the four totals could never have closed it.
+
+**The finding that generalises:** the two stop rules point in opposite directions. The
+fixed stop cost $600.61; the trailing stop *earned* $22.09 on its 15 rows. Any figure
+that says "the stop" is averaging a sign change, which is why the monitor reports
+`by_status` and not only the three-way class split.
+
+### 9.3 The kill criterion, and a blind spot it has for about two more days
+
+`config.COHORT_KILL_NET_PRICE_EDGE = 0.0` on the **net** price edge (realised win rate
+minus mean entry price, less the entry-side taker fee — a held position pays no exit
+fee, since redeeming is not a trade), read on `COHORT_KILL_WINDOW_DAYS = 30` with
+`COHORT_KILL_MIN_STATION_DAYS = 30`. Zero is the level because below it the book pays
+Polymarket for being right about the weather. **No action is encoded** — Phase 0 is
+measurement only, and open question 6 below is what firing means.
+
+Current reading (as of 2026-09-04, 572 rows / 284 station-days):
+
+| window | held | as traded | net price edge | 95% CI (station-day clustered) |
+|---|---|---|---|---|
+| all time | +15.1% | −7.9% | **+0.0335** | [−0.0015, +0.0709] |
+| trailing 14d | −0.4% | −12.4% | **−0.0049** | [−0.0536, +0.0433] |
+| trailing 30d | +15.1% | −7.9% | +0.0335 | [−0.0015, +0.0709] |
+
+Criterion: **holding** (+0.0335 vs 0.0).
+
+**Read that with the blind spot in mind.** The whole closed book runs 2026-08-06..09-03
+— 29 days — so trailing-30 and trailing-60 are *the same rows as all-time* and will be
+until ~2026-10-03. The criterion is therefore currently reading the full history under a
+30-day label. The only window that can discriminate today is the 14-day one, and it is
+at **−0.0049** on 185 station-days: below the level the criterion is set to.
+
+That is not yet a firing — the 14-day CI spans zero, so the honest statement is **"no
+measurable price edge in the last fortnight"**, not "the edge is gone". But it is the
+same direction as the independently-recorded decay of the hold edge, and it means the
+30-day criterion will not be able to see this until roughly 2026-10-03. Whether to key
+the criterion to 14 days is a live question and deliberately not decided here: 14 days
+crosses zero on noise, and a threshold that trips on noise gets ignored.
+
+### 9.4 What this unblocks and what it does not
+
+- **P3-6** and **P2-2** were both gated on this module. Both are now unblocked on that
+  count.
+- **§4's gating gap is still open** — the P2-2-prereq-B-before-P3-6 question is
+  unchanged by this work and still needs the explicit decision §4 asks for.
+- **§5's P1-1** promotion stands; nothing here touches it.
+- `risk_manager.py:72-77`'s open question (the 10:00 tightening against an 08:00 entry
+  close) asked for "the freed capital modelled". §6 of rev 3 said P0-5 supplies that
+  basis. It supplies the *scoring* basis; it does not model freed capital, because
+  nothing here reads position concurrency. That item is not unblocked.
+
+### 9.5 One more open question for the operator
+
+6. **What does firing mean?** Recorded in `config.COHORT_KILL_*` as deliberately not
+   encoded. The three candidates — halt the station, halt the book, drop to paper —
+   differ in what they cost if the firing is a false alarm, which makes it a call for
+   whoever is carrying the money. Worth deciding *before* ~2026-10-03, when the 30-day
+   window starts being able to fire.
