@@ -1527,6 +1527,42 @@ TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = TIGHTENED_PROFIT_TAKE_PCT
 #     rate on the same rows -- ~7.5c/share given away, reliably.
 #     -$481.96 against holding.
 #
+# HOW THOSE FIGURES RECONCILE, because they look contradictory and are not.
+# Added 2026-09-03 after a review derived three different values for "what
+# the two rules cost" from this block and could not tell which was meant.
+# No number above changed; what was missing was the baseline.
+#
+#   HELD TO SETTLEMENT and the table's "neither" row ARE NOT THE SAME
+#   QUANTITY. Held is +$743.68 (+18.4%) -- the figure the bootstrap CI and
+#   the $1,038.82 are both computed against, and which appeared only in
+#   tests/test_hold_to_settlement_modes.py, never here. The table's
+#   "neither" row is +$765.33 (+18.9%). They differ by $21.65. Each is
+#   internally consistent with its own percentage against the $4,049.93
+#   staked, so this is two measurements, not a typo in one.
+#
+#   THE TOTAL IS AGAINST HELD, NOT AGAINST "neither":
+#       held (+$743.68) - as traded (-$295.15) = $1,038.83   ~ the $1,038.82
+#       above, to a cent of rounding.
+#   Reconciling the same total against the "neither" row instead gives
+#   $1,060.48, which is what makes this block look wrong on a first read.
+#
+#   ONE RESIDUAL IS GENUINELY UNEXPLAINED, and is left named rather than
+#   argued away. The two per-rule costs sum to $600.61 + $481.96 =
+#   $1,082.57, which exceeds the held-based total by $43.74. If every
+#   position had exited by a stop, by a take, or by a resolution close
+#   worth exactly its held value, those two would be equal. They are not,
+#   so resolution-closed rows must differ from clean settlement value in
+#   aggregate by about -$43.74. Exit fees and closing at the book quote
+#   rather than the settlement reading (the defect P1-7 addresses) would
+#   both push that way -- but that is a HYPOTHESIS, not a measurement, and
+#   nothing here has confirmed it.
+#
+#   The cohort monitor is what settles this: it recomputes all four
+#   scenarios from the rows, so it should reproduce $743.68 / $765.33 /
+#   -$295.15 AND account for the $43.74. If it cannot, that gap is the
+#   finding, and this comment is the record of what was already known
+#   before it was built.
+#
 # THIS IS NOT A CLAIM THAT THE MODEL IMPROVED. On the 358 traded rows with a
 # stored prediction, Brier is 0.1930 for the model against 0.1842 for the
 # entry ask: the model is still WORSE calibrated than the market it trades

@@ -25,8 +25,10 @@ and is the most valuable thing in the document. §6 below lists what checked out
    deployed on 2026-09-03, including the one it names as "if you do only one thing."
 2. **`P0-0` is a name collision** with an item that is already deployed and
    accumulating data.
-3. **The `$1,038.82` headline figure does not reconcile** with its own components —
-   and the defect is in `config.py`, which revision 3 faithfully copied.
+3. **The `$1,038.82` headline figure looked unreconcilable and is in fact correct** —
+   the baseline it reconciles against was missing from `config.py`. Investigated and
+   fixed the same day; one $43.74 residual survives and is now named. See §3, which
+   also records how the original review got this wrong.
 4. **P3-6 and P2-2's prerequisite B have a gating gap** that the removal of P2-1's
    blocker just opened.
 
@@ -98,44 +100,50 @@ problem.
 
 ---
 
-## 3. The `$1,038.82` figure does not reconcile — and the defect is upstream
+## 3. The `$1,038.82` figure — RESOLVED, and mostly not a defect
 
-Revision 3's headline for P2-1 reads "It unblocks the $1,038.82-per-month policy
-change." That number is copied faithfully from `config.py:1522`. The problem is in
-`config.py`, not in the plan.
+> **CORRECTION (same day, after investigating).** This section originally claimed the
+> figure "does not reconcile" and recommended deciding which of three candidate values
+> was correct. **That was wrong.** `$1,038.82` is correct. The original finding is left
+> visible below rather than deleted, because the way it was wrong is instructive: three
+> numbers were reconciled against each other without checking whether a fourth existed
+> elsewhere in the repo. It did — in the test file.
 
-`config.py:1506-1528` records four totals and two per-rule costs. They produce three
-different values for the same quantity:
+**What the original review got wrong.** It derived three values for "what the two
+rules cost" — $1,038.82 stated, $1,082.57 as the sum of components, $1,060.48 from the
+four-row table — and concluded they contradicted. The reconciliation it never tried
+was against a baseline that does not appear in `config.py` at all.
 
-| Value | Source |
-|---|---|
-| **$1,038.82** | stated directly: "The two rules cost $1,038.82 between them" |
-| **$1,082.57** | sum of its own two components ($600.61 + $481.96) |
-| **$1,060.48** | derived from its own four totals (`neither − as traded`) |
+**The actual position:**
 
-A ~$44 spread, about 4%.
+- Held to settlement is **+$743.68 (+18.4%)**. That figure lived *only* in
+  `tests/test_hold_to_settlement_modes.py`, never in `config.py`.
+- `held (+$743.68) − as traded (−$295.15)` = **$1,038.83**, which is the stated
+  $1,038.82 to a cent of rounding. **The total was right all along.**
+- The four-row table's **"neither" (+$765.33, +18.9%)** is a *different quantity* from
+  held to settlement, by **$21.65**. Each is internally consistent with its own
+  percentage against the $4,049.93 staked, so this is two measurements, not a typo.
+  Reconciling the stated total against "neither" instead is what produces the spurious
+  $1,060.48 and the appearance of a contradiction.
 
-**The interaction explanation does not cover it.** The natural defence is that the
-counterfactuals interact — removing the take changes which positions the stop
-catches, so per-rule costs need not sum. But under the consistent reading (each
-rule's cost = what removing just that rule from as-traded gains):
+**One residual is genuinely unexplained, and survives the correction.** The two
+per-rule costs sum to `$600.61 + $481.96 = $1,082.57`, which exceeds the held-based
+total by **$43.74**. If every position had exited by a stop, by a take, or by a
+resolution close worth exactly its held value, those two figures would be equal. They
+are not — so resolution-closed rows must differ from clean settlement value in
+aggregate by about −$43.74. Exit fees and closing at the book quote rather than the
+settlement reading (**precisely the defect P1-7 addresses**) would both push that way.
+That is a hypothesis, not a measurement.
 
-- take cost = `stop_only − as_traded` = **$481.96** — matches the stated figure exactly
-- stop cost = `take_only − as_traded` = **$578.52** — the stated figure is **$600.61**
+**Fixed in `config.py`, no numbers changed.** A reconciliation note now sits directly
+under the measurement block: it states that held and "neither" are different
+quantities, gives the held figure that was missing, shows the total reconciling
+against it, and names the $43.74 residual as unexplained rather than arguing it away.
 
-The take reconciles to the cent and the stop does not. That points at two rules
-costed by different methods, not at a legitimate non-additivity.
-
-**Why this matters concretely, and it is not pedantry:** the cohort monitor's own
-acceptance test demands reproducing the four totals *"to the cent"* and states *"if it
-does not, the discrepancy is the finding and must be resolved before the module is
-trusted."* Whoever builds it will hit this immediately, with three candidate figures
-and no way to tell which is authoritative.
-
-**Recommended:** resolve this before building the cohort monitor, not during. Decide
-which of the three is correct, correct `config.py`, and make the monitor reproduce
-the corrected figure. The plan's headline number for its highest-priority item should
-not be one that fails its own acceptance criterion.
+**Still true, and still the actionable part:** the cohort monitor must reproduce
+$743.68 / $765.33 / −$295.15 *and* account for the $43.74. Its acceptance test demands
+"to the cent"; the residual is the part that will resist, and it is now written down
+before the module exists rather than discovered during.
 
 ---
 
@@ -232,7 +240,7 @@ DONE (deployed 2026-09-03)
     P2-1                                                  ~15:27 UTC
 
 NOW  cohort monitor (rename from P0-0)  ← blocks P2-2 and P3-6 both
-     └── resolve the $1,038.82 reconciliation FIRST (§3)
+     └── §3 resolved: reproduce 743.68 / 765.33 / -295.15 AND the $43.74
      P1-1  ← promoted on the 55% measurement (§5)
      P1-2  P1-6  P1-7  P1-8a  P1-8b  P3-4
 
@@ -251,8 +259,11 @@ DEFER P0-1  ~2026-10-03 earliest (ev_snapshots began 13:40:58 today)
 it now blocks both P2-2 and P3-6, and because the price edge it watches is the thing
 that can decay silently.
 
-**Before that:** resolve §3. It is an hour of arithmetic that stops the monitor being
-built against a target that cannot be hit.
+**§3 is no longer a blocker** — the target is now stated precisely enough to build
+against: reproduce $743.68 (held), $765.33 ("neither") and −$295.15 (as traded), and
+account for the $43.74 residual between the per-rule sum and the held-based total.
+The residual is the part that will resist, and it is the reason the monitor is worth
+building rather than a formality.
 
 ---
 
