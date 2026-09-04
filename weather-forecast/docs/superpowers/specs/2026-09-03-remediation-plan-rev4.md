@@ -23,8 +23,8 @@ and is the most valuable thing in the document. §6 below lists what checked out
 
 1. **Revision 3 is stale on execution status.** Seven of its items shipped and
    deployed on 2026-09-03, including the one it names as "if you do only one thing."
-2. **`P0-0` is a name collision** with an item that is already deployed and
-   accumulating data.
+2. **`P0-0` was a name collision** with an item already deployed and accumulating
+   data. Renamed to **P0-5** the same day; see §2.
 3. **The `$1,038.82` headline figure looked unreconcilable and is in fact correct** —
    the baseline it reconciles against was missing from `config.py`. Investigated and
    fixed the same day; one $43.74 residual survives and is now named. See §3, which
@@ -82,21 +82,25 @@ reasons about "uncollected" value from stored rows needs the same cross-check.
 
 ---
 
-## 2. `P0-0` is a name collision
+## 2. `P0-0` was a name collision — RESOLVED
 
-Revision 3 introduces **P0-0 · Standing hold-vs-actual cohort monitor** as its
+Revision 3 introduced **P0-0 · Standing hold-vs-actual cohort monitor** as its
 headline measurement.
 
 There is already a **P0-0 · Retain dated EV snapshots** — defined in this repo's
 committed spec (`2026-09-03-remediation-plan-revised.md` §3), deployed 13:40:58 UTC,
-and currently accumulating rows in the `ev_snapshots` table.
+and accumulating rows in the `ev_snapshots` table since. Two different items, the same
+identifier, one of them live.
 
-Two different items, the same identifier, one of them live. Rename revision 3's
-cohort monitor before the document circulates further. Suggested: **P0-5**, since it
-is a Phase 0 measurement and the number is free.
+**Fixed 2026-09-03.** Revision 3's cohort monitor is renamed **P0-5** throughout
+(`polyweather-remediation-plan_2.md`, 18 references), with a note at the head of that
+document recording the old identifier so anyone holding an earlier copy can map it.
+P0-5 was chosen because the number was free and the item is a Phase 0 measurement —
+the ID carries no priority, and P0-5 remains the "if you do only one measurement"
+item despite sorting last.
 
-The rest of this document calls it **the cohort monitor** to avoid compounding the
-problem.
+The rest of this document calls it **the cohort monitor**, which is unambiguous
+regardless of numbering.
 
 ---
 
@@ -239,7 +243,7 @@ DONE (deployed 2026-09-03)
     P0-0(retention)  P0-4  P1-3  P1-4  P1-5  P1-9        13:40:58 UTC
     P2-1                                                  ~15:27 UTC
 
-NOW  cohort monitor (rename from P0-0)  ← blocks P2-2 and P3-6 both
+NOW  P0-5 cohort monitor  ← blocks P2-2 and P3-6 both
      └── §3 resolved: reproduce 743.68 / 765.33 / -295.15 AND the $43.74
      P1-1  ← promoted on the 55% measurement (§5)
      P1-2  P1-6  P1-7  P1-8a  P1-8b  P3-4
