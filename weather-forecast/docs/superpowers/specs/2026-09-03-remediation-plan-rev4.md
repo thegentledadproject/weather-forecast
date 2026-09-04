@@ -527,8 +527,8 @@ ordering accumulate. That is the deployed proof that P1-7 did what it claims.
 
 ## 11. Addendum, 2026-09-04 — P1-8(b), the entry-fee migration
 
-Branch `fix/p1-8b-entry-fee-migration`, **not merged, not deployed**. 1552 tests
-green. Its own branch because the plan says so and because it writes to the
+Branch `fix/p1-8b-entry-fee-migration`, **merged `466d973` and DEPLOYED 2026-09-04
+14:11:55 UTC**. 1552 tests green. Its own branch because the plan says so and because it writes to the
 production database.
 
 ### 11.1 The plan's own estimate was low by about a factor of two
@@ -603,3 +603,36 @@ simulation, 2026-08-12 — because `entry_price` was recorded as the pre-alignme
 ask rather than `expected_price`, which was fixed afterwards. The migration
 touches none of those three fields, so they are left exactly as they are. The
 condition is about *not changing* them, and it holds.
+
+### 11.6 Deploy record, 2026-09-04 14:11:55 UTC
+
+The first change in this programme that WRITES to the production database, so it
+was deployed differently from the other two.
+
+**Backed up first.** `sqlite3.Connection.backup()` (online and atomic, unlike
+`cp` on a live database) to `~/polyweather-pre-p18b-backup.sqlite3` — 607 rows,
+23 columns, 25 MB.
+
+**Daemon stopped for the migration**, rather than letting it run as a side
+effect of the daemon's next connection. Two reasons: no lock contention on the
+`UPDATE`, and the migration happens where it can be watched instead of
+invisibly. Downtime ~45 s, every entry window closed, 0 open live positions.
+
+Result on production:
+
+- 23 → **24 columns**, last is `entry_fee_per_share`
+- 607 rows, **0 still NULL**, **0 disagreeing** with the schedule
+- **2.64%** of stake across the whole book, matching the dry run
+- migration connection **21 ms**, next connection **1 ms**
+- the two pre-existing `size_usd == entry_price × size_shares` violations are
+  **still exactly 2** — untouched, as intended
+- `cohort_monitor.py --reproduce` on the migrated database: **MATCHES: True**
+
+Daemon restarted after: unit md5 **identical** (`9506ce61`), resolved args
+unchanged, `NRestarts=0`, LIVE for WSSS + RCSS only, 33 stations on paper,
+preflight green, no tracebacks, no `no such column`, no `database is locked`.
+All four dashboards render.
+
+**Still to observe:** the first position opened after this deploy should carry a
+non-NULL `entry_fee_per_share` written by `open_position()` rather than by the
+backfill. The unit tests cover it; production has not yet written a row.
