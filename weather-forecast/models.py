@@ -440,6 +440,22 @@ class EVResult:
     # reason fee_rate_pct is: entry_manager re-derives net EV at the resolved
     # size, and a cost it has to recompute is a cost it can get wrong.
     expected_exit_fee_pct: float = 0.0
+    # THE MODEL'S PROBABILITY, MAPPED ONTO THE RATE THAT ACTUALLY CAME TRUE
+    # (P3-6), and the tier that map was fitted on. See
+    # probability_calibration.py.
+    #
+    # BESIDE model_prob, NEVER OVER IT. model_prob is what the EV table, the
+    # stored snapshots and every stored row MEAN, and P0-1 scores against it;
+    # overwriting it would silently redefine the record this correction was
+    # derived from. raw_edge likewise stays computed from model_prob, because
+    # the edge GATE deliberately does not move onto the calibrated value --
+    # that is a separate decision with a different risk profile.
+    #
+    # None with source "uncalibrated" is the honest default: no map was
+    # estimable, so sizing uses model_prob and keeps the existing double
+    # buffer.
+    calibrated_prob: Optional[float] = None
+    calibration_source: str = "uncalibrated"
     notes: str = ""
 
 

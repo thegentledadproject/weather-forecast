@@ -85,6 +85,7 @@ import calibration
 import config
 import storage
 import executor
+import probability_calibration
 import risk_manager  # risk_unit() only -- the gap haircut must measure the stop
                      # distance the exit path will actually use, not a copy of it
 from models import EVResult, EntryDecision
@@ -265,7 +266,60 @@ def compute_kelly_fraction(ev_result: EVResult) -> Optional[float]:
     # emerges at the cap regardless of quality. Binds only above price
     # 0.80, i.e. behind MAX_ENTRY_PRICE as a backstop.
     denominator = max(1 - ev_result.market_price, config.MIN_KELLY_DENOMINATOR)
-    return ev_result.raw_edge / denominator
+    return sizing_edge(ev_result) / denominator
+
+
+def _calibration_note(ev_result: EVResult) -> str:
+    """
+    How the size was arrived at, for the decision's own note.
+
+    Names the tier AND, where it fell back, says that the double buffer is
+    still in place -- because "uncalibrated" alone reads as a missing feature
+    rather than as a different sizing regime.
+    """
+    source = getattr(ev_result, "calibration_source", probability_calibration.NO_TIER)
+    calibrated = getattr(ev_result, "calibrated_prob", None)
+    if source in probability_calibration.CALIBRATED_TIERS and calibrated is not None:
+        return (
+            f"{source} p={calibrated:.3f} (model said {ev_result.model_prob:.3f})"
+        )
+    return f"{source} -- raw model_prob {ev_result.model_prob:.3f}, double buffer retained"
+
+
+def sizing_edge(ev_result: EVResult) -> float:
+    """
+    The edge Kelly should size on: calibrated where a map exists, raw where
+    none does.
+
+    THE SIZING PATH ONLY (P3-6). ev_result.raw_edge stays computed from
+    model_prob and is what the edge GATE reads -- whether that gate should also
+    move onto the calibrated probability is a separate decision with a
+    different risk profile, and bundling them would make the result
+    unattributable.
+
+    WHY THIS SHRINKS POSITIONS. The map is fitted on a book whose stated 0.432
+    came true 0.344 of the time, so it pulls probabilities toward the realised
+    rate; the edge shrinks and so does the size. That is offset by retiring
+    gap_risk_haircut on the books that qualify (see
+    probability_calibration.haircut_applies), which grows them 1.4x at 0.50 and
+    2.0x at 0.20. The net can go either way, and the point is that it now goes
+    there for a MEASURED reason rather than as the product of two buffers
+    neither of which was fitted to anything.
+    """
+    # getattr, not attribute access: several callers and the backtest's parity
+    # replica pass duck-typed EV stubs that predate these fields, and a sizing
+    # function that raises on them would turn a missing optional into a dead
+    # entry path. Absent fields mean "uncalibrated", which is the pre-P3-6
+    # behaviour.
+    calibrated = getattr(ev_result, "calibrated_prob", None)
+    source = getattr(ev_result, "calibration_source", probability_calibration.NO_TIER)
+    if (
+        calibrated is not None
+        and source in probability_calibration.CALIBRATED_TIERS
+        and ev_result.market_price is not None
+    ):
+        return calibrated - ev_result.market_price
+    return ev_result.raw_edge
 
 
 def count_open_positions_for_bucket(
@@ -1006,10 +1060,23 @@ def evaluate_entry(
     # hard ceiling and the maturity multiplier so it always reduces real risk
     # rather than being swallowed by a cap above it, and BEFORE the live fixed
     # size below, which is a deliberate override rather than a risk estimate.
-    size_usd *= gap_risk_haircut(
-        ev_result.market_price, station_icao, ev_result.market_bid,
-        has_stop=_book_has_stop(station_icao),
-    )
+    #
+    # PREREQUISITE B, ANSWERED (P3-6). The haircut retires on a stopless book
+    # ONLY where the probability just sized on is actually calibrated -- there
+    # the overconfidence it was silently absorbing has been corrected once, at
+    # the source. Where the map was not estimable it stays, because there
+    # nothing has measured that bias. probability_calibration.haircut_applies
+    # owns the rule; see the plan's section 12 for why this is conditional
+    # rather than the flag flip the prerequisite originally asked for.
+    _has_stop = _book_has_stop(station_icao)
+    if probability_calibration.haircut_applies(
+        has_stop=_has_stop,
+        calibration_source=getattr(ev_result, "calibration_source", probability_calibration.NO_TIER),
+    ):
+        size_usd *= gap_risk_haircut(
+            ev_result.market_price, station_icao, ev_result.market_bid,
+            has_stop=_has_stop,
+        )
 
     # Cap 2b: fixed live/simulation trade size. REPLACES Kelly sizing rather
     # than capping it -- see config.LIVE_TRADE_SIZE_USD.
@@ -1119,7 +1186,15 @@ def evaluate_entry(
         recommended_size_usd=round(depth_capped_usd, 2), available_depth_usd=depth_usd,
         slippage_at_size_pct=slippage_at_size, net_ev_at_size=net_ev_at_size,
         approved=True,
-        reason=f"Approved: {net_ev_at_size:+.1%} net EV at ${depth_capped_usd:.2f} ({maturity} station).",
+        # THE CALIBRATION TIER IS PART OF THE CLAIM, not decoration. A size
+        # resting on this station's own history, on the pooled book, or on no
+        # map at all are three different statements about the same dollar
+        # figure -- and only the third still carries the undeclared second
+        # buffer. estimate_std_dev reports its tier for exactly this reason.
+        reason=(
+            f"Approved: {net_ev_at_size:+.1%} net EV at ${depth_capped_usd:.2f} "
+            f"({maturity} station, sized on {_calibration_note(ev_result)})."
+        ),
         station_maturity=maturity,
         entry_price=ev_result.market_price,
         entry_bid=ev_result.market_bid,

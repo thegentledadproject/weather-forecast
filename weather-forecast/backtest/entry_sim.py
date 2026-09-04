@@ -99,7 +99,9 @@ from models import EVResult, EntryDecision
 # Reused live logic. Imported by name so a reader can see at a glance
 # exactly which parts of entry_manager the replay shares rather than
 # reimplements -- and so a rename upstream breaks the import loudly.
+import probability_calibration
 from entry_manager import (
+    _calibration_note,
     compute_kelly_fraction,
     gap_risk_haircut,
     max_plausible_edge_for,
@@ -322,7 +324,20 @@ def evaluate_entry_sim(
     # ceiling and maturity, before the live fixed size). Imported from
     # entry_manager, not restated: a replay that sized without the haircut
     # would report a strategy nobody is running.
-    size_usd *= gap_risk_haircut(ev.market_price, station_icao, ev.market_bid)
+    #
+    # The P3-6 condition is mirrored rather than assumed away. It is a NO-OP
+    # here today -- replayed EVResults carry no calibration, and an
+    # uncalibrated row keeps the haircut by design -- but stating the rule is
+    # what stops the replica silently diverging the first time the backtest is
+    # given a calibrated book. has_stop=True matches this function's existing
+    # call, which has never passed the flag.
+    if probability_calibration.haircut_applies(
+        has_stop=True,
+        calibration_source=getattr(
+            ev, "calibration_source", probability_calibration.NO_TIER
+        ),
+    ):
+        size_usd *= gap_risk_haircut(ev.market_price, station_icao, ev.market_bid)
 
     # --- Gate 8: depth unknown -------------------------------------------
     if depth_usd is None:
@@ -414,7 +429,13 @@ def evaluate_entry_sim(
         recommended_size_usd=round(depth_capped_usd, 2), available_depth_usd=depth_usd,
         slippage_at_size_pct=slippage_at_size, net_ev_at_size=net_ev_at_size,
         approved=True,
-        reason=f"Approved: {net_ev_at_size:+.1%} net EV at ${depth_capped_usd:.2f} ({maturity} station).",
+        # Same string as live, built by the SAME helper. The field-parity test
+        # compares these byte for byte, and a restated f-string here is exactly
+        # how the replica drifts.
+        reason=(
+            f"Approved: {net_ev_at_size:+.1%} net EV at ${depth_capped_usd:.2f} "
+            f"({maturity} station, sized on {_calibration_note(ev)})."
+        ),
         station_maturity=maturity,
         entry_price=ev.market_price,
         entry_bid=ev.market_bid,

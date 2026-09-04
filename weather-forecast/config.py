@@ -2379,6 +2379,45 @@ CAPTURE_EXIT_BID_DEPTH = True
 # cleanup.
 SIZE_STOPLESS_BOOKS_ON_PURE_KELLY = False
 
+# SUPERSEDED 2026-09-04 BY P3-6, and left set to False rather than deleted so
+# the constant a reader may still be searching for explains where its question
+# went.
+#
+# The flag asked: on a book with no stop, should gap_risk_haircut() be 1.0?
+# Arithmetically yes -- there is no trigger to gap through and no exit spread to
+# pay. It shipped False because the conservatism was doing real work for a
+# reason the haircut's own docstring never gave: Kelly takes the model's
+# probability at face value and this model is measurably overconfident.
+#
+# P3-6 corrects that bias ONCE, at the probability, which makes the arithmetic
+# answer the right one -- but only where the correction actually applies. So the
+# decision is no longer a flag, and asking it as one is what the plan's section
+# 12 gates against. probability_calibration.haircut_applies() owns it now:
+#
+#     stopless AND calibrated    -> haircut retired (the arithmetic answer)
+#     stopless AND uncalibrated  -> haircut KEPT (nothing has measured the bias)
+#     has a stop                 -> haircut KEPT, always
+#
+# entry_manager.gap_risk_haircut still reads this constant, so setting it True
+# would restore the unconditional behaviour. Do not: that is the version whose
+# ambiguity P3-6 exists to remove.
+
+# The minimum rows a calibration map may be fitted on, per
+# probability_calibration.fit_for_day's tier chain. Below this the map is not
+# estimable and sizing falls back to the raw model_prob with the existing double
+# buffer intact.
+#
+# 30 rather than MIN_BIAS_PAIRS_BEFORE_ENTRY (5): a bias correction estimates
+# ONE number from continuous errors, while an isotonic map estimates a whole
+# monotone function from 0/1 outcomes, and five coin flips constrain such a
+# function essentially not at all. 30 is also the level at which a per-station
+# tier becomes reachable at this book's rate -- 358 scorable rows over 19
+# stations is about 19 each, so most stations will sit on the pooled tier for
+# now and graduate to their own as history accrues. That is the intended
+# behaviour and not a defect: the tier is reported, so which one a size rests on
+# is always visible.
+MIN_CALIBRATION_SAMPLES = 30
+
 EXPENSIVE_ENTRY_PRICE = 0.55
 MAX_POSITION_USD_EXPENSIVE = 30.0
 
