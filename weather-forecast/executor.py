@@ -381,7 +381,98 @@ def _resolved_size_ok(spec, decision) -> tuple:
         else:
             note += f" against a {bar:.0%} bar"
 
+    budget_breach = _day_budget_breach(spec.notional_usd, decision)
+    if budget_breach:
+        return False, budget_breach
+
     return True, note
+
+
+def _day_budget_breach(resolved_usd: float, decision) -> Optional[str]:
+    """
+    Whether submitting `resolved_usd` would spend past the station/day or
+    portfolio/day budget. Returns the reason, or None if there is room.
+
+    THE HOLE THIS CLOSES. entry_manager.apply_portfolio_budget() scales every
+    leg to fit what remains of both budgets, and the sizing layer's whole
+    argument is that downstream numbers are "about the order that actually
+    gets built". wallet_client.build_entry_order() then raises the share count
+    to the exchange minimum, and nothing re-tested the budgets at that figure.
+    _live_budget_breach() does re-check at resolved size, but it covers only
+    the REGION caps and only in live mode.
+
+    NOT RARE. Measured on 69 recorded live entry attempts: 38 of them (55%)
+    resolved more than 5% above the $1.00 request, worst case $3.60. The
+    unchecked path is the common path.
+
+    RUNS ON EVERY ORDER PATH, which is why this is called from
+    _resolved_size_ok (before the mode branch) rather than next to
+    _live_budget_breach. Simulation writes its rows at the resolved notional,
+    and those rows are exactly what the next cycle's exposure total -- and
+    therefore the live cap -- is computed from. A simulation breach corrupts
+    the number that protects the real book.
+
+    FAILS CLOSED, matching decide_portfolio_entries: an unreadable exposure
+    means the remaining budget is unknown, and an unknown remaining budget
+    must not be treated as a fresh one.
+
+    Imported here rather than at module scope because entry_manager imports
+    THIS module; a top-level import would be circular.
+    """
+    import entry_manager
+
+    try:
+        is_paper = entry_manager._candidate_is_paper(decision.station_icao)
+
+        station_cap = config.MAX_TOTAL_EXPOSURE_PER_STATION_PER_DAY_USD
+        station_spent = entry_manager.station_day_exposure_usd(
+            decision.station_icao, decision.target_date, is_paper=is_paper,
+        )
+        if station_spent is None:
+            return (
+                f"could not read {decision.station_icao}'s station/day exposure at the "
+                f"resolved ${resolved_usd:.2f} -- refusing to guess at the remaining budget"
+            )
+
+        station_left = station_cap - station_spent
+        if resolved_usd > station_left:
+            return (
+                f"resolved notional ${resolved_usd:.2f} is past the station/day budget: "
+                f"${station_left:.2f} left of ${station_cap:.2f} after ${station_spent:.2f} "
+                f"already spent on {decision.station_icao} for {decision.target_date}. "
+                f"The entry was sized at ${(decision.recommended_size_usd or 0):.2f} to FIT "
+                f"that budget and the exchange minimum raised it past the cap"
+            )
+
+        portfolio_cap = config.region_max_daily_exposure_usd(decision.station_icao)
+        portfolio_spent = entry_manager.portfolio_day_exposure_usd(
+            is_paper=is_paper, region=config.region_of(decision.station_icao),
+        )
+        if portfolio_spent is None:
+            return (
+                f"could not read the portfolio/day exposure for "
+                f"{config.region_of(decision.station_icao)} at the resolved "
+                f"${resolved_usd:.2f} -- refusing to guess at the remaining budget"
+            )
+
+        portfolio_left = portfolio_cap - portfolio_spent
+        if resolved_usd > portfolio_left:
+            return (
+                f"resolved notional ${resolved_usd:.2f} is past the portfolio/day budget "
+                f"for {config.region_of(decision.station_icao)}: ${portfolio_left:.2f} left "
+                f"of ${portfolio_cap:.2f} after ${portfolio_spent:.2f} already spent. "
+                f"The entry was sized at ${(decision.recommended_size_usd or 0):.2f} to FIT "
+                f"that budget and the exchange minimum raised it past the cap"
+            )
+    except Exception as exc:  # noqa: BLE001 -- a gate that cannot run has not been passed
+        # The readers catch their own storage errors and return None, but a
+        # gate that spends money must not rely on that staying true.
+        return (
+            f"could not evaluate the day budget at the resolved ${resolved_usd:.2f} "
+            f"({exc}) -- refusing to guess"
+        )
+
+    return None
 
 
 def _record_attempt(kind, station_icao, spec, result, target_date=None,
