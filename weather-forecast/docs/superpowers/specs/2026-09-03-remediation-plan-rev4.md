@@ -1,7 +1,8 @@
 # Remediation plan, revision 4
 
 **Date:** 2026-09-03 (evening)
-**Revises:** `polyweather-remediation-plan_2.md` (revision 3, 30 findings)
+**Revises:** `2026-09-03-remediation-plan-rev3.md` (revision 3, 30 findings — moved
+into this directory 2026-09-03; it was `~/Downloads/polyweather-remediation-plan_2.md`)
 **Also supersedes:** `2026-09-03-remediation-plan-revised.md` (this session's earlier revision of revision 1)
 **Verified against:** `thegentledadproject/weather-forecast@main` at `584c2c9`
 **Method:** every new factual claim in revision 3 checked by content search, not by
@@ -93,7 +94,7 @@ and accumulating rows in the `ev_snapshots` table since. Two different items, th
 identifier, one of them live.
 
 **Fixed 2026-09-03.** Revision 3's cohort monitor is renamed **P0-5** throughout
-(`polyweather-remediation-plan_2.md`, 18 references), with a note at the head of that
+(`2026-09-03-remediation-plan-rev3.md`, 19 references), with a note at the head of that
 document recording the old identifier so anyone holding an earlier copy can map it.
 P0-5 was chosen because the number was free and the item is a Phase 0 measurement —
 the ID carries no priority, and P0-5 remains the "if you do only one measurement"
