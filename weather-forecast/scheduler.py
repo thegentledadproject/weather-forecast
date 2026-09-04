@@ -383,7 +383,9 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
         # table and the tokens being sized end up describing different
         # books, and how a station whose window has drifted gets priced
         # against Singapore's old 25-35 range.
-        ev_run = ev_engine.run_for_station_with_map(estimate)
+        ev_run = ev_engine.run_for_station_with_map(
+            estimate, execution_mode=executor.EXECUTION_MODE.get(station_icao),
+        )
         ev_results = ev_run.ev_results
         # Snapshot every computation -- including empty ones -- so the
         # status dashboard can show the latest EV table and its age.
@@ -470,7 +472,13 @@ def _run_collection_cycle(station_icao: str) -> None:
         return
 
     try:
-        ev_run = ev_engine.run_for_station_with_map(result["estimate"])
+        ev_run = ev_engine.run_for_station_with_map(
+            result["estimate"],
+            # P1-8(a): a book that SELLS pays a second taker fee, and the EV
+            # table has to see it. Passed rather than looked up inside
+            # ev_engine -- that would be a circular import.
+            execution_mode=executor.EXECUTION_MODE.get(station_icao),
+        )
         ev_engine.save_ev_snapshot(station_icao, ev_run.ev_results)
         if ev_run.veto_reason:
             print(

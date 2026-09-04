@@ -419,6 +419,16 @@ class EVResult:
     # fetch_market_quotes() for snapshot capture, so carrying it costs no
     # extra call.
     market_bid: Optional[float] = None
+    # THE SECOND TAKER FEE, as a fraction of ENTRY notional, and 0.0 whenever
+    # this candidate's book holds to settlement (config.HOLD_TO_SETTLEMENT_MODES)
+    # or the caller did not declare a mode. Polymarket charges per LEG, so a
+    # book that sells pays twice and a position held to par pays once --
+    # redeeming a resolved token is not a trade.
+    #
+    # Carried on the result rather than recomputed downstream for the same
+    # reason fee_rate_pct is: entry_manager re-derives net EV at the resolved
+    # size, and a cost it has to recompute is a cost it can get wrong.
+    expected_exit_fee_pct: float = 0.0
     notes: str = ""
 
 

@@ -101,6 +101,56 @@ def taker_fee_pct_of_notional(price: Optional[float]) -> float:
         return 0.0
     return POLYMARKET_WEATHER_TAKER_FEE_RATE * (1.0 - price)
 
+
+def expected_exit_fee_pct_of_notional(price: Optional[float]) -> float:
+    """
+    The SECOND taker fee -- the one due on the way out -- as a fraction of the
+    ENTRY notional. 0.0 for a missing or non-positive price.
+
+    Polymarket charges per LEG. compute_ev_table subtracted only the entry
+    leg's fee, so any book that sells was approving trades on a number missing
+    a cost the trade would certainly pay: roughly 4 points of entry notional on
+    a 0.30 candidate, against a net-EV bar that is often 15.
+
+    p_exit IS AN ESTIMATOR, NOT A PREDICTION. The take-profit target is used
+    because it is the exit the position is aiming at:
+
+        target = entry + PROFIT_TAKE_PCT x risk_unit(entry)
+
+    matching risk_manager.evaluate_exit exactly. A stop-out exits lower and
+    pays less; a settlement close pays none at all. So this is the fee on the
+    INTENDED outcome, which is the right one to charge against an expected
+    value that also assumes the intended outcome -- but it is not what every
+    position will pay, and a reader should not treat it as such.
+
+    Per-share fee is rate(p) x p, and a dollar of entry notional buys 1/entry
+    shares, so the fee as a fraction of entry notional is that over `price`.
+    """
+    if price is None or price <= 0:
+        return 0.0
+    import risk_manager
+
+    target = price + config.PROFIT_TAKE_PCT * risk_manager.risk_unit(price)
+    target = min(target, 1.0)
+    return (taker_fee_pct_of_notional(target) * target) / price
+
+
+def _sells_before_settlement(execution_mode: Optional[str]) -> bool:
+    """
+    Whether a candidate on this book will pay a second taker fee.
+
+    Reads config.HOLD_TO_SETTLEMENT_MODES rather than naming modes, so there is
+    ONE definition of "this book holds" -- a second list here would drift from
+    that set the first time it changed, and it changed on 2026-09-02.
+
+    None means the caller did not declare a mode: the dashboard EV card and the
+    backtest both call compute_ev_table without one. Those get no exit fee, so
+    published numbers do not move for callers that cannot know the answer.
+    """
+    if execution_mode is None:
+        return False
+    return execution_mode not in config.HOLD_TO_SETTLEMENT_MODES
+
 # Kill switch for piggybacked snapshot capture (see _capture_snapshots()
 # below): when True, every run_for_station() cycle also writes this
 # cycle's live YES/NO prices (and depth, where known) into
@@ -202,6 +252,7 @@ def compute_ev_table(
     fee_rate_pct: Optional[float] = DEFAULT_FEE_RATE_PCT,
     quotes: Optional[Dict[int, MarketQuote]] = None,
     model_probs: Optional[Dict[int, float]] = None,
+    execution_mode: Optional[str] = None,
 ) -> List[EVResult]:
     """
     Core entry point. For every bucket with a token_map entry, compute
@@ -279,7 +330,19 @@ def compute_ev_table(
             # Stored on the EVResult, so entry_manager's at-size re-check
             # deducts the same fee without recomputing it.
             fee_pct = fee_rate_pct if fee_rate_pct is not None else taker_fee_pct_of_notional(price)
-            net_ev = (raw_edge / price) - slippage - fee_pct if price > 0 else None
+            # THE EXIT LEG. Charged only on a book that sells, and suppressed
+            # by a flat fee_rate_pct override -- that override exists for the
+            # backtest's fee-parity runs, and adding a fee on top of it would
+            # break the parity it establishes.
+            exit_fee_pct = (
+                expected_exit_fee_pct_of_notional(price)
+                if fee_rate_pct is None and _sells_before_settlement(execution_mode)
+                else 0.0
+            )
+            net_ev = (
+                (raw_edge / price) - slippage - fee_pct - exit_fee_pct
+                if price > 0 else None
+            )
 
             results.append(EVResult(
                 station_icao=estimate.station_icao,
@@ -291,6 +354,7 @@ def compute_ev_table(
                 raw_edge=raw_edge,
                 estimated_slippage_pct=slippage,
                 fee_rate_pct=fee_pct,
+                expected_exit_fee_pct=exit_fee_pct,
                 net_ev_per_dollar=net_ev,
                 spread_source=estimate.spread_source,
                 market_bid=bid,
@@ -381,6 +445,7 @@ def run_for_station_with_map(
     estimate: CalibratedEstimate,
     trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
     fee_rate_pct: Optional[float] = DEFAULT_FEE_RATE_PCT,
+    execution_mode: Optional[str] = None,
 ) -> StationEVRun:
     """
     One station's full EV cycle, returning the token map and live bucket
@@ -468,6 +533,10 @@ def run_for_station_with_map(
     ev_results = compute_ev_table(
         estimate, token_map, trade_size_usd, fee_rate_pct,
         quotes=quotes, model_probs=model_probs,
+        # THREADED FROM THE CALLER, never read from executor here: executor
+        # imports risk_manager which imports this module, so reaching for the
+        # mode directly would be a circular import. The scheduler knows it.
+        execution_mode=execution_mode,
     )
     return StationEVRun(
         station_icao=station.icao,

@@ -1067,7 +1067,14 @@ def evaluate_entry(
     # Re-check slippage and net EV at the ACTUAL recommended size, not the
     # flat test size ev_engine.py used to screen this candidate initially.
     slippage_at_size = market_client.estimate_slippage(token_id, depth_capped_usd)
-    net_ev_at_size = (ev_result.raw_edge / ev_result.market_price) - slippage_at_size - ev_result.fee_rate_pct
+    # Both fee terms, or the approval runs on a number the EV table already
+    # rejected -- the same defect shape as P1-2's unpriced limit pad.
+    net_ev_at_size = (
+        (ev_result.raw_edge / ev_result.market_price)
+        - slippage_at_size
+        - ev_result.fee_rate_pct
+        - getattr(ev_result, "expected_exit_fee_pct", 0.0)
+    )
 
     if slippage_at_size > config.MAX_ACCEPTABLE_SLIPPAGE_PCT:
         return EntryDecision(
