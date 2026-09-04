@@ -522,3 +522,84 @@ nothing in this wave disturbed the P0-5 measurement.
 **Watch next:** `other_gap` in the cohort monitor. It stood at -$21.65 over
 2026-08-03..09-01 and should trend toward zero as positions closed under P1-7's
 ordering accumulate. That is the deployed proof that P1-7 did what it claims.
+
+---
+
+## 11. Addendum, 2026-09-04 — P1-8(b), the entry-fee migration
+
+Branch `fix/p1-8b-entry-fee-migration`, **not merged, not deployed**. 1552 tests
+green. Its own branch because the plan says so and because it writes to the
+production database.
+
+### 11.1 The plan's own estimate was low by about a factor of two
+
+P1-8 describes the asymmetry as flattering every return by "roughly 0.5–1.25% of
+stake per round trip". Measured over the published `2026-08-03..09-01` window,
+the **entry leg alone is $104.99 on $4,049.93 staked — 2.59%**. The fee is
+`0.05 × (1 − p)` of notional and this book's mean entry is 0.32, so at these
+prices it could not have been much smaller.
+
+What it does to the headline:
+
+| scenario | gross | net |
+|---|---|---|
+| as traded | −295.15 (−7.3%) | −400.13 (−9.9%) |
+| stop only | +186.81 (+4.6%) | +81.82 (+2.0%) |
+| take only | +283.37 (+7.0%) | +178.39 (+4.4%) |
+| neither | +765.33 (+18.9%) | +660.35 (+16.3%) |
+| **held** | **+743.68 (+18.4%)** | **+638.69 (+15.8%)** |
+
+**The conclusion does not change.** Hold-to-settlement still beats as-traded by a
+wide margin, and the price edge still clears its own fee (that line was already
+net — `cohort_monitor.price_edge` has charged the entry fee since P0-5). What
+changes is that every published percentage was about 2.6 points optimistic.
+
+### 11.2 The interaction that would have broken silently
+
+The plan says "have reporting compute net P&L". Done naively — redefining
+`realized_pnl_usd` and `cohort_monitor`'s scenario P&L as net — that would have
+broken `reproduction_check()` against the published totals, which were computed
+**gross**. The failure would have printed as a MISMATCH on all five scenarios:
+identical in appearance to a real regression, and actually two correct answers
+to different questions.
+
+So **both bases are reported side by side** and the reproduction check stays on
+gross. `position_economics` gains `entry_fee_usd` and `realized_pnl_usd_net`;
+`cohort_monitor` gains `entry_fee_usd` and per-scenario net figures;
+`paper_trading_report` gains `total_entry_fee_usd` and a net dollar-weighted
+return. NULL propagates on all of them — "fee unknown" and "fee zero" are
+different facts.
+
+### 11.3 Why the fee is stored rather than derived
+
+It is a pure function of `entry_price` under today's schedule, so the column
+looks redundant. It is not, for the reason `storage.py` already gives for
+refusing to backfill `model_prob`: **the schedule is a fact about the day the
+trade happened.** If Polymarket changes the rate, a consumer that recomputes
+restates every historical row at a rate nobody was charged. The backfill
+therefore never overwrites a stored value.
+
+### 11.4 Dry-run against the real table
+
+Rebuilt all **607 real rows** on the real schema with the fee column NULL — the
+exact state the deployed table is in the instant after `ALTER` — and ran the
+migration:
+
+- 607 NULL → **0 NULL**; **0 rows** disagree with the schedule
+- first connection **106 ms**, second **21 ms** (the read guard stops the write)
+- cohort scored **514 rows / $4,049.93**, **0 estimated fees**
+- **`reproduction_check` still MATCHES: True**
+
+The backfill is guarded by a `SELECT ... LIMIT 1` rather than running
+unconditionally: it executes on every connection and the daemon opens one per
+storage call, so an unconditional `UPDATE` would take a write lock every time on
+a table that needs it once.
+
+### 11.5 Two rows the acceptance condition does not cover, and should not
+
+Acceptance asks that every backfilled row still satisfy
+`size_usd == entry_price × size_shares`. **Two rows already violate it** — WSSS
+simulation, 2026-08-12 — because `entry_price` was recorded as the pre-alignment
+ask rather than `expected_price`, which was fixed afterwards. The migration
+touches none of those three fields, so they are left exactly as they are. The
+condition is about *not changing* them, and it holds.

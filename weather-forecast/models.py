@@ -306,6 +306,17 @@ class Position:
     # holding is strictly worse than a flagged one: the flag is a fact about
     # the exit path, not a reason to forget the shares exist.
     exit_blocked_reason: Optional[str] = None
+    # THE ENTRY-SIDE TAKER FEE ACTUALLY CHARGED, in dollars per share.
+    # exit_price is already net of the exit fee; this is the missing other
+    # half, and without it every stored return is flattered by 0.05 x (1 - p)
+    # of stake -- 2.59% on the measured book.
+    #
+    # RECORDED, NOT DERIVED. It is a function of entry_price under today's
+    # schedule, but the schedule is a fact about the day the trade happened:
+    # if the rate changes, recomputing would restate history at a rate nobody
+    # paid. None means no fee was recorded, which is NOT the same as zero --
+    # reporting propagates the None rather than reporting gross as net.
+    entry_fee_per_share: Optional[float] = None
 
     # WHAT THE MODEL BELIEVED WHEN IT ENTERED. Recorded so a closed trade can
     # be scored against its own prediction rather than only against P&L.

@@ -52,6 +52,24 @@ def _position_return_pct(position: Position) -> Optional[float]:
     return (position.exit_price - position.entry_price) / position.entry_price
 
 
+def _entry_fee_usd(position: Position) -> float:
+    """
+    This position's entry-side taker fee in dollars, from the ledger.
+
+    Falls back to today's schedule for a row written before the column existed.
+    risk_manager is imported lazily -- it imports ev_engine, which imports
+    storage, and this module already sits downstream of all three.
+    """
+    if not position.entry_price or position.entry_price <= 0 or not position.size_usd:
+        return 0.0
+    per_share = position.entry_fee_per_share
+    if per_share is None:
+        import risk_manager
+
+        per_share = risk_manager.taker_fee_per_share(position.entry_price)
+    return per_share * (position.size_usd / position.entry_price)
+
+
 def summarize_positions(positions: List[Position]) -> Optional[dict]:
     """
     Aggregate performance stats across a list of CLOSED positions held
@@ -91,11 +109,13 @@ def summarize_positions(positions: List[Position]) -> Optional[dict]:
     # each realized return by its stake instead.
     total_staked = 0.0
     total_pnl_usd = 0.0
+    total_entry_fee_usd = 0.0
     for p in history:
         r = _position_return_pct(p)
         if r is not None and p.size_usd:
             total_staked += p.size_usd
             total_pnl_usd += p.size_usd * r
+            total_entry_fee_usd += _entry_fee_usd(p)
 
     by_reason = {}
     for p in history:
@@ -121,6 +141,17 @@ def summarize_positions(positions: List[Position]) -> Optional[dict]:
         "total_pnl_usd": round(total_pnl_usd, 2),
         # P&L per dollar actually put at risk -- the honest headline number.
         "dollar_weighted_return_pct": round(total_pnl_usd / total_staked, 4) if total_staked else None,
+        # ...and the same number once the entry-side taker fee it never paid is
+        # charged. exit_price is already net of the EXIT fee; the entry leg was
+        # recorded gross, so the line above is flattered by roughly 0.05 x
+        # (1 - entry) of stake -- 2.59% on the measured book, not the "0.5-1.25%
+        # per round trip" originally estimated. Both are kept because the gross
+        # figure is what every published measurement to date was computed on.
+        "total_entry_fee_usd": round(total_entry_fee_usd, 2),
+        "dollar_weighted_return_pct_net": (
+            round((total_pnl_usd - total_entry_fee_usd) / total_staked, 4)
+            if total_staked else None
+        ),
         "std_return_pct": round(statistics.stdev(returns), 4) if len(returns) > 1 else 0.0,
         "mean_win_pct": round(statistics.fmean(wins), 4) if wins else None,
         "mean_loss_pct": round(statistics.fmean(losses), 4) if losses else None,
