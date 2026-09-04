@@ -407,8 +407,8 @@ crosses zero on noise, and a threshold that trips on noise gets ignored.
 
 ## 10. Addendum, 2026-09-04 — Phase 1's remaining NOW-row items
 
-Branch `fix/remediation-wave-2`, six commits, **not merged and not deployed**.
-1535 tests green. Every premise was re-verified against the deployed tree first,
+Branch `fix/remediation-wave-2`, seven commits, **merged `39ab36f` and DEPLOYED
+2026-09-04 12:50:12 UTC**. 1535 tests green. Every premise was re-verified against the deployed tree first,
 because §1 had already found seven plan items shipped — and doing so changed two
 of the six.
 
@@ -494,3 +494,31 @@ DEFER  P0-1 ~2026-10-03   P0-2 ~November   P0-3 needs prod DB access
 
 §4's gating gap and §9.5's "what does firing mean" are both still open, and
 neither is affected by this wave.
+
+### 10.5 Deploy record, 2026-09-04 12:50:12 UTC
+
+Daemon-behaviour change, so unlike P0-5 this needed a restart. No dashboard code
+changed in this wave, so the frozen-copy step did not apply and
+`deploy_daemon.sh` was deliberately not used -- it rewrites the unit and re-runs
+pip, and a targeted deploy that never touches the unit cannot clobber
+`POLYWEATHER_MODE`.
+
+Conditions: **0 open live positions** (16 open paper), WSSS/RCSS entry window
+8 hours away (21:00-00:00 UTC), Europe and Karachi windows shut. The Americas
+UTC-7 window was open but every Americas station is collection-only.
+
+Sequence: `git pull --ff-only` -> import smoke test of all six new surfaces ->
+dry-render all four pages to `/tmp` under the new config -> `systemctl restart
+polyweather`.
+
+Verified after: unit md5 **IDENTICAL** before and after (`9506ce61`), ExecStart
+unchanged, resolved args still `--mode live --fallback-mode paper
+--i-understand-this-spends-real-money`, `NRestarts=0`, LIVE mode active for
+WSSS + RCSS only, preflight `[ok] collateral $1.89, allowances on all 4
+spender(s)`, zero tracebacks. Americas candidates refused at the collection gate
+as designed. `cohort_monitor.py --reproduce` still returns **MATCHES: True**, so
+nothing in this wave disturbed the P0-5 measurement.
+
+**Watch next:** `other_gap` in the cohort monitor. It stood at -$21.65 over
+2026-08-03..09-01 and should trend toward zero as positions closed under P1-7's
+ordering accumulate. That is the deployed proof that P1-7 did what it claims.
