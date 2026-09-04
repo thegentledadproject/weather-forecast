@@ -679,3 +679,87 @@ regression via pool-adjacent-violators is about thirty lines and fully
 deterministic, which is a better trade than adding a numerical dependency to a
 daemon for one function. Recorded because reaching for `sklearn.isotonic` is the
 obvious first move and it would have broken the deploy rather than the tests.
+
+---
+
+## 13. Addendum, 2026-09-04 — P3-6 built, and the measurement that should gate it
+
+Branch `feat/p3-6-calibrated-sizing`, **not merged, not deployed**. 1588 tests
+green, all three acceptance conditions met. Prerequisite B is answered inside it
+per §12.
+
+### 13.1 The expected effect was "could go either way". It does not.
+
+The plan asked for this to be checked rather than assumed: calibration shrinks
+probabilities and therefore positions, offset by retiring the haircut, which
+grows them 1.4×–2.25×. Measured on the recorded book (416 rows with a stored
+`model_prob`, pooled map, paper book so stopless):
+
+| | |
+|---|---|
+| rows sized to **ZERO** (calibration takes the edge negative) | **166 of 416 — 40%** |
+| of the survivors: grew | 55 |
+| of the survivors: shrank | 195 |
+| size ratio new/old, median | **0.66×** |
+
+So it goes down, hard, **even with the haircut fully retired**. Not "either way".
+
+**This is not obviously wrong** — it is the cheap band that
+[[entry-price-band-scoring]] and the lottery-band work already identified as the
+model running ~0.22 hot, and a map fitted on realised outcomes kills exactly
+those entries. But eliminating 40% of entries is a far larger live change than
+anything else in this programme, and it should not ship on one in-sample-ish
+number.
+
+### 13.2 What the fitted map actually looks like
+
+Pooled, n=389, **240 knots but only 15 distinct output levels** — isotonic on
+binary outcomes at this sample size is a coarse step function, not a smooth
+curve:
+
+```
+model_prob 0.074 -> 0.000     <- anything under ~0.096 calibrates to ZERO
+model_prob 0.096 -> 0.103     <- the whole 0.096-0.309 range collapses here
+model_prob 0.309 -> 0.150
+model_prob 0.398 -> 0.319     <- the measured 0.432 -> ~0.34 lands about right
+model_prob 0.520 -> 0.525
+model_prob 0.801 -> 0.750
+```
+
+Two things stand out. A **hard zero below 0.096**, which alone refuses a slice of
+the book outright. And a single flat block spanning **0.096 to 0.309**, which is
+most of the cheap band — every candidate in it gets the same calibrated
+probability regardless of what the model said.
+
+The plan anticipated this: *"isotonic regression, or Platt scaling if the sample
+is too thin for isotonic."* At n=389 with 0/1 outcomes it is arguably too thin,
+and Platt would give a smooth monotone curve with two parameters instead of a
+15-step staircase.
+
+### 13.3 Tier coverage today
+
+3 stations clear `MIN_CALIBRATION_SAMPLES` on their own history — **RKSI (31),
+ZGSZ (35), ZSPD (35)** — and 16 sit on the pooled map. Neither live-armed station
+(WSSS, RCSS) has its own map yet. Out of sample the pooled map first becomes
+estimable around **2026-08-24** (n=117) and is still moving: `model_prob 0.40`
+calibrates to 0.357 on 08-24 and 0.315 by 08-30.
+
+### 13.4 Recommendation, and the decision it needs
+
+Three options, and this is an operator call rather than a code one:
+
+1. **Deploy as built.** Sizing becomes calibrated, ~40% of entries stop, and the
+   cohort monitor measures the result within weeks. Correct by construction and
+   the largest single behaviour change in the programme.
+2. **Deploy in shadow first.** Record `calibrated_prob` and the tier on every
+   EVResult and snapshot, but keep sizing on the raw `model_prob`. That makes the
+   counterfactual measurable before it is acted on — the same discipline that
+   made P0-5 measurement-only — at the cost of a few more weeks.
+3. **Smooth the map first.** Replace isotonic with Platt at this sample size, on
+   the grounds that a 15-level staircase with a hard zero is fitting noise as
+   much as bias, then revisit.
+
+Not recommended: deploying **and** treating the 40% as validated. The number is
+computed with the map fitted on the full record and applied across it, which
+flatters the fit; the production path is out-of-sample per day and will be
+noisier than this.
