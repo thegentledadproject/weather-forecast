@@ -356,7 +356,25 @@ def _resolved_size_ok(spec, decision) -> tuple:
         )
 
     if decision.net_ev_at_size is not None and decision.slippage_at_size_pct is not None:
-        net_ev = decision.net_ev_at_size - (slippage - decision.slippage_at_size_pct)
+        # THE THIRD CONSUMER OF THE SLIPPAGE BUDGET. Tick alignment, the limit
+        # pad and book-walk slippage all eat the same headroom, are measured
+        # at two different layers, and were never summed -- only the last of
+        # the three reached the number this gate tests. The pad can be up to
+        # LIVE_LIMIT_PAD_MAX_PCT (3%) of the price on a book where the whole
+        # net-EV bar is often 15%.
+        #
+        # Charging it in FULL is conservative rather than accurate: the pad is
+        # a worst-price bound the FOK need not reach, so on an unmoved book it
+        # costs nothing. See OrderSpec.pad_cost_pct. Conservative is the right
+        # direction for a gate that decides whether to spend money, and it is
+        # named here so nobody reads this as the expected cost.
+        #
+        # Read INSIDE this branch, not above it: a decision carrying no model
+        # number (manual_trigger) has nothing to charge the pad against, and
+        # computing a cost that is then discarded invites a caller to pass a
+        # spec that cannot report one.
+        pad_cost = getattr(spec, "pad_cost_pct", 0.0)
+        net_ev = decision.net_ev_at_size - (slippage - decision.slippage_at_size_pct) - pad_cost
         # `<` against the bar, `<=` against the floor -- deliberately not one
         # expression. entry_manager rejects on `net_ev_at_size < min_net_ev`,
         # so a trade exactly ON the bar is approved and re-testing it with
@@ -375,7 +393,17 @@ def _resolved_size_ok(spec, decision) -> tuple:
                 f"{bar_text} -- the size the exchange forces is not the trade "
                 f"that was approved"
             )
-        note += f", slippage {slippage:.1%}, net EV {decision.net_ev_at_size:+.1%} -> {net_ev:+.1%}"
+        # THE THREE COMPONENTS, SEPARATELY. "Something ate the budget" is not
+        # actionable; which one did determines the fix. Book-walk slippage is
+        # the market, the pad is a config knob (LIVE_LIMIT_PAD_MAX_PCT), and
+        # the residual is tick alignment, which is structural. An unpadded
+        # order says nothing rather than printing a zero.
+        note += (
+            f", slippage {decision.slippage_at_size_pct:.1%} -> {slippage:.1%}"
+        )
+        if pad_cost:
+            note += f", limit pad {pad_cost:.1%} (worst case)"
+        note += f", net EV {decision.net_ev_at_size:+.1%} -> {net_ev:+.1%}"
         if bar is None:
             note += " (positive floor only -- no approval bar carried)"
         else:

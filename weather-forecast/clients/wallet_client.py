@@ -423,6 +423,37 @@ class OrderSpec:
         """Worst case: every share filling at the padded limit."""
         return round(self.size_shares * self.limit_price, 6)
 
+    @property
+    def pad_cost_pct(self) -> float:
+        """
+        What _pad_limit's widening is worth, as a fraction of the expected
+        price -- the third consumer of the slippage budget, and the one that
+        never reached the number the entry gate tests.
+
+        A WORST CASE, NOT AN EXPECTATION, and the distinction is the whole
+        reason this is a separate property rather than folded into
+        notional_usd. A Polymarket limit is a worst-price bound and the FOK
+        fills at the best price available up to it, so on a book that has not
+        moved the pad costs exactly NOTHING. Charging it in full against
+        expected value is therefore conservative: it tests the entry against
+        the worst price we have agreed to accept rather than the price we
+        expect to pay. That is the right direction for a gate that spends
+        money, but a reader should not mistake it for the expected cost.
+
+        MAGNITUDE, not signed difference. A BUY pads UP and a SELL pads DOWN;
+        paying more and receiving less are the same direction of harm, so both
+        are charged.
+
+        Returns 0.0 when there is no pad, and when expected_price was never
+        recorded -- a spec from before the field existed, or a refusal. Zero
+        there means the gate behaves exactly as it did before this existed,
+        which is the honest answer for "no pad is measurable" and avoids a
+        divide-by-zero inside a check that must not raise.
+        """
+        if not self.expected_price:
+            return 0.0
+        return abs(self.limit_price - self.expected_price) / self.expected_price
+
     def describe(self) -> str:
         if not self.ok:
             return f"REFUSED ({self.reason})"
