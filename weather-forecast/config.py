@@ -1557,11 +1557,76 @@ TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = TIGHTENED_PROFIT_TAKE_PCT
 #   both push that way -- but that is a HYPOTHESIS, not a measurement, and
 #   nothing here has confirmed it.
 #
-#   The cohort monitor is what settles this: it recomputes all four
-#   scenarios from the rows, so it should reproduce $743.68 / $765.33 /
-#   -$295.15 AND account for the $43.74. If it cannot, that gap is the
-#   finding, and this comment is the record of what was already known
-#   before it was built.
+#   RESIDUAL RESOLVED 2026-09-04, and it needed no new data -- the four
+#   rows of the table above account for all $43.74 between them. The
+#   paragraph immediately above is left standing because the way it was
+#   wrong is the point: it reconciled a per-rule sum against a total
+#   without writing down the identity that connects them, and then
+#   hypothesised a mechanism to cover the gap. Both halves of the gap turn
+#   out to be arithmetic.
+#
+#   THE IDENTITY. Split the rows by what closed them -- stop, take, or
+#   anything else (overwhelmingly resolution) -- and each scenario is the
+#   as-traded total with one or more classes re-valued at settlement:
+#
+#       stop_only  - as_traded  =  the take's cost      (takes re-valued)
+#       take_only  - as_traded  =  the stop's cost      (stops re-valued)
+#       neither    - as_traded  =  both costs
+#       held       - neither    =  the RESOLUTION-CLOSE GAP
+#
+#   so, exactly and with no residual available to hide in:
+#
+#       held - as_traded = stop cost + take cost + resolution-close gap
+#
+#   WHAT THE PUBLISHED ROWS GIVE WHEN THAT IS APPLIED:
+#
+#       take cost   186.81 - (-295.15) =  +481.96   <- matches, to the cent
+#       stop cost   283.37 - (-295.15) =  +578.52   <- NOT the 600.61 above
+#       resolution gap  743.68 - 765.33 =  -21.65
+#       check      578.52 + 481.96 - 21.65 = 1,038.83 = held - as traded
+#
+#   Two of the three land exactly on figures already in this block, which
+#   is what says the scenario definitions are the ones that produced the
+#   table. So the $43.74 is TWO separate things added together:
+#
+#     * -$21.65 of it is the resolution-close gap, a real quantity the
+#       original reconciliation had no term for. Note its SIGN: resolution
+#       closes booked $21.65 ABOVE clean settlement value, which is the
+#       OPPOSITE direction to the exit-fee/book-quote hypothesis above.
+#       That hypothesis is not merely unconfirmed; the table contradicts it.
+#     * +$22.09 of it is a ROW-SET difference on the stop side, and this is
+#       the half that was genuinely not visible from the table alone.
+#
+#   BOTH HALVES CONFIRMED AGAINST THE ROWS, 2026-09-04, by
+#   cohort_monitor.py run over this exact window (514 rows, 252
+#   station-days, $4,049.93 staked -- all three reproduce). Cost against
+#   holding, per exact status:
+#
+#       closed_stop_loss        222 rows    +600.61
+#       closed_take_profit      197 rows    +481.96
+#       closed_trailing_stop     15 rows     -22.09
+#       closed_resolution        80 rows     -21.65
+#
+#   So the $600.61 above is RIGHT, and it is the FIXED STOP ALONE. The
+#   +$22.09 is the trailing stop -- a rule removed 2026-08-17 whose 15
+#   closed rows are still inside this window, and which BEAT holding by
+#   $22.09. The table's "take only" column re-valued those 15 rows along
+#   with the other 222 and so netted them off; the per-rule $600.61 did
+#   not. Two correct numbers measured over two different row sets, which is
+#   why no amount of re-reconciling the four totals could ever have closed
+#   the gap.
+#
+#   THE SIGN IS THE PART WORTH REMEMBERING. Every "cost" here is held minus
+#   as-traded, so positive means the rule lost money against holding. The
+#   fixed stop is +$600.61 and the trailing stop is -$22.09: the two stop
+#   rules point in OPPOSITE directions, and the aggregated "stop" figure
+#   hides that. cohort_monitor reports by_status for this reason.
+#
+#   Also verified on the same run: the price-edge pair below (0.306 mean
+#   entry against a 0.344 realised win rate) reproduces exactly on the
+#   358-row model_prob subset. It is NOT the whole cohort's figure -- over
+#   all 514 rows the same pair is 0.326 against 0.381 -- so the two are
+#   different samples of the same quantity, not a discrepancy.
 #
 # THIS IS NOT A CLAIM THAT THE MODEL IMPROVED. On the 358 traded rows with a
 # stored prediction, Brier is 0.1930 for the model against 0.1842 for the
@@ -1600,6 +1665,78 @@ TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = TIGHTENED_PROFIT_TAKE_PCT
 # An empty tuple restores the previous behaviour everywhere, which is what
 # makes the revert a one-value change.
 HOLD_TO_SETTLEMENT_MODES: tuple = ("paper",)
+
+# THE KILL CRITERION FOR THE PRICE EDGE. Pre-committed here, before the
+# monitor that evaluates it existed, and deliberately BEFORE the P2-2 flip
+# puts more money behind the thing it watches.
+#
+# WHY A THRESHOLD AND NOT JUST A CHART. Everything above establishes that
+# this book's P&L is a PRICE edge -- mean entry 0.306 against a 0.344
+# realised win rate -- and that the model itself loses to the market on
+# Brier. The consequence is stated up there and is the reason these three
+# constants exist: THE EDGE CAN DECAY WITHOUT ANY CALIBRATION METRIC
+# MOVING. It is a bias exploit. Agency outlook language runs warm, the
+# market follows the language, the station reads cooler. Bias exploits
+# close -- either the market learns, or the agency fixes its bias -- and
+# neither event would show up in Brier, in RMSE, or in forecast MAE. A
+# monitor with no pre-committed level is a dashboard that gets rationalised
+# during a drawdown, so the level is written down while there is no money
+# riding on the answer.
+#
+# WHY THE LEVEL IS ON THE NET PRICE EDGE AND NOT ON P&L. P&L at a mean
+# position of $7.88 is far too noisy to trip a threshold on -- the
+# day-clustered interval on the held return is [+5.2%, +31.5%], six times
+# as wide as it is far from zero. The price edge is the same quantity one
+# step earlier and much less noisy: realised win rate minus mean entry
+# price, in probability points per share.
+#
+# NET, because the gross edge is not the thing that has to survive. A held
+# position pays the entry-side taker fee (0.05 x (1-p) of notional, so
+# 0.05 x (1-p) x p per share) and pays NOTHING on the way out -- redeeming
+# a resolved token is not a trade. At the measured 0.306 mean entry that
+# fee is $0.0105 per share against a gross edge of $0.038, so the level
+# below is a real constraint and not a formality: it says the edge must
+# still pay for the fee it costs to take.
+#
+# ZERO is the level because zero is where the trade stops being a trade.
+# Anything above it is a judgement about how much edge is worth having;
+# at or below it the book is paying Polymarket for the privilege of being
+# right about the weather.
+COHORT_KILL_NET_PRICE_EDGE = 0.0
+
+# The rolling window the level is read on. Thirty days is the same window
+# calibration_panel's RECENT_DAYS reasoning picks for the same reason: long
+# enough that a station with a normal entry rate contributes several
+# INDEPENDENT days, short enough that a regime change shows up rather than
+# being averaged into weeks of history. All-time and 60-day are reported
+# alongside it so a level breach can be read as a trend or as a blip, but
+# the criterion is keyed to this one.
+COHORT_KILL_WINDOW_DAYS = 30
+
+# The minimum sample the criterion needs before it will return a verdict at
+# all. In STATION-DAYS, not rows: every entry taken on one station-day
+# settles off the same weather, so rows overstate the evidence -- the
+# measured cohort is 514 rows over 252 station-days, a factor of two. Below
+# this the criterion returns None, which reads as "not enough evidence",
+# never as "fine".
+#
+# 30 is one full window's worth of station-days, i.e. an average of one
+# station-day per calendar day in COHORT_KILL_WINDOW_DAYS. At the measured
+# rate (252 station-days in 30 days, ~8/day) it is reached in under a week,
+# so this floor binds only on a book that has nearly stopped trading -- and
+# a nearly-stopped book is exactly the one whose recent price edge should
+# not be trusted to fire a kill.
+COHORT_KILL_MIN_STATION_DAYS = 30
+
+# WHAT FIRING MEANS IS STILL AN OPERATOR DECISION, AND IS DELIBERATELY NOT
+# ENCODED. cohort_monitor.py is Phase 0 -- measurement only, zero behaviour
+# change -- so it reports fired True/False/None and NOTHING reads that on a
+# trading path. The three candidate responses (halt the station, halt the
+# book, drop to paper) differ in what they cost if the firing is a false
+# alarm, and that is a call for whoever is carrying the money, not for the
+# module that noticed. Recorded as an open question in
+# docs/superpowers/specs/2026-09-03-remediation-plan-rev4.md rather than
+# guessed at here.
 
 # THE MIRROR OF LOTTERY_PRICE_THRESHOLD: entries AT OR ABOVE this price
 # also skip the percentage stop-loss.

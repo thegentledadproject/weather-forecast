@@ -50,7 +50,7 @@ impression, so three rules are load-bearing rather than cosmetic:
 DEPENDENCIES
 ------------
 json, datetime, html, statistics (standard library)
-config.py, entry_manager.py, promotion_dossier.py (local)
+config.py, cohort_monitor.py, entry_manager.py, promotion_dossier.py (local)
 """
 
 import html
@@ -61,6 +61,7 @@ from typing import List, Optional, Tuple
 
 import bucket_axis
 import calibration
+import cohort_monitor
 import config
 import entry_manager
 import promotion_dossier
@@ -378,3 +379,154 @@ def render_table_html(rows: List[dict]) -> str:
         + "".join(body)
         + "</tbody></table>"
     )
+
+
+# ---------------------------------------------------------------------------
+# THE COHORT CARD (P0-5)
+# ---------------------------------------------------------------------------
+#
+# BOOK-WIDE, and deliberately separate from the per-station table above.
+# The table answers "how has the model scored"; this answers "is the thing
+# the book actually lives on still there", and those are different
+# questions with different answers. config.py's measurement block is
+# explicit: the model LOSES to the market on Brier and the P&L is a PRICE
+# edge, so a healthy-looking Gap column is not evidence about this card and
+# this card is not evidence about that column.
+#
+# THE ONE EXTRA REPORTING RULE, on top of the three in the module
+# docstring. The kill criterion has THREE states, and "not enough
+# evidence" must not render as "holding". A thin sample reading as
+# reassurance is precisely the failure the pre-committed threshold exists
+# to prevent, so the card prints "NO VERDICT" and says why.
+#
+# The arithmetic is cohort_monitor's; this renders it, the same way the
+# table above renders promotion_dossier's.
+
+
+def _cohort_scenario_rows(summary: dict) -> str:
+    cells = []
+    for scenario in cohort_monitor.SCENARIOS:
+        cell = summary["scenarios"][scenario]
+        pct = cell["return_pct"]
+        pct_text = _EM_DASH if pct is None else f"{pct * 100:+.1f}%"
+        cells.append(
+            "<tr>"
+            f"<td class='mono'>{html.escape(scenario.replace('_', ' '))}</td>"
+            f"<td class='mono num'>{cell['pnl_usd']:+,.2f}</td>"
+            f"<td class='mono num'>{pct_text}</td>"
+            "</tr>"
+        )
+    return "".join(cells)
+
+
+def render_cohort_html(window_summaries: dict, kill_status: dict) -> str:
+    """
+    The cohort monitor as one card both dashboards can drop in.
+
+    Uses only the .mono/.num/.empty/.sub classes both pages already define,
+    for the same reason render_table_html does: .dim exists on one page
+    only, and a class the page never styles renders as undifferentiated
+    body text on the other.
+    """
+    all_time = window_summaries.get("all_time")
+    if all_time is None:
+        return "<div class='empty'>no closed positions with a settled bucket yet</div>"
+
+    parts = [
+        "<div class='sub'>"
+        f"{all_time['n']} rows over {all_time['n_days']} station-days, "
+        f"${all_time['staked_usd']:,.2f} staked, "
+        f"{all_time['first_date']}&ndash;{all_time['last_date']}"
+        "</div>",
+        "<table><thead><tr><th>Scenario</th><th>P&amp;L</th><th>Return</th>"
+        "</tr></thead><tbody>",
+        _cohort_scenario_rows(all_time),
+        "</tbody></table>",
+    ]
+
+    held_ci = all_time["ci"]["held_return_pct"]
+    if held_ci:
+        parts.append(
+            "<div class='sub'>held return, station-day clustered 95% CI: "
+            f"[{held_ci[0] * 100:+.1f}%, {held_ci[1] * 100:+.1f}%]</div>"
+        )
+
+    rec = all_time["reconciliation"]
+    parts.append(
+        "<div class='sub'>"
+        f"stop cost {rec['stop_cost_usd']:+,.2f} &middot; "
+        f"take cost {rec['take_cost_usd']:+,.2f} &middot; "
+        # NAMED, not folded away. This is the term config.py carried as an
+        # unexplained $43.74 residual: how far resolution-closed rows sat
+        # from clean settlement value.
+        f"other gap {rec['other_gap_usd']:+,.2f} &middot; "
+        f"total {rec['held_minus_as_traded_usd']:+,.2f}"
+        "</div>"
+    )
+
+    edge_rows = []
+    for label, key in (("all time", "all_time"),) + tuple(
+        (f"last {days}d", f"trailing_{days}d") for days in cohort_monitor.WINDOW_DAYS
+    ):
+        summary = window_summaries.get(key)
+        if summary is None or summary["price_edge"] is None:
+            edge_rows.append(
+                f"<tr><td class='mono'>{html.escape(label)}</td>"
+                f"<td colspan='4' class='sub'>{_EM_DASH}</td></tr>"
+            )
+            continue
+        edge = summary["price_edge"]
+        edge_rows.append(
+            "<tr>"
+            f"<td class='mono'>{html.escape(label)}</td>"
+            f"<td class='mono num'>{edge['mean_entry_price']:.3f}</td>"
+            f"<td class='mono num'>{edge['win_rate']:.3f}</td>"
+            f"<td class='mono num'>{edge['net_price_edge']:+.4f}</td>"
+            f"<td class='mono num'><span class='sub'>"
+            f"n={edge['n']}, {edge['n_days']}d</span></td>"
+            "</tr>"
+        )
+
+    parts.append(
+        "<div class='sub'>Net price edge &mdash; realised win rate minus mean "
+        "entry price, less the entry-side taker fee. THIS is the decay alarm, "
+        "not Brier.</div>"
+        "<table><thead><tr><th>Window</th><th>Mean entry</th><th>Win rate</th>"
+        "<th>Net price edge</th><th>Sample</th></tr></thead><tbody>"
+        + "".join(edge_rows)
+        + "</tbody></table>"
+    )
+
+    verdict = {
+        None: "NO VERDICT",
+        True: "FIRED",
+        False: "holding",
+    }[kill_status["fired"]]
+    measured = kill_status["net_price_edge"]
+    measured_text = _EM_DASH if measured is None else f"{measured:+.4f}"
+    detail = (
+        f"trailing {kill_status['window_days']}d net price edge {measured_text} "
+        f"vs level {kill_status['level']:+.4f}, "
+        f"{kill_status['n_days']} station-days"
+    )
+    if kill_status["fired"] is None:
+        detail += (
+            f" &mdash; below the {kill_status['min_station_days']} station-day "
+            "minimum, so the criterion reports nothing rather than reassurance"
+        )
+    parts.append(
+        f"<div><strong>Kill criterion: {verdict}</strong>"
+        f"<span class='sub'> &mdash; {detail}</span></div>"
+    )
+
+    return "".join(parts)
+
+
+def cohort_card(as_of=None, stations=None) -> str:
+    """
+    render_cohort_html() against the stored book -- the I/O half, so a
+    generator needs one call and no knowledge of cohort_monitor's shape.
+    """
+    rows, _ = cohort_monitor.load_cohort(stations=stations)
+    window_summaries = cohort_monitor.windows(rows, as_of=as_of)
+    return render_cohort_html(window_summaries, cohort_monitor.kill_criterion(window_summaries))

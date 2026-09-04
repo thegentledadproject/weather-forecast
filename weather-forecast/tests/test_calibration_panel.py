@@ -293,3 +293,124 @@ class TestRendering:
         # judgement. "beats the market" on a 9-day sample is laundering.
         assert "beats the market" not in table
         assert "promote" not in table
+
+
+# ---------------------------------------------------------------------------
+# THE COHORT CARD (P0-5)
+#
+# Book-wide, not per station: cohort_monitor scores the whole closed book
+# hold-vs-actual and reports the price edge, which is the quantity that can
+# decay without any calibration metric noticing. The card is where an
+# operator sees it during a trading day, so the same reporting rules the
+# per-station table is held to apply here -- plus one more that matters
+# only for this card: the kill criterion has THREE states, and collapsing
+# "not enough evidence" into "holding" is the failure worth a test.
+# ---------------------------------------------------------------------------
+
+from datetime import date as _date
+
+import cohort_monitor
+from models import Position as _Position
+
+
+def _cohort_rows(entries):
+    """
+    (entry_price, bucket_c, status, exit_price, day) tuples -> cohort rows.
+
+    Built through cohort_monitor.cohort_rows rather than by hand so the card
+    is always rendered against the real row shape.
+    """
+    settled = {}
+    positions = []
+    for index, (entry_price, bucket_c, status, exit_price, day) in enumerate(entries):
+        settled[day] = (32, 30, 34, "test", 1)
+        positions.append(_Position(
+            position_id=f"WSSS:{day}:{bucket_c}:YES:{index}",
+            station_icao="WSSS",
+            target_date=day,
+            bucket_c=bucket_c,
+            side="YES",
+            entry_price=entry_price,
+            size_usd=10.0,
+            entry_time=f"{day}T02:00:00+00:00",
+            status=status,
+            high_water_mark=entry_price,
+            exit_price=exit_price,
+            exit_time=f"{day}T06:00:00+00:00",
+        ))
+    rows, _ = cohort_monitor.cohort_rows(positions, settled)
+    return rows
+
+
+_TWO_DAYS = [
+    (0.30, 32, "closed_stop_loss", 0.20, _date(2026, 8, 29)),
+    (0.30, 33, "closed_take_profit", 0.45, _date(2026, 8, 30)),
+]
+
+
+def _card(rows, as_of=_date(2026, 8, 30)):
+    window_summaries = cohort_monitor.windows(rows, as_of=as_of)
+    return calibration_panel.render_cohort_html(
+        window_summaries, cohort_monitor.kill_criterion(window_summaries)
+    )
+
+
+def test_the_cohort_card_says_no_data_rather_than_printing_zeros():
+    """
+    A price edge of 0.0 is a book with NO edge. Printing it for "nothing
+    measured yet" tells the operator the opposite of the truth -- the same
+    trap as a Brier of 0.0 in the table above.
+    """
+    card = _card([]).lower()
+    assert "0.0000" not in card
+    assert "no closed" in card or "no data" in card
+
+
+def test_the_cohort_card_reports_n_days_alongside_n():
+    card = _card(_cohort_rows(_TWO_DAYS))
+    assert "2 rows" in card
+    assert "2 station-days" in card
+
+
+def test_the_cohort_card_shows_the_net_price_edge_against_its_level():
+    card = _card(_cohort_rows(_TWO_DAYS)).lower()
+    assert "net price edge" in card
+    assert f"{config.COHORT_KILL_NET_PRICE_EDGE:+.4f}" in card
+
+
+def test_the_cohort_card_withholds_a_verdict_below_the_minimum_sample():
+    """
+    THE THREE-STATE RULE. Two station-days is far below
+    COHORT_KILL_MIN_STATION_DAYS, so the card must not read as reassurance.
+    """
+    card = _card(_cohort_rows(_TWO_DAYS)).lower()
+    assert "no verdict" in card
+    assert "holding" not in card
+
+
+def test_the_cohort_card_reports_the_kill_criterion_as_fired_when_it_fires(monkeypatch):
+    monkeypatch.setattr(config, "COHORT_KILL_MIN_STATION_DAYS", 2)
+    rows = _cohort_rows([
+        (0.90, 33, "closed_stop_loss", 0.20, _date(2026, 8, 29)),
+        (0.90, 33, "closed_stop_loss", 0.20, _date(2026, 8, 30)),
+    ])
+    assert "fired" in _card(rows).lower()
+
+
+def test_the_cohort_card_names_the_resolution_close_gap():
+    """
+    config.py carried a $43.74 residual it could not explain for a day. The
+    card shows the third term by name so it cannot go missing again.
+    """
+    card = _card(_cohort_rows(_TWO_DAYS)).lower()
+    assert "other gap" in card or "resolution gap" in card
+
+
+def test_the_cohort_card_prescribes_no_action():
+    """
+    Phase 0 is measurement only. A card that told an operator to halt would
+    make a dashboard the author of a trading decision.
+    """
+    card = _card(_cohort_rows(_TWO_DAYS)).lower()
+    for word in ("halt", "disarm", "stop trading", "drop to paper"):
+        assert word not in card
