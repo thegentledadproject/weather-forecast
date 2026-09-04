@@ -253,6 +253,7 @@ def compute_ev_table(
     quotes: Optional[Dict[int, MarketQuote]] = None,
     model_probs: Optional[Dict[int, float]] = None,
     execution_mode: Optional[str] = None,
+    calibration: Optional[tuple] = None,
 ) -> List[EVResult]:
     """
     Core entry point. For every bucket with a token_map entry, compute
@@ -344,6 +345,30 @@ def compute_ev_table(
                 if price > 0 else None
             )
 
+            # THE CALIBRATED PROBABILITY (P3-6), beside model_prob and never
+            # over it. side_model_prob is ALREADY P(this side wins), and the
+            # map is fitted on exactly that quantity -- cohort_monitor scores
+            # the stored side-adjusted value against a 0/1 outcome for the same
+            # side -- so it applies directly here with no second flip.
+            #
+            # Only on the PRICED branch: an unpriced candidate carries
+            # net_ev_per_dollar=None and is never sized, so a calibrated
+            # probability there would be a number with no consumer.
+            #
+            # Passed in rather than fetched: probability_calibration reads the
+            # cohort through cohort_monitor, which imports this module, so
+            # fitting here would be circular. run_for_station_with_map fetches.
+            calibrated_prob = None
+            calibration_source = "uncalibrated"
+            if calibration is not None:
+                import probability_calibration
+
+                fitted, calibration_source, _n = calibration
+                if calibration_source in probability_calibration.CALIBRATED_TIERS:
+                    calibrated_prob = probability_calibration.apply_map(
+                        fitted, side_model_prob
+                    )
+
             results.append(EVResult(
                 station_icao=estimate.station_icao,
                 target_date=estimate.target_date,
@@ -355,6 +380,8 @@ def compute_ev_table(
                 estimated_slippage_pct=slippage,
                 fee_rate_pct=fee_pct,
                 expected_exit_fee_pct=exit_fee_pct,
+                calibrated_prob=calibrated_prob,
+                calibration_source=calibration_source,
                 net_ev_per_dollar=net_ev,
                 spread_source=estimate.spread_source,
                 market_bid=bid,
@@ -439,6 +466,23 @@ class StationEVRun:
     bucket_max_c: Optional[int] = None
     ev_results: List[EVResult] = field(default_factory=list)
     veto_reason: str = ""
+
+
+def _calibration_for(station_icao: str, target_date):
+    """
+    This station-day's calibration map, or None to leave rows uncalibrated.
+
+    Imported lazily and failure-tolerant for the same reason the module it
+    calls is: this sits on the entry path, and "uncalibrated" is exactly the
+    sizing behaviour that shipped before P3-6.
+    """
+    try:
+        import probability_calibration
+
+        return probability_calibration.calibration_for(station_icao, target_date)
+    except Exception as exc:  # noqa: BLE001 -- must not take a cycle down
+        print(f"[ev_engine] calibration unavailable for {station_icao}: {exc}")
+        return None
 
 
 def run_for_station_with_map(
@@ -537,6 +581,13 @@ def run_for_station_with_map(
         # imports risk_manager which imports this module, so reaching for the
         # mode directly would be a circular import. The scheduler knows it.
         execution_mode=execution_mode,
+        # FETCHED HERE rather than inside compute_ev_table, and imported
+        # lazily: probability_calibration reads the cohort through
+        # cohort_monitor, which imports this module. It caches per station-day,
+        # so this costs two storage queries once a day rather than once a
+        # cycle, and degrades to "uncalibrated" -- the pre-P3-6 behaviour,
+        # double buffer included -- on any failure.
+        calibration=_calibration_for(station.icao, estimate.target_date),
     )
     return StationEVRun(
         station_icao=station.icao,
