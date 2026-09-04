@@ -815,3 +815,112 @@ The cohort monitor is the instrument, and it is already on every dashboard page.
 The revert is a one-line change: pass `calibration=None` in
 `run_for_station_with_map`, which restores raw `model_prob` sizing and the double
 buffer exactly.
+
+---
+
+## 14. P2-2 — prerequisites done, and the flip is BLOCKED on P2-2's own gate
+
+Prerequisites A and C measured below; B was answered by P3-6 (§12). **The flip
+itself is not made**, because P2-2's opening line is not satisfied.
+
+### 14.1 THE HARD GATE IS NOT MET
+
+> *"Strictly gated on P2-1 landing **and being exercised at least once against a
+> real settled position**."*
+
+Checked on the box, 2026-09-04:
+
+```
+REDEEMABLE: 0 item(s), $0.00 total
+ALREADY CLEARED: 11 item(s), no action needed
+$ redeem.py --from-unit --execute   ->   0/0 redeemed.
+```
+
+P2-1 has **landed** but has **never redeemed anything**, because there has never
+been anything for it to redeem: the 11 cleared positions are losers plus the
+winners collected by hand before the code existed. `--execute` has only ever run
+against an empty set.
+
+This is exactly the gate that matters here rather than a formality. The whole
+reason `HOLD_TO_SETTLEMENT_MODES` excludes live is that **a held live winner
+strands the book** — `config.py` says so directly. Flipping before redemption has
+collected one real winner means the first live winner is what tests untested code,
+with real money locked behind it until it works.
+
+**To unblock:** fund the EOA with POL (§8.1 deferred this — "decided 2026-09-03:
+not now"), let one live winner resolve, and run `redeem.py --execute` against it
+successfully. Then the gate is met.
+
+### 14.2 PREREQUISITE A — the entry set transfers; the exposure figure does not
+
+The replay is validated before being trusted: it reproduces **$432.95** as-traded
+and **$748.18** held to the end of day D+1, both to the cent, which also pins the
+holding assumption behind the published number.
+
+| basis | veto-0b refusals | bankroll refusals | peak concurrent |
+|---|---|---|---|
+| as traded | 2 | 0 | $432.95 |
+| held (D+1, published basis) | 8 | 0 | $742.29 |
+| **held (observed resolution times)** | 8 | 0 | **$837.22** |
+
+**Good news, and it is the question A asked:** only **8 of 607** entries would be
+refused at held exposure, against 2 today, and **zero** are refused by
+`BANKROLL_USD`. The measured +18.4% rests on an entry set that transfers almost
+intact. A's own failure condition — "if a large fraction would have been refused,
+the measured return does not transfer" — is **not** triggered.
+
+**Bad news, and it is new:** the published **$748.18 understates peak held
+exposure by about $95**. It assumes positions close at the end of day D+1;
+measured against when the daemon *actually* closed resolutions, the median held
+position sits **24.3 hours** and the worst **152.8 hours** — six days. Real peak
+is **$837–843 against a $1,000 bankroll, i.e. 84%.** The plan called $748 "inside
+BANKROLL_USD but not by much"; at $843 there is materially less room than that
+sentence implies, and the tail is driven by slow-resolving stations rather than by
+volume.
+
+**Also verified rather than assumed**, as P2-2 asks: veto 0c never fires on a
+stopless book, and veto 0b does cover it. With
+`MAX_OPEN_POSITIONS_PER_BUCKET = 1`, a position that is never price-exited holds
+its bucket for the rest of the day — refusals rise from 2 to 8, which is the
+mechanism working, not a cap binding painfully.
+
+### 14.3 PREREQUISITE C — recomputed after P3-6, and it moved
+
+| | plan (2026-09-03) | now (2026-09-04, post P3-6) |
+|---|---|---|
+| current mean position | $7.88 | **$7.59** |
+| measured price edge | +0.038 | **+0.0421** (0.362 vs 0.320) |
+| quarter-Kelly on that edge | $13.69 | **$15.46** |
+| current as a share of it | ~57% | **49%** |
+
+Nominal headroom therefore *grew*. But **P3-6 moves the book further away from
+using it**, not toward it: 166 of 416 scorable rows now size to zero and the
+survivors run about 0.66×.
+
+**Stated explicitly, as C requires:** taking the headroom would push peak held
+exposure well past the measured $843 and into the bankroll, so
+`BANKROLL_USD` or the portfolio caps *would* have to move first. That is a
+separate decision and must not happen as a side effect of B or of this flip.
+
+### 14.4 A second reason to wait, independent of the gate
+
+P2-2 requires: *"Instrument before and after: realised return per dollar staked,
+on the same station, over a comparable window."*
+
+**P3-6 deployed 2026-09-04 15:10 UTC** and changes entry selection by roughly
+40%. Landing the hold-to-settlement flip on top of it, before P3-6 has a
+measured window, makes the two unattributable — and P3-6's own falsifier
+(§13.6: the trailing-14d net price edge must rise from −0.0049) needs a clean
+window to be readable at all.
+
+### 14.5 What P2-2 still needs, in order
+
+1. **Fund the EOA and redeem one real winner.** The hard gate. Nothing else in
+   this item may proceed first.
+2. **Let P3-6 produce a measured window** so its effect and the flip's do not
+   confound.
+3. **Decide the exposure question** on $843, not $748 — either accept 84% of
+   bankroll at peak, or move `BANKROLL_USD`/the caps deliberately.
+4. Then the flip itself, WSSS first, per-station override rather than a global
+   change, with the `is_paper` conjunction in `risk_manager.evaluate_exit()`
+   removed deliberately and its reasoning rewritten.
