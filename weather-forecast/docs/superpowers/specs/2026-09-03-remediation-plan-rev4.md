@@ -1323,6 +1323,33 @@ budget scales approved legs proportionally — and that argument checks out at
 recorded merge and deploy in the same row of the same table, and this one has a
 merge with no deploy line and no note saying none was needed. Say which it is.
 
+**ANSWERED — DEPLOYED 2026-09-07 13:43:15 UTC.** `git pull --ff-only` +
+`sudo systemctl restart polyweather`, box to `99288a8`. `deploy_daemon.sh`
+deliberately not used: no dashboard code in the diff, so the frozen-copy gap
+does not apply, and not rewriting the unit is the safer path with a live
+position open. Unit md5 **unchanged** (`9506ce61`), resolved args unchanged
+(`--mode live --fallback-mode paper --i-understand-this-spends-real-money`).
+
+Conditions, on the 2026-08-25 template — the test to repeat, not the conclusion
+to copy:
+
+1. **The change cannot cause a trade that would not already have happened.**
+   It reorders a list; it touches no exit path at all, which is a weaker claim
+   than the "strictly conservative direction" that deploy needed.
+2. **Mode did not change** (live → live), so exit dispatch stays valid for the
+   one open live row.
+3. **One open live position, $1.01** — WSSS b34 YES @0.06, the same row §17.1
+   restarted on at 04:54. At 0.06 it is inside `LOTTERY_PRICE_THRESHOLD` and
+   stop-exempt regardless.
+4. **The live entry window was shut.** 13:43Z; WSSS is UTC+8, window
+   21:00–00:00Z. An Americas paper window was open and lost one cycle.
+
+Verified after: service `running`, 1 live + 31 paper positions still `open`,
+the WSSS row still `open` with no `exit_reason`, no error or traceback in the
+journal since the restart, and the daemon cycling normally.
+
+Section 19.1's "unit md5 unchanged across all five restarts" now reads six.
+
 ### 20.4 P1-10 was accepted on an instrument that could not answer
 
 §17.1 closes: "`stop_sweep.py` now prints its fill assumption, which decides the
