@@ -238,7 +238,8 @@ def _connect() -> sqlite3.Connection:
             net_ev_at_size REAL,
             entry_bid REAL,
             exit_blocked_reason TEXT,
-            entry_fee_per_share REAL
+            entry_fee_per_share REAL,
+            trigger_price REAL
         )
         """
     )
@@ -293,6 +294,18 @@ def _connect() -> sqlite3.Connection:
         # consumer that recomputes restates every historical row at a rate
         # nobody was ever charged. This column is the record.
         ("entry_fee_per_share", "entry_fee_per_share REAL"),
+        # WHERE THE STOP RULE SAID TO SELL, for stop-loss closes (P1-10).
+        # exit_price records where it actually sold; these books gap, so the two
+        # differ -- WMKK 2026-08-07 triggered at 0.675 and filled at 0.060.
+        #
+        # DELIBERATELY NOT BACKFILLED, and this is the opposite call from
+        # entry_fee_per_share directly above. That one is a function of a column
+        # every row already carries. This one is a fact about a book that is
+        # gone: snapshot coverage is a median 25% of each hold window, 365 of
+        # 514 positions under half, so any reconstruction would be a guess -- and
+        # a guess here corrupts the exact distribution the column exists to
+        # measure. NULL on every pre-P1-10 row is the honest value.
+        ("trigger_price", "trigger_price REAL"),
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
@@ -989,6 +1002,7 @@ def _row_to_position(r) -> Position:
     entry_bid = r[21] if len(r) > 21 else None
     exit_blocked_reason = r[22] if len(r) > 22 else None
     entry_fee_per_share = r[23] if len(r) > 23 else None
+    trigger_price = r[24] if len(r) > 24 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -1014,6 +1028,7 @@ def _row_to_position(r) -> Position:
         entry_bid=entry_bid,
         exit_blocked_reason=exit_blocked_reason,
         entry_fee_per_share=entry_fee_per_share,
+        trigger_price=trigger_price,
     )
 
 
@@ -1101,12 +1116,17 @@ def update_high_water_mark(position_id: str, new_high_water_mark: float) -> None
         )
 
 
-def close_position(position_id: str, exit_price: float, exit_time: str, status: str, reason: str) -> None:
+def close_position(position_id: str, exit_price: float, exit_time: str, status: str,
+                   reason: str, trigger_price: Optional[float] = None) -> None:
     """Mark a position closed -- status should be one of 'closed_take_profit', 'closed_stop_loss', 'closed_trailing_stop', 'closed_resolution' (see models.Position.status)."""
     with _db() as conn:
         conn.execute(
-            "UPDATE positions SET status = ?, exit_price = ?, exit_time = ?, exit_reason = ? WHERE position_id = ?",
-            (status, exit_price, exit_time, reason, position_id),
+            # trigger_price uses COALESCE so a caller that does not know it
+            # cannot blank one already recorded. Only stop closes pass it.
+            "UPDATE positions SET status = ?, exit_price = ?, exit_time = ?, "
+            "exit_reason = ?, trigger_price = COALESCE(?, trigger_price) "
+            "WHERE position_id = ?",
+            (status, exit_price, exit_time, reason, trigger_price, position_id),
         )
 
 

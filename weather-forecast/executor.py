@@ -1173,6 +1173,11 @@ def close_position(
             exit_time=exit_time,
             status=status,
             reason=exit_reason or f"{decision.reason} ({reason_tag}, pnl={net_pnl_pct:+.1%} net; {fee_note}{basis_note})",
+            # WHERE THE RULE SAID TO SELL (P1-10). Set only on stop closes; the
+            # exit_price beside it is where it actually sold, and on these books
+            # the two can be sixty cents apart. Read off the decision rather
+            # than recomputed, so the recorded trigger is the one that fired.
+            trigger_price=getattr(decision, "trigger_price", None),
         )
         # A closed position cannot fail an exit again, so its unfilled-exit
         # streak must not outlive it. Cleared HERE rather than on the fill
