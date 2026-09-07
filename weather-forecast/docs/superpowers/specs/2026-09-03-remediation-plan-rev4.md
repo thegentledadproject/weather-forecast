@@ -1473,3 +1473,128 @@ OPEN       §18    now weakened by the stop sweep              (§20.5)
 that touches which trades get made, the evidence it needs is now producible, and
 every other entry-side finding this repo has recorded in the last three weeks
 points at the same band.
+
+---
+
+## 21. The admission bar, replayed — 2026-09-07 evening
+
+Executes §20.7's first startable item and answers §20.6. The instrument is
+built and committed on `feat/entry-bar-basis` (`6da2ea7`, `4c8a1bd`); **not
+merged, not deployed, and it ships inert either way.**
+
+### 21.1 The answer is NO
+
+Asia, 13 stations, 2026-08-17..09-06, every admitted position **held to
+settlement**. `pxexits` is 0 in every row, so the cohort really was held.
+
+| basis | bar | entries | staked | pnl | return | mean px |
+|---|---|---|---|---|---|---|
+| ratio | 0.10 | 334 | $2648.73 | −$188.71 | **−7.1%** | 0.319 |
+| ratio | **0.15 (live)** | 308 | $2516.00 | −$232.90 | −9.3% | 0.292 |
+| ratio | 0.25 | 238 | $2076.52 | −$262.02 | −12.6% | 0.218 |
+| per_share | 0.020 | 363 | $2765.42 | −$308.38 | −11.2% | 0.344 |
+| per_share | 0.030 | 359 | $2743.13 | −$290.63 | −10.6% | 0.343 |
+| per_share | 0.045 | 350 | $2718.80 | −$295.16 | −10.9% | 0.343 |
+| per_share | 0.060 | 306 | $2580.40 | −$227.86 | **−8.8%** | 0.328 |
+
+**The per-share basis does not beat the ratio basis anywhere.** Like-for-like —
+live `ratio:0.15` against `per_share:0.045`, the cell built to demand roughly
+the same cost per share at the median entry price — per-share is 1.6 points
+worse. Its best cell loses to the ratio arm's best. `ENTRY_BAR_BASIS` stays
+`"ratio"`, which is how it shipped.
+
+### 21.2 The spread is not separable from noise, and that governs the rest
+
+Per-trade standard deviation is **170–197%** on n of 238–363, so the standard
+error on any single cell is 9–13 points against differences of 1–5. The cells
+are nested subsets of one another, so a paired comparison would be far tighter
+than that arithmetic implies — the tool does not do one, and this section will
+not claim a result it cannot support.
+
+So read §21.1 as **"no evidence to switch"**, not as "per-share is worse".
+
+### 21.3 Two things that are robust, because neither is a P&L statistic
+
+1. **Mean entry price falls monotonically as the ratio bar tightens** — 0.319 →
+   0.292 → 0.218 across bars 0.10 → 0.15 → 0.25. That is a structural property
+   of the rule, not a sample statistic, and it confirms `9367907`'s mechanism
+   directly: **raising the ratio bar selects CHEAPER tickets**, which is the
+   band the measured inversion lives in. The per-share arm sits flat at ~0.34
+   across its whole range, which is exactly what it was predicted to do.
+2. **Every cell is negative.** Over this window, on the engine's own entries,
+   held to settlement, there is no admission bar on either basis that makes
+   Asia profitable. Consistent with the entry-edge decay already recorded
+   (+18.4% → +2.8%, CI spanning zero) and it reframes the item: **the bar is
+   not where the money is.**
+
+The only direction with any signal at all is *looser* on the existing ratio
+basis (−7.1% at 0.10 against −9.3% live, and fewer dollars lost in absolute
+terms too). That is inside the noise band like everything else here, and it
+would need the per-station and across-window check before anyone acts —
+the standard `ENTRY_PRICE_BLOCK_BAND` failed and is still off for.
+
+### 21.4 A live defect found while wiring it: the bar is applied FOUR times
+
+The design said three sites. There are four, and the fourth is
+`executor._resolved_size_ok()` — the last check before money moves, running on
+the exchange-upsized notional P1-1 measured at **55% of entries**.
+
+It compares a RATIO against `decision.min_net_ev`. Handed a per-share bar it
+does not merely disagree with the other three: it **FAILS OPEN**, because
+ratios (0.1–1.0) clear per-share bars (0.02–0.06) almost by construction. Its
+test was watched failing with the gate approving 4c/share against a 4.5c bar
+*and* printing "against a 4% bar" while it did — both defects in one message.
+
+**Not reachable today** — the shipped basis is `"ratio"`, where all four sites
+are identical to before on every reachable input. It would have become
+reachable the moment anyone armed the switch, which is the point: the gate that
+fails open is the one nobody would have re-read.
+
+All four now route through `config.clears_entry_bar()`, so they cannot drift.
+
+### 21.5 The first run was a fake null, and the guard that now catches it
+
+Seven cells, thirteen stations, twenty-one days, and every row came back **0
+entries / +0.0%** — no exception, nothing in the log.
+
+`backtest/settings.py` keeps price history in a **separate** database
+(`MARKET_DATA_DB`, which its own docstring calls "deliberately NOT
+config.DB_PATH"), and `price_store._connect()` creates that schema **lazily**.
+A run whose data directory lacks the file gets an empty 32KB one instead of an
+error: no prices → no EV rows → no candidates → zero entries everywhere.
+
+**`assert_cohort_holds()` did not catch it, and that is the transferable part.**
+That guard checks this sweep's *premise* — that the replay cohort is held to
+settlement — and the premise was satisfied. The cohort was held. There just was
+not one. **A guard on the premise is not a guard on the result.** It is
+stop_sweep's five-day fake null reached from the opposite direction, on the same
+afternoon that one was fixed.
+
+`assert_measured_something()` now checks the result: at least one cell must have
+admitted at least one entry, or `sweep()` raises instead of printing a table.
+One populated cell is enough — a bar that admits nothing is a genuine finding,
+and only the all-zero case cannot be told apart from a run with no data under it.
+
+### 21.6 How it was run
+
+A throwaway clone at `~/barsweep` on the box, patched from a local diff, with
+**copies** of both databases (45MB `polyweather.sqlite3`, 228MB
+`market_data.sqlite3`, 623,796 price snapshots). The production checkout stayed
+at `5ef8ccf`, the production databases were never opened by the sweep, and the
+daemon was not restarted. `nice -n 10` throughout.
+
+Worth reusing, and worth knowing before the next replay: **a clone is not
+enough**. The market DB is the second file, it is 5x the size of the one you
+would think to copy, and forgetting it produces zeros rather than an error.
+
+### 21.7 Status
+
+- **`feat/entry-bar-basis`**: 2 commits, 1636 tests green, **not pushed, not
+  merged, not deployed.** No trading change — `ENTRY_BAR_BASIS` ships `"ratio"`.
+- **All-35-station replication**: launched, still running at the time of
+  writing. It is a check on whether the ordering survives a different station
+  mix; it cannot overturn §21.2, because the noise problem is not about n
+  across stations but about per-trade variance.
+- **§20.9's list**: this item moves from STARTABLE to ANSWERED. The two
+  remaining startable items are unchanged — replay `ENTRY_PRICE_BLOCK_BAND`,
+  and separate hour from hold-duration in §18.
