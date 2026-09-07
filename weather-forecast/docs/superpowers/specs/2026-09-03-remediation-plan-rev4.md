@@ -1591,10 +1591,57 @@ would think to copy, and forgetting it produces zeros rather than an error.
 
 - **`feat/entry-bar-basis`**: 2 commits, 1636 tests green, **not pushed, not
   merged, not deployed.** No trading change — `ENTRY_BAR_BASIS` ships `"ratio"`.
-- **All-35-station replication**: launched, still running at the time of
-  writing. It is a check on whether the ordering survives a different station
-  mix; it cannot overturn §21.2, because the noise problem is not about n
-  across stations but about per-trade variance.
+- **All-35-station replication**: **DONE — see §21.8. Everything replicated.**
 - **§20.9's list**: this item moves from STARTABLE to ANSWERED. The two
   remaining startable items are unchanged — replay `ENTRY_PRICE_BLOCK_BAND`,
   and separate hour from hold-duration in §18.
+
+### 21.8 Replication over all 35 stations — everything held
+
+Same window, same cells, same held-to-settlement basis, 35 stations instead of
+13. `pxexits` 0 in every row.
+
+| basis | bar | entries | staked | pnl | return | mean px |
+|---|---|---|---|---|---|---|
+| ratio | 0.10 | 439 | $3256.04 | −$360.80 | **−11.1%** | 0.322 |
+| ratio | **0.15 (live)** | 403 | $3096.96 | −$375.73 | −12.1% | 0.295 |
+| ratio | 0.25 | 318 | $2588.04 | −$386.91 | −14.9% | 0.232 |
+| per_share | 0.020 | 474 | $3390.30 | −$473.55 | −14.0% | 0.345 |
+| per_share | 0.030 | 470 | $3368.22 | −$457.54 | −13.6% | 0.344 |
+| per_share | 0.045 | 455 | $3327.55 | −$466.44 | −14.0% | 0.342 |
+| per_share | 0.060 | 400 | $3167.51 | −$396.72 | **−12.5%** | 0.331 |
+
+**Every qualitative feature of §21.1 survives the different station mix:**
+
+- per-share beats ratio **nowhere**; like-for-like it is **1.9 points worse**
+  here against 1.6 in Asia — same sign, same magnitude
+- the ratio arm is monotone in the same direction, looser scoring better
+- the per-share arm's best cell still loses to the ratio arm's best
+- every cell is negative
+
+**The mean-price line is the strongest result in this section.** 0.322 → 0.295
+→ 0.232 against Asia's 0.319 → 0.292 → 0.218 — the same structural claim
+reproducing to within a couple of points on a mostly different set of stations.
+Tightening the ratio bar selects cheaper tickets, and that is not a sampling
+artefact.
+
+§21.2's noise caveat is unchanged and still governs the comparison itself:
+per-trade sd is 166–193% here, so nothing between the cells is separable.
+
+**One new finding, and it is NOT about the bar.** `engine.run()` replays each
+station independently, so the 22 non-Asia stations can be recovered by
+subtracting §21.1 from the table above. At the live bar that is **95 entries,
+$580.96 staked, −$142.83 — a return of −24.6%**, against Asia's −9.3%. Across
+all seven cells the non-Asia remainder lands between **−24% and −28%**, without
+exception.
+
+That corroborates the standing caution about the Europe and Americas books —
+the collection-gate override scored −15.9% over 70 trades — from an entirely
+independent direction, and it explains why adding 22 stations moved the pooled
+level from −9.3% to −12.1% while changing none of the orderings.
+
+**Treat it as suggestive, not established.** n is 80–105 per cell with per-trade
+sd around 170%, so the standard error is ~17 points against a 15-point gap. What
+makes it worth recording is the consistency across all seven cells — and those
+are seven correlated looks at overlapping entry sets, not seven independent
+tests. It is a reason to look, not a result to act on.
