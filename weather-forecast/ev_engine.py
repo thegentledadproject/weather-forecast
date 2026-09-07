@@ -410,6 +410,44 @@ def book_dislocation(token_map: Dict[int, dict]) -> Optional[float]:
     return round(sum(prices) - 1.0, 4)
 
 
+def net_ev_per_share(r: EVResult) -> Optional[float]:
+    """
+    The same net-EV quantity as net_ev_per_dollar, NOT divided by price:
+    expected net profit in DOLLARS PER SHARE.
+
+        net_ev_per_dollar = (raw_edge / price) - slippage - fee - exit_fee
+        net_ev_per_share  = net_ev_per_dollar * price
+                          = raw_edge - price * (slippage + fee + exit_fee)
+
+    It is the ranking key (see best_opportunities). Deliberately derived by
+    multiplying the stored ratio back out rather than recomputing from
+    raw_edge and the cost fields: two expressions for one quantity is how the
+    screen and the at-size recheck drift apart, and calculate_ev() is the one
+    place the cost set is defined.
+
+    WHY THE DIVISION WAS WRONG. raw_edge/price explodes as price -> 0, so the
+    SAME absolute disagreement scores about ten times higher on a 4c ticket
+    than on a 40c one, and cheap tickets sort to the top mechanically rather
+    than on merit. Measured on the live book (2026-09-03, hold-to-settlement):
+    the HIGHEST net_ev_per_dollar quintile returns -31.7% while the
+    second-LOWEST returns +30.6%, and the top quintile's mean price is 0.114.
+    The key was not weakly informative, it was inverted, and the inversion
+    tracks price.
+
+    WHAT IT DOES NOT FIX, so nobody re-derives it hopefully: the 0.04-ticket
+    case in the lottery-band work, where the cheap candidate claims MORE
+    absolute edge (0.18) than the expensive one (0.10). No function rising in
+    edge and falling in price can invert that pair -- it is a model
+    calibration failure at low prices, not a ranking one. This removes the
+    mechanical tilt, nothing more.
+
+    None when the candidate is unpriced, matching net_ev_per_dollar.
+    """
+    if r.net_ev_per_dollar is None or r.market_price is None:
+        return None
+    return r.net_ev_per_dollar * r.market_price
+
+
 def best_opportunities(
     results: List[EVResult],
     min_net_ev: float = 0.15,
@@ -439,7 +477,19 @@ def best_opportunities(
         and r.market_price is not None
         and r.market_price >= min_price
     ]
-    return sorted(viable, key=lambda r: r.net_ev_per_dollar, reverse=True)
+    # RANKED ON DOLLARS PER SHARE, NOT ON THE RATIO -- see net_ev_per_share().
+    # The ADMISSION BAR above still reads net_ev_per_dollar, unchanged: this is
+    # an ordering fix, not a change to which candidates surface. Widening or
+    # narrowing the bar is a trading change and needs replay evidence first.
+    #
+    # Today the order is COSMETIC and this is still worth doing.
+    # entry_manager.decide_entries() sizes every candidate independently and
+    # apply_portfolio_budget() scales approved legs PROPORTIONALLY -- nothing
+    # truncates this list or picks winners by rank -- so no trade changes.
+    # It stops the printed EV table from recommending cheapness to a human
+    # reader, and it stops any future truncation (a per-cycle count cap, a
+    # top-N) from silently inheriting an inverted ranking.
+    return sorted(viable, key=net_ev_per_share, reverse=True)
 
 
 @dataclass
