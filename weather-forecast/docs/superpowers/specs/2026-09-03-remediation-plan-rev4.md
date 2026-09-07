@@ -1653,8 +1653,21 @@ tests. It is a reason to look, not a result to act on.
 Executes §20.7's second startable item. Tool merged as `98d5fb5`
 (`backtest/band_sweep.py`, 1647 tests green). **No live-code change and nothing
 for the daemon**: both enforcement sites already read
-`config.entry_price_is_blocked()`, and the daemon imports nothing from
-`backtest/`. `ENTRY_PRICE_BLOCK_BAND` stays `None`.
+`config.entry_price_is_blocked()`, and **nothing outside its own module and
+tests imports `band_sweep`**, so it cannot reach the daemon.
+`ENTRY_PRICE_BLOCK_BAND` stays `None`.
+
+> **CORRECTION, same evening.** This section and `98d5fb5`'s commit message
+> first said "the daemon imports nothing from `backtest/`". **That is false and
+> the mistake is worth leaving visible**, because a future reader deciding
+> whether a `backtest/` change is safe to ship would have relied on it. The
+> daemon's modules import `backtest.resolution`, `backtest.settings`,
+> `backtest.price_store`, `backtest.price_history_client` and
+> `backtest.engine` — `ev_engine.py` pulls two of those lazily on the
+> snapshot-capture path. **`backtest/` is NOT a sealed-off directory.** The
+> narrower claim is the true one and is the only one this section rests on:
+> nothing imports `band_sweep` itself. Check the specific module next time
+> rather than the directory.
 
 ### 22.1 Why the question was open at all
 
