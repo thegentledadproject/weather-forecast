@@ -317,6 +317,14 @@ class Position:
     # paid. None means no fee was recorded, which is NOT the same as zero --
     # reporting propagates the None rather than reporting gross as net.
     entry_fee_per_share: Optional[float] = None
+    # THE STOP TRIGGER THIS ROW WAS CLOSED AGAINST, for stop-loss closes.
+    # NEVER BACKFILLED: snapshot coverage is a median 25% of each hold window
+    # with 365 of 514 positions under half, so the record cannot support
+    # reconstructing a fill, and a fabricated number would corrupt the very
+    # distribution it exists to measure. NULL on every historical row is the
+    # honest value -- unlike entry_fee_per_share above, which IS backfilled
+    # because it is a function of a stored column rather than of a vanished book.
+    trigger_price: Optional[float] = None
 
     # WHAT THE MODEL BELIEVED WHEN IT ENTERED. Recorded so a closed trade can
     # be scored against its own prediction rather than only against P&L.
@@ -373,6 +381,15 @@ class ExitDecision:
     # persisted exit_reason TEXT (see executor.close_position), which is
     # free-form.
     stop_basis: Optional[str] = None
+    # WHERE THE RULE SAID TO SELL, on the reason="stop_loss" branch only.
+    # current_price above is where it ACTUALLY sold. The two differ because
+    # these books gap: WMKK 2026-08-07 triggered at 0.675 and filled at 0.060,
+    # a 92% loss on a "30% stop". Without both numbers the realised cost of a
+    # stop cannot be separated from its stated cost.
+    #
+    # None on every other reason, and that is not the same as 0.0 -- see
+    # risk_manager.stop_slippage(). A take-profit has a target, not a trigger.
+    trigger_price: Optional[float] = None
 
 
 @dataclass

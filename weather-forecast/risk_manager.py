@@ -143,6 +143,8 @@ config.py, models.py, ev_engine.py (local -- fee formula only)
 from datetime import datetime, timezone
 from typing import Optional, Tuple
 
+import statistics
+
 import config
 import ev_engine
 from models import Position, ExitDecision
@@ -530,6 +532,12 @@ def evaluate_exit(
             current_price=current_price,
             pnl_pct=pnl_pct,
             stop_basis=stop_basis,
+            # WHERE THE RULE SAID TO SELL (P1-10), against current_price which
+            # is where it actually sold. Recorded rather than reconstructed:
+            # stop_loss_audit.loose_trigger_price() re-derives this afterwards
+            # from TODAY's constants, which is a different number the moment a
+            # threshold changes.
+            trigger_price=stop_from - thresholds["stop_loss_pct"] * unit,
         )
 
     # 2. Fixed profit-take -- the only upside exit, and the hard cap on
@@ -572,3 +580,60 @@ def evaluate_exit(
         current_price=current_price,
         pnl_pct=pnl_pct,
     )
+
+
+def stop_slippage(decision: ExitDecision) -> Optional[float]:
+    """
+    How far past its own trigger a stop actually filled, in dollars per share.
+
+    None -- never 0.0 -- when there was no trigger. "No stop fired" and "a stop
+    fired and filled exactly at its trigger" are different facts, and reporting
+    the first as zero would plant a phantom at the good end of the distribution.
+    """
+    if decision.trigger_price is None or decision.current_price is None:
+        return None
+    return decision.trigger_price - decision.current_price
+
+
+def stop_slippage_distribution(positions) -> Optional[dict]:
+    """
+    The slippage distribution over closed stop-loss rows, or None for an empty
+    sample.
+
+    MEDIAN, 90th PERCENTILE AND WORST -- and deliberately NO MEAN. Most stops
+    fill near their trigger and a few fill sixty cents away, so a mean sits
+    seven times above the median and reads as though slippage were typical. The
+    shape is the finding; a single number cannot carry it.
+
+    Rows with no recorded trigger are COUNTED, not dropped. Every stop closed
+    before P1-10 has a NULL trigger, and silently excluding them would make a
+    recent slice look like the whole record.
+    """
+    slippages = []
+    without = 0
+    for position in positions:
+        if not str(getattr(position, "status", "")).startswith("closed_stop"):
+            continue
+        trigger = getattr(position, "trigger_price", None)
+        if trigger is None or position.exit_price is None:
+            without += 1
+            continue
+        slippages.append(trigger - position.exit_price)
+
+    if not slippages:
+        return None
+    slippages.sort()
+
+    def percentile(fraction: float) -> float:
+        # Nearest-rank, so every reported value is one that actually occurred.
+        # An interpolated p90 on ten samples invents a fill nobody got.
+        index = min(len(slippages) - 1, max(0, round(fraction * (len(slippages) - 1))))
+        return slippages[index]
+
+    return {
+        "n": len(slippages),
+        "n_without_trigger": without,
+        "median": statistics.median(slippages),
+        "p90": percentile(0.90),
+        "worst": slippages[-1],
+    }

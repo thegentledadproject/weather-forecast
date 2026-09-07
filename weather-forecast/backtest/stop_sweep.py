@@ -104,6 +104,25 @@ DEPENDENCIES
 config.py, risk_manager.py (local), backtest/engine.py (local)
 """
 
+# WHAT THIS SWEEP ASSUMES ABOUT FILLS, stated in its own output because the
+# assumption decides the sign of the answer (P1-10).
+#
+# config.py documents the trap exactly: score a candidate stop assuming it
+# always fills AT its trigger and the best cell is +$146; score the same cell
+# assuming it fills at the lowest quote the record can prove existed and it is
+# -$75. Same data, opposite conclusion. A sweep whose output does not say which
+# it assumed is a number a reader can take either way -- and this one is read to
+# decide whether a stop threshold is worth having.
+FILL_ASSUMPTION_NOTE = (
+    "FILL ASSUMPTION: every simulated stop fills AT ITS TRIGGER PRICE. That is "
+    "OPTIMISTIC and these books gap -- WMKK 2026-08-07 triggered at 0.675 and "
+    "filled at 0.060. Cells scored here are therefore an UPPER BOUND on what a "
+    "stop threshold is worth; the same grid scored at the lowest provable quote "
+    "flips the best cell from +$146 to -$75. See config.py's loss-cap block and "
+    "risk_manager.stop_slippage_distribution() for the realised distribution."
+)
+
+
 import argparse
 import statistics
 from contextlib import contextmanager
