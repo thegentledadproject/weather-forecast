@@ -1019,3 +1019,51 @@ out to be unmet. In each case the cost of checking first was minutes and the
 cost of not checking would have been a wrong change deployed. That is now the
 third consecutive revision where re-verifying the premise changed the work, and
 it should be assumed to keep being true.
+
+---
+
+## 16. Falsifier check, 2026-09-07 — §13's 40% was over-stated
+
+Three days after the P3-6 deploy, against §13.6 and §15.3.
+
+### 16.1 `other_gap` — PASSED
+
+| window | rows | other_gap |
+|---|---|---|
+| all time | 173 | −$21.65 |
+| **trailing 14d** | **138** | **+$0.00** |
+
+138 resolution closes since the change, and they diverge from settlement value by
+**nothing**. P1-7 does what it claimed; the −$21.65 is entirely pre-fix history
+and will not grow.
+
+### 16.2 Entry count — §13.1's 40% DID NOT HAPPEN, and the projection was at fault
+
+~30 entries/day before the deploy and ~30/day after (09-05: 30, 09-06: 29). But
+**mean size fell $6.33 → $4.95, −22%**, and the journal shows **436 "No positive
+edge (Kelly fraction <= 0)" refusals since 09-06**. So the map is binding — it
+shrinks sizes and does zero some entries — just nowhere near 40% of them.
+
+**The projection was wrong, not the feature.** §13.1 fitted one map across the
+full record and applied it to every row in that record. Production fits
+out-of-sample per day, on strictly earlier rows, and that map is materially
+gentler. §13.4 named this risk ("the number is computed with the map fitted on
+the full record and applied across it, which flatters the fit") and it is exactly
+what happened. **Read the deployed effect as roughly −22% on size with entry
+count intact.**
+
+Tier mix in production over 09-06: 44 sizings on `pooled_isotonic`, 1 on
+`station_isotonic`.
+
+### 16.3 Net price edge — NOT YET READABLE
+
+−0.0051, against −0.0049 before. Unchanged, and it should be: the trailing-14d
+window is 2026-08-24..09-06, so **12 of its 14 days predate the deploy** and most
+post-deploy entries have not settled. Re-read around 2026-09-17. Kill criterion
+reads `holding` at +0.0384 on 315 station-days.
+
+### 16.4 P1-8(b)'s open item is closed
+
+New rows carry `entry_fee_per_share` written by `open_position()`, not the
+backfill: `EGLC 2026-09-07` entry 0.07 → 0.003255, which is
+0.05 × 0.93 × 0.07 exactly.
