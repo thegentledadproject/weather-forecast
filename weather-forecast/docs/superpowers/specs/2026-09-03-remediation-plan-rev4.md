@@ -1067,3 +1067,73 @@ reads `holding` at +0.0384 on 315 station-days.
 New rows carry `entry_fee_per_share` written by `open_position()`, not the
 backfill: `EGLC 2026-09-07` entry 0.07 → 0.003255, which is
 0.05 × 0.93 × 0.07 exactly.
+
+---
+
+## 17. P1-10 and P1-11, 2026-09-07
+
+### 17.1 P1-10 — merged `46565b6`, DEPLOYED 04:54:31 UTC
+
+`positions.trigger_price` records where the stop rule said to sell, beside the
+`exit_price` that says where it sold. Verified on the box: column 25, index 24,
+which is what `_row_to_position` reads. Restarted with **1 open live position**
+(WSSS b34 YES @0.06, $1.01) — safe, mode stays `live`, and at 0.06 the row is in
+the lottery band and stop-exempt anyway. Europe's entry window was open; paper
+only.
+
+**Deliberately not backfilled**, the opposite call from P1-8(b) one migration
+earlier. That fee is a function of a column every row carries; this is a fact
+about a book that is gone.
+
+`stop_slippage_distribution()` reports median / p90 / worst and **no mean** — the
+mean sits ~7× the median on this shape. `stop_sweep.py` now prints its fill
+assumption, which decides the sign of its own answer.
+
+### 17.2 P1-11 — ANSWERED: leave the 10:00 tightening alone
+
+Acceptance was an analysis note, with "leave it" a valid outcome. It is the
+outcome. Recorded in `config.py` beside `EDGE_DECAY_TIGHTEN_HOUR_LOCAL`.
+
+**The question:** the hour was chosen to fire when entries closed; entries moved
+to 08:00 on 2026-08-17 and this did not follow. **110 price exits** landed in
+that two-hour gap over the measured book.
+
+**What the tightening actually changes:** only the take-profit target (0.25 vs
+0.50). `TIGHTENED_STOP_LOSS_PCT` is *defined as* `STOP_LOSS_PCT`, so on the stop
+side the bands are byte-identical and the hour cannot matter.
+
+Cost against holding, per dollar staked:
+
+| exit | band | n | cost |
+|---|---|---|---|
+| take-profit | loose (<10:00) | 61 | **+27.0%** |
+| take-profit | tight (≥10:00) | 146 | **+25.2%** |
+
+**The tightened target is two points CHEAPER** — inside noise, and pointing the
+wrong way for "selling earlier gives away more". What costs money is any early
+sale forfeiting settlement value, not how early. Moving the hour to 08:00 would
+change the target on ~110 exits for no measured gain. **No evidence to act on.**
+
+**The real finding this surfaced, on IDENTICAL stop thresholds:**
+
+| exit | band | n | cost |
+|---|---|---|---|
+| stop-loss | loose (<10:00) | 114 | **+23.6%** |
+| stop-loss | tight (≥10:00) | 123 | **+34.8%** |
+
+Eleven points worse per dollar in the afternoon with the rule unchanged. That is
+a **time-of-day property of the stop**, not an effect of this constant, and it
+belongs to the exit-rules question. Recorded next to the constant so it is not
+misread as an argument about the hour.
+
+### 17.3 P1-11's other half stays shut
+
+The 15/15/30 cadence re-derivation is gated on P2-2 by the plan's own text, and
+P2-2 is blocked on redemption (§14). A note to that effect now sits above
+`SCHEDULE_WINDOWS`, so the stale original justification is not read as current.
+
+### 17.4 Phase 1 is now complete
+
+Every P1 item is merged and deployed. What remains is either blocked (P2-2, and
+P1-11's cadence half behind it) or date-gated (P0-1 ~2026-10-03, P0-2 ~November,
+P0-3 on prod DB access, P3-1/2/3/5).

@@ -1419,6 +1419,44 @@ STOP_LOSS_PCT = 0.30        # cut once loss reaches -30% of the risk unit
 # stop_loss_audit.py measures the tightening's cost but its held-to-settlement
 # column is explicitly an upper bound and cannot answer it.
 EDGE_DECAY_TIGHTEN_HOUR_LOCAL = 10  # 10:00 local, per the scanning-schedule analysis
+# P1-11, ANSWERED 2026-09-07: LEAVE IT AT 10:00. The analysis note, recorded
+# beside the original reasoning because "leave it" is a result and not a
+# non-answer.
+#
+# THE QUESTION. This hour was chosen to fire when entries closed. The entry
+# window moved to 08:00 on 2026-08-17 and this did not follow, so two hours a
+# day now run with entries shut and thresholds still on their loose setting --
+# 110 price exits landed in that gap over the measured book. risk_manager.py's
+# docstring flagged it as open pending the freed capital being modelled, which
+# the cohort monitor (P0-5) now supplies.
+#
+# WHAT THE TIGHTENING ACTUALLY CHANGES. Only the take-profit target:
+# TIGHTENED_PROFIT_TAKE_PCT 0.25 against PROFIT_TAKE_PCT 0.50.
+# TIGHTENED_STOP_LOSS_PCT is defined AS STOP_LOSS_PCT, so on the stop side the
+# two bands are byte-identical and the hour cannot matter there at all.
+#
+# MEASURED, cost against holding to settlement, per dollar staked:
+#
+#     take-profit   loose (<10:00)   n= 61   +27.0%
+#     take-profit   tight (>=10:00)  n=146   +25.2%
+#
+# The tightened target is NOT more expensive -- it is two points CHEAPER, i.e.
+# inside noise and pointing the wrong way for the "selling earlier gives away
+# more" hypothesis. What costs money is any early sale forfeiting settlement
+# value, not how early it happens. So moving this hour to 08:00 would change the
+# target on ~110 exits for no measured gain, and moving it later would not
+# recover anything either. There is no evidence here to act on.
+#
+# THE REAL FINDING SITS ELSEWHERE, and is recorded here because this
+# measurement is what surfaced it. On IDENTICAL stop thresholds:
+#
+#     stop-loss     loose (<10:00)   n=114   +23.6%
+#     stop-loss     tight (>=10:00)  n=123   +34.8%
+#
+# Eleven points worse per dollar in the afternoon with the rule unchanged. That
+# is a TIME-OF-DAY property of the stop, not an effect of this constant, and it
+# belongs to the exit-rules question rather than the cadence one. Do not read it
+# as an argument about this hour.
 TIGHTENED_PROFIT_TAKE_PCT = 0.25
 
 # THE STOP IS NO LONGER TIGHTENED (2026-08-18). It was 0.15, i.e. half the
@@ -2093,6 +2131,17 @@ MAX_SINGLE_CYCLE_MOVE = 0.15
 #                      (edge is decaying, require more confidence to act)
 #   "monitor_only" -- exit-checks only, no new entries surfaced
 #   "risk_only"    -- exit-checks only, plus same-day nowcast signal watch
+# P1-11's OTHER HALF -- the 15/15/30 post-decision cadence -- is NOT answered
+# here and must not be changed yet. When the windows tightened, take-profit went
+# from 21% to 44% of all exits and resolution from 21% to 0%, and that was
+# recorded at the time as the change paying for itself. Against the 2026-09-02
+# measurement it reads the other way: resolution is the best-returning exit type
+# (see HOLD_TO_SETTLEMENT_MODES) and the cadence is what stopped positions
+# reaching it. The plan gates the re-derivation on P2-2, because on a
+# hold-to-settlement book the question mostly dissolves -- there is no price
+# level left to catch. P2-2 is itself blocked on redemption being exercised
+# once. Until then, this stays as it is, and the original justification is known
+# to have been measuring the wrong thing.
 SCHEDULE_WINDOWS = [
     (0, 0, 4, 0, None, "closed", None, "Overnight -- explicit floor, nothing runs before 04:00"),
     # WAS TWO pre_poll WINDOWS (15-min from 04:00, then 2-min from 04:45),
