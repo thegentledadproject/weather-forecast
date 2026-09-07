@@ -138,16 +138,41 @@ NO_STOP = 99.0
 
 @contextmanager
 def _stop_distance(pct: float):
-    """Set both stop constants for the duration, then put them back."""
+    """
+    Set both stop constants for the duration, then put them back -- and ARM
+    the cohort, without which none of it means anything.
+
+    THE ARMING HALF (added 2026-09-07, and the sweep was inert without it).
+    config.HOLD_TO_SETTLEMENT_MODES = ("paper",) makes
+    risk_manager.evaluate_exit() return "hold" BEFORE it reads any threshold,
+    for any position that is is_paper and carries a listed execution_mode.
+    engine.py builds every replay position is_paper=True and never sets
+    execution_mode, so it takes the Position default -- "paper". The replay
+    cohort was therefore exempt from the exact rule this function varies:
+    every distance returned "hold" and every row of the printed table came
+    out identical, which reads as "the threshold does not matter" rather than
+    as "nothing was measured".
+
+    An empty tuple is config.py's own documented revert, and
+    backtest/compare.py::_armed_exits() is the same manoeuvre for the same
+    reason -- this is that line, which the two sweeps never got.
+
+    Restoring it is not optional bookkeeping: config is process-global and
+    the daemon reads the same module, so leaking an emptied tuple would
+    disarm hold-to-settlement for the live book.
+    """
     old_loose = config.STOP_LOSS_PCT
     old_tight = config.TIGHTENED_STOP_LOSS_PCT
+    old_modes = config.HOLD_TO_SETTLEMENT_MODES
     config.STOP_LOSS_PCT = pct
     config.TIGHTENED_STOP_LOSS_PCT = pct
+    config.HOLD_TO_SETTLEMENT_MODES = ()
     try:
         yield
     finally:
         config.STOP_LOSS_PCT = old_loose
         config.TIGHTENED_STOP_LOSS_PCT = old_tight
+        config.HOLD_TO_SETTLEMENT_MODES = old_modes
 
 
 def _score(runs) -> dict:
