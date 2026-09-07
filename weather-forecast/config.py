@@ -1901,6 +1901,50 @@ COHORT_KILL_MIN_STATION_DAYS = 30
 # band, so the unprotected positions are not also the largest. The precision
 # argument was never an argument about money; it needs the exposure half.
 STOP_EXEMPT_ABOVE_PRICE = 1.01
+# THE CARVE-OUT IS MIS-SPECIFIED, AND IT IS A TIME INTERACTION, NOT A PRICE CUT.
+# Measured 2026-09-07 on 237 closed stops, cost against holding to settlement per
+# dollar staked, by LOCAL exit hour. Surfaced while answering P1-11 (see
+# EDGE_DECAY_TIGHTEN_HOUR_LOCAL) and followed up on its own.
+#
+#     exit hour      entry 0.15-0.45          entry 0.45+
+#     06-08     n=64  83% precise   +1.7%    n=11  18% precise  +47.8%
+#     09-11     n=61  67% precise  +41.4%    n=35  49% precise  +20.6%
+#     12-14     n=27  63% precise  +98.9%    n=25  64% precise  +16.0%
+#
+# MONOTONE IN BOTH COLUMNS AND IN OPPOSITE DIRECTIONS, with precision moving the
+# same way. Cheap entries: the stop is nearly free at 07:00 and costs ~99% of
+# stake by 13:00. Expensive entries: the reverse, 48% falling to 16%. Crossover
+# around entry 0.45.
+#
+# WHY, and it is specific to a DAILY-MAXIMUM market. The resolving event happens
+# LATE: the day's peak is usually mid-afternoon. A cheap YES on a high bucket
+# therefore sags all morning because the temperature has not risen yet, gets
+# stopped in the early afternoon, and then the peak arrives and the bucket wins.
+# Those are the 37% of afternoon cheap stops taken on eventual winners, and
+# because the entry was cheap each one pays 3-6x, which is what turns 37% into
+# +99% of stake. The expensive side is the mirror: a position sagging AFTER the
+# peak is sagging on information, so stopping it is right.
+#
+# WHAT THAT SAYS ABOUT THE TWO CONSTANTS. LOTTERY_PRICE_THRESHOLD exempts below
+# 0.15 at ALL hours, and this one is set to 1.01 so the high-end exemption is off
+# entirely. Neither is exempt where the measurement says the stop does its
+# damage: cheap entries in the afternoon, and expensive entries in the morning.
+# An earlier note (2026-08-20) concluded the carve-out "exempts the wrong end"
+# from precision alone; this refines that -- there is no single right END,
+# because the sign flips with the clock.
+#
+# NOT ACTED ON, DELIBERATELY, and the reason is not doubt about the numbers:
+#   - 5 of 6 stations with enough rows replicate the cheap-band am->pm worsening
+#     independently (ZBAA is the exception), and every cell survives dropping its
+#     two worst rows, so this is not one book or a handful of trades.
+#   - But hour and HOLD DURATION are near-collinear for same-day positions
+#     (median 2.3h before 10:00 against 6.0h after), and nothing here separates
+#     "later on the clock" from "held longer".
+#   - And P2-2 removes the stop entirely on hold-to-settlement books, which is
+#     where all of this data comes from. Acting here would tune a rule the next
+#     item deletes. If P2-2 lands, this matters only for books that keep price
+#     rules; if P2-2 stays blocked, it becomes the strongest available argument
+#     for a time-dependent carve-out.
 
 # Hard ceiling on entry price. Above this, a bought bucket stops behaving
 # like a position and starts behaving like a bond with a stop-loss on it:
