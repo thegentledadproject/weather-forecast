@@ -473,7 +473,7 @@ def best_opportunities(
     viable = [
         r for r in results
         if r.net_ev_per_dollar is not None
-        and r.net_ev_per_dollar >= min_net_ev
+        and config.clears_entry_bar(r.net_ev_per_dollar, r.market_price, min_net_ev)
         and r.market_price is not None
         and r.market_price >= min_price
     ]

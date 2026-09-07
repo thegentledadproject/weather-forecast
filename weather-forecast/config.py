@@ -2096,6 +2096,87 @@ COOLDOWN_COUNTED_EXIT_STATUSES = ("closed_stop_loss", "closed_trailing_stop")
 # catches absurdly LARGE edges); this catches meaninglessly SMALL ones.
 MIN_ABS_RAW_EDGE = 0.03
 
+# WHICH QUANTITY THE ADMISSION BAR IS KEYED ON. Ships "ratio", which is what
+# this book has always run: net_ev_per_dollar >= min_net_ev, where
+# net_ev_per_dollar = (raw_edge / price) - slippage - fee. "per_share" tests
+# the same bar undivided -- net_ev_per_dollar * price, i.e. dollars of edge
+# per share after costs, the quantity ev_engine.net_ev_per_share() returns.
+#
+# WHY THE QUESTION EXISTS. 9367907 measured net_ev_per_dollar on the live
+# book, scored hold-to-settlement, and found it INVERTED rather than merely
+# uninformative: the HIGHEST quintile returns -31.7% while the second-LOWEST
+# returns +30.6%, and the top quintile's mean price is 0.114. That commit
+# fixed the SORT and deliberately left this bar alone, because changing which
+# candidates surface is a trading change and this project's rule is that
+# entry-gate changes need replay evidence first.
+#
+# THE ASYMMETRY, which is the actual case for testing it. A ratio bar demands
+# a cost PROPORTIONAL TO PRICE. At 0.15 it asks 0.6c per share on a 4c ticket
+# and 10.5c on a 70c one. So it is nearly free exactly where the measured
+# inversion says the bad entries are -- and down there MIN_ABS_RAW_EDGE's flat
+# 3c floor, not this bar, is doing the screening. Where it binds hardest is
+# the expensive end, and the 0.40-0.60 band is the one the entry-price
+# scoring found at +52.3%. The bar may therefore be screening out the good
+# band and waving through the bad one, which is the opposite of its purpose.
+#
+# NOT A DIFFERENT COST MODEL. Both bases read the SAME net_ev_per_dollar, so
+# calculate_ev() stays the one place the cost set is defined; the only
+# difference is whether it is compared before or after multiplying by price.
+# The two thresholds are NOT on the same scale and are not interchangeable:
+# a 0.15 ratio is roughly 4.5c per share at the median entry price.
+#
+# ARMING THIS IS A TRADING CHANGE. backtest/entry_bar_sweep.py exists to
+# produce the evidence; do not flip it on a pooled number alone -- the bar
+# this project set for acting on a replayed threshold is that the ordering
+# holds per station AND across windows (see ENTRY_PRICE_BLOCK_BAND above,
+# which failed exactly that test).
+ENTRY_BAR_BASIS = "ratio"
+
+ENTRY_BAR_BASES = ("ratio", "per_share")
+
+
+def clears_entry_bar(net_ev_per_dollar, market_price, bar, basis=None) -> bool:
+    """
+    Whether a candidate clears the admission bar on the configured basis.
+
+    THE ONE PLACE THE COMPARISON IS MADE. The bar is applied TWICE per
+    entry -- ev_engine.best_opportunities() screens the EV table, and then
+    entry_manager.evaluate_entry() re-checks net EV at the ACTUAL size once
+    real slippage is known (backtest/entry_sim.evaluate_entry_sim() is its
+    replica). If those three read the basis independently they can drift,
+    and the failure is silent: a rule that admits at the screen and rejects
+    at sizing is not a rule anyone chose.
+
+    An unrecognised basis RAISES rather than falling back, because the
+    fallback that would feel safe -- treat it as "ratio" -- turns a typo in
+    a sweep driver into a run that silently scores the shipped behaviour and
+    reports it as the alternative.
+    """
+    basis = ENTRY_BAR_BASIS if basis is None else basis
+    if basis not in ENTRY_BAR_BASES:
+        raise ValueError(
+            f"ENTRY_BAR_BASIS must be one of {ENTRY_BAR_BASES}, got {basis!r}"
+        )
+    if net_ev_per_dollar is None:
+        return False
+    if basis == "ratio":
+        return net_ev_per_dollar >= bar
+    if market_price is None:
+        return False
+    return net_ev_per_dollar * market_price >= bar
+
+
+def entry_bar_label(bar, basis=None) -> str:
+    """
+    How to print the bar in a rejection reason. A per-share bar rendered as
+    a percentage ("4%" for 0.045) reads as a ratio and is wrong by the price;
+    the rejection messages are read off the journal when a station stops
+    entering, so they have to say which rule refused.
+    """
+    basis = ENTRY_BAR_BASIS if basis is None else basis
+    return f"{bar:.0%}" if basis == "ratio" else f"{bar:.3f}/share"
+
+
 # Minimum market price for a bucket/side to count as an opportunity AT ALL
 # -- anywhere: ev_engine.best_opportunities() (live + backtest screen) and
 # the status dashboard's EV table both apply it. Because net EV divides
