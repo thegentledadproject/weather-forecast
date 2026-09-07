@@ -399,7 +399,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
         elif ev_results:
             best = ev_engine.best_opportunities(ev_results, min_net_ev=min_net_ev)
             if best:
-                print(f"[scheduler] {station_icao}: {len(best)} candidate(s) clearing {min_net_ev:.0%} net EV screen -- running entry_manager sizing/gating:")
+                print(f"[scheduler] {station_icao}: {len(best)} candidate(s) clearing the {config.entry_bar_label(min_net_ev)} net EV screen -- running entry_manager sizing/gating:")
                 ev_engine.print_ev_table(best)
 
                 entry_decisions = entry_manager.decide_portfolio_entries(
@@ -412,7 +412,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                 for decision in entry_decisions:
                     executor.open_position(decision)
             else:
-                print(f"[scheduler] {station_icao}: no opportunities clearing {min_net_ev:.0%} net EV threshold this cycle.")
+                print(f"[scheduler] {station_icao}: no opportunities clearing the {config.entry_bar_label(min_net_ev)} net EV threshold this cycle.")
     except Exception as exc:
         print(f"[scheduler] {station_icao}: EV computation failed this cycle: {exc}")
 

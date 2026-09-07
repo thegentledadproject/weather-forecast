@@ -1161,7 +1161,7 @@ def evaluate_entry(
             min_net_ev=min_net_ev,
         )
 
-    if net_ev_at_size < min_net_ev:
+    if not config.clears_entry_bar(net_ev_at_size, ev_result.market_price, min_net_ev):
         return EntryDecision(
             station_icao=station_icao, target_date=ev_result.target_date,
             bucket_c=ev_result.bucket_c, side=ev_result.side,
@@ -1169,7 +1169,7 @@ def evaluate_entry(
             recommended_size_usd=depth_capped_usd, available_depth_usd=depth_usd,
             slippage_at_size_pct=slippage_at_size, net_ev_at_size=net_ev_at_size,
             approved=False,
-            reason=f"Net EV at actual size ({net_ev_at_size:+.1%}) no longer clears the {min_net_ev:.0%} threshold once real slippage is applied.",
+            reason=f"Net EV at actual size ({net_ev_at_size:+.1%}) no longer clears the {config.entry_bar_label(min_net_ev)} threshold once real slippage is applied.",
             station_maturity=maturity,
             entry_price=ev_result.market_price,
             entry_bid=ev_result.market_bid,

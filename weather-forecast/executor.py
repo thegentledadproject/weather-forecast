@@ -376,15 +376,30 @@ def _resolved_size_ok(spec, decision) -> tuple:
         pad_cost = getattr(spec, "pad_cost_pct", 0.0)
         net_ev = decision.net_ev_at_size - (slippage - decision.slippage_at_size_pct) - pad_cost
         # `<` against the bar, `<=` against the floor -- deliberately not one
-        # expression. entry_manager rejects on `net_ev_at_size < min_net_ev`,
-        # so a trade exactly ON the bar is approved and re-testing it with
-        # `<=` would have this layer refuse an entry the sizing layer passed.
-        # The no-bar fallback keeps `<= 0`, where break-even is not a trade.
+        # expression. entry_manager approves a trade exactly ON the bar, so
+        # re-testing it with `<=` would have this layer refuse an entry the
+        # sizing layer passed. config.clears_entry_bar() is that same `>=`,
+        # negated. The no-bar fallback keeps `<= 0`, where break-even is not
+        # a trade.
+        #
+        # READS THE BASIS, and it is the gate where getting that wrong is
+        # worst. net_ev here is a RATIO, and under ENTRY_BAR_BASIS
+        # "per_share" the bar is in dollars per share -- comparing them
+        # directly does not merely disagree with the other two gates, it
+        # FAILS OPEN, because ratios (0.1-1.0) clear per-share bars
+        # (0.02-0.06) almost by construction. This is the last check before
+        # money moves, and it runs on the exchange-upsized notional that P1-1
+        # measured at 55% of entries, so a gate that quietly stops refusing
+        # anything here is the expensive failure.
         bar = decision.min_net_ev
-        too_low = net_ev < bar if bar is not None else net_ev <= 0.0
+        too_low = (
+            not config.clears_entry_bar(net_ev, decision.entry_price, bar)
+            if bar is not None else net_ev <= 0.0
+        )
         if too_low:
             bar_text = (
-                f"the {bar:.0%} bar it was approved against" if bar is not None
+                f"the {config.entry_bar_label(bar)} bar it was approved against"
+                if bar is not None
                 else "the positive floor (no approval bar was carried on this decision)"
             )
             return False, (
