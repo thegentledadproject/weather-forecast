@@ -938,6 +938,9 @@ window to be readable at all.
 
 ## 15. WHERE THIS STANDS — 2026-09-04, end of day
 
+> **Superseded by §19.** Accurate as of 2026-09-04; P1-10, P1-11 and the
+> falsifier check landed on 2026-09-07. §19 carries the current state.
+
 Supersedes §7's sequencing and §8's question list. Everything below is deployed
 to the box unless it says otherwise.
 
@@ -1137,3 +1140,111 @@ P2-2 is blocked on redemption (§14). A note to that effect now sits above
 Every P1 item is merged and deployed. What remains is either blocked (P2-2, and
 P1-11's cadence half behind it) or date-gated (P0-1 ~2026-10-03, P0-2 ~November,
 P0-3 on prod DB access, P3-1/2/3/5).
+
+---
+
+## 18. The afternoon stop asymmetry — followed up 2026-09-07
+
+§17.2 turned up an eleven-point gap between morning and afternoon stops on
+identical thresholds. It is not an afternoon effect. It is a **time × price
+interaction with opposite signs**, on 237 closed stops:
+
+| local exit hour | entry 0.15–0.45 | entry 0.45+ |
+|---|---|---|
+| 06–08 | **+1.7%** (83% precise) | **+47.8%** (18% precise) |
+| 09–11 | +41.4% (67%) | +20.6% (49%) |
+| 12–14 | **+98.9%** (63%) | **+16.0%** (64%) |
+
+Cost against holding to settlement, per dollar staked. **Monotone in both
+columns, in opposite directions**, with precision moving the same way. Crossover
+around entry 0.45.
+
+**The mechanism is specific to a daily-maximum market.** The resolving event
+happens late — the day's peak is usually mid-afternoon. A cheap YES on a high
+bucket therefore sags all morning on temperature that has not risen yet, gets
+stopped in the early afternoon, and then the peak arrives and the bucket wins.
+Those are the 37% of afternoon cheap stops taken on eventual winners, and because
+the entry was cheap each pays 3–6×, which is how 37% imprecision becomes +99% of
+stake. The expensive side is the mirror: a position sagging *after* the peak is
+sagging on information, so stopping it is right.
+
+This **refines the 2026-08-20 note** that the carve-out "exempts the wrong end".
+There is no single wrong end — the sign flips with the clock. Neither
+`LOTTERY_PRICE_THRESHOLD` (below 0.15, all hours) nor
+`STOP_EXEMPT_ABOVE_PRICE` (1.01, i.e. off) is exempt where the damage is.
+
+**Not acted on, and not from doubt about the numbers.** 5 of 6 stations with
+enough rows replicate the cheap-band morning→afternoon worsening independently
+(ZBAA is the exception), and every cell survives dropping its two worst rows.
+Two better reasons:
+
+1. Hour and **hold duration** are near-collinear for same-day positions (median
+   2.3h before 10:00 against 6.0h after). Nothing here separates "later on the
+   clock" from "held longer".
+2. **P2-2 deletes the stop on exactly the books this data comes from.** Acting
+   now would tune a rule the next item removes.
+
+Recorded beside `STOP_EXEMPT_ABOVE_PRICE`, where the decision would be made. If
+P2-2 stays blocked, this is the strongest available argument for a
+time-dependent carve-out.
+
+---
+
+## 19. WHERE THIS STANDS — 2026-09-07
+
+Supersedes §15.
+
+### 19.1 Phase 1 is complete
+
+Eleven items merged and deployed since 2026-09-04. Beyond §15.1's nine:
+
+| item | merged | deployed | what |
+|---|---|---|---|
+| **P1-10** stop slippage | `46565b6` | 09-07 04:54 UTC | `trigger_price` beside `exit_price`; median/p90/worst, no mean; `stop_sweep` states its fill assumption |
+| **P1-11** exit cadence | `5cfc0c8` | — (note only) | leave the 10:00 tightening; cadence half stays gated on P2-2 |
+
+1604 tests green. Unit md5 unchanged (`9506ce61`) across all five restarts.
+
+### 19.2 The three falsifiers, read at 3 days (§16)
+
+- **`other_gap` — PASSED.** All-time −$21.65, **trailing-14d +$0.00** over 138
+  resolution closes. P1-7 works; the residual is closed history.
+- **Entry count — the 40% projection was wrong, not the feature.** Flat at
+  ~30/day; **mean size fell $6.33 → $4.95 (−22%)**, 436 "No positive edge"
+  refusals since 09-06. §13.1 fitted one map across the whole record; production
+  fits out-of-sample per day and is gentler. Read the deployed effect as −22% on
+  size with entry count intact.
+- **Net price edge — NOT YET READABLE.** −0.0051 against −0.0049. 12 of the
+  window's 14 days predate the deploy. **Re-read around 2026-09-17.**
+
+Also closed: new rows carry `entry_fee_per_share` from `open_position()`, not the
+backfill.
+
+### 19.3 What is left
+
+```
+BLOCKED  P2-2   on funding the EOA and redeeming one real winner (§14)
+         P1-11's cadence half, behind P2-2 (§17.3)
+
+DEFER    P0-1   ~2026-10-03 (ev_snapshots began 2026-09-03)
+         P0-2   ~November (ensemble history)
+         P0-3   needs prod DB access
+         P3-1 P3-2 P3-3 P3-5
+
+OPEN     §18    the time x price stop interaction -- measured, not acted on
+         §13.4  should P3-6's map be smoothed (Platt)? 15 levels at n~400
+         §9.5   what does a kill-criterion firing mean? decide before ~10-03
+```
+
+**Nothing is startable without an operator decision.** The one that unblocks the
+most is funding the EOA: it releases P2-2, which in turn releases P1-11's
+cadence half and settles §18 by deleting the rule §18 is about.
+
+### 19.4 Two dates to come back on
+
+- **~2026-09-17** — P3-6's net-price-edge falsifier becomes readable. If it has
+  not risen from −0.0049, P3-6 is cutting good entries with bad ones and the
+  revert is one line (`calibration=None` in `run_for_station_with_map`).
+- **~2026-10-03** — the 30-day kill-criterion window stops being the same rows
+  as all-time, and P0-1 becomes possible. §9.5's question wants answering before
+  this, not after.
