@@ -1192,6 +1192,11 @@ time-dependent carve-out.
 
 ## 19. WHERE THIS STANDS — 2026-09-07
 
+> **REVIEWED the same evening — see §20.** Two merges landed after this section
+> was written (`eedabca`, `4c3827f`), §19.3's "nothing is startable" does not
+> hold, and the box is behind `main`. Everything §19 asserts about the code was
+> re-checked at file:line and stands.
+
 Supersedes §15.
 
 ### 19.1 Phase 1 is complete
@@ -1248,3 +1253,196 @@ cadence half and settles §18 by deleting the rule §18 is about.
 - **~2026-10-03** — the 30-day kill-criterion window stops being the same rows
   as all-time, and P0-1 becomes possible. §9.5's question wants answering before
   this, not after.
+
+---
+
+## 20. Review of revision 4 — 2026-09-07, evening
+
+**Verified against:** `main` at `4c3827f`; the box at `46565b6`.
+**Method:** every claim §16–§19 makes about a file checked by opening that file;
+every claim about the box checked read-only over SSH — deployed HEAD, daemon
+uptime, and the `positions` and `ev_snapshots` tables read directly. The same
+method §6 used, applied to the sections written since.
+
+### 20.1 What holds
+
+- **Every "recorded beside the constant" claim is true.** P1-11's note sits at
+  `config.py:1422` under `EDGE_DECAY_TIGHTEN_HOUR_LOCAL`; §18's hour × price
+  table at `config.py:1904` under `STOP_EXEMPT_ABOVE_PRICE`. Both carry the
+  numbers §17.2 and §18 quote, with n, unrounded.
+- **P1-10's column is on the box.** `positions` ends
+  `… entry_fee_per_share, trigger_price` — 25 columns, `trigger_price` at index
+  24, exactly what §17.1 says `_row_to_position` reads.
+- **P3-6's revert really is one line.** `ev_engine.py:640` passes
+  `calibration=_calibration_for(station.icao, estimate.target_date)` into
+  `compute_ev_table`; `None` there is the whole revert, and the comment above it
+  already promises the uncalibrated degradation path, so it is exercised.
+- **§16.2's −22% reproduces independently, and holds one day further.** Mean
+  `size_usd` on the box: 7 days before the deploy **$6.38** (n=200), 14 days
+  **$6.23** (n=336), after **$4.96** (n=88) — −22% and −20%. Entry count stayed
+  flat on a day §16 could not see: **09-07, 29 entries at $4.92**. 09-03 and
+  09-04 are deploy days (15 and 14 entries) and are correctly on neither side.
+- **`ev_snapshots` is accumulating with no gaps.** 99,506 rows across 5 distinct
+  days, 2026-09-03 → 09-07. §19.4's ~2026-10-03 date for P0-1 is on track.
+- **§18's numbers are untouched by the sweep defect found 32 minutes later.**
+  They are scored off stored closed positions on the `cohort_monitor` basis, not
+  replayed through `backtest/engine.py`, so the `HOLD_TO_SETTLEMENT_MODES`
+  short-circuit that made the sweeps inert cannot reach them. Worth stating
+  because the two sit half an hour apart in the same afternoon's log.
+- **1615 tests green on `main` at `4c3827f`** (§19.1's 1604 was correct when
+  written).
+
+### 20.2 §19 was stale within 90 minutes, and is stale now
+
+§19 was committed at 13:28 (`ee7bd54`). Two merges landed after it:
+
+| merged | commit | touches |
+|---|---|---|
+| 14:15 | `eedabca` | `backtest/stop_sweep.py`, `backtest/take_sweep.py` — both inert since 2026-09-02 |
+| 20:47 | `4c3827f` | `ev_engine.py` — **live code** |
+
+Neither appears in §19.1's table, §19.3's list, or the test count. That is not a
+bookkeeping complaint. §19.3 closes with **"Nothing is startable without an
+operator decision,"** and the same afternoon's own commit log is the
+counterexample: two substantive items were measured, tested and merged after
+that sentence was written, and neither needed the operator for anything.
+
+### 20.3 The box is behind `main` for the first time in this campaign
+
+Box HEAD `46565b6`, daemon up since **2026-09-07 04:54:31 UTC**. `main` is five
+commits ahead. Four are inert on the daemon — two are `config.py` comments
+(`5cfc0c8`, `7842fdd`), one is this document (`ee7bd54`), and the sweep arming
+(`eedabca`) touches two files the daemon never imports.
+
+**`4c3827f` is not inert by construction.** It changes
+`ev_engine.best_opportunities()`, which the scheduler calls every cycle. Its own
+commit message argues the change is cosmetic today — sort-only, nothing
+truncates the list, `decide_entries()` sizes each candidate independently, the
+budget scales approved legs proportionally — and that argument checks out at
+`ev_engine.py:474-492`. So the gap is benign. But every prior wave in this plan
+recorded merge and deploy in the same row of the same table, and this one has a
+merge with no deploy line and no note saying none was needed. Say which it is.
+
+### 20.4 P1-10 was accepted on an instrument that could not answer
+
+§17.1 closes: "`stop_sweep.py` now prints its fill assumption, which decides the
+sign of its own answer." True of the string; not true of the answer. At 12:53,
+when P1-10 merged, `stop_sweep.sweep()` had been returning `hold` for every
+position at every distance since 2026-09-02 —
+`config.HOLD_TO_SETTLEMENT_MODES = ("paper",)` short-circuits `evaluate_exit()`
+before it reads a threshold, and `backtest/engine.py` builds every replay
+position `is_paper=True` on the default mode. Found and fixed 55 minutes later
+(`9ada777`).
+
+The two numbers inside the printed assumption (`+$146` at trigger-fill against
+`−$75` at provable-quote-fill) come from the 2026-08-27..29 runs and are sound.
+But P1-10's acceptance never required the tool to produce a non-degenerate
+table, and had it done so the defect would have surfaced at 12:53 rather than
+through a separate investigation. **The generalisable form:** an acceptance
+condition that reads an instrument's *output format* does not test the
+instrument. §15.4's note that re-verifying the premise keeps changing the work
+applies here, and was not applied.
+
+### 20.5 The day's two answered sweeps are in neither this plan nor `config.py`
+
+Both re-runs executed after the arming fix, on the box, against the live DB,
+each behind an arming probe that had to print a discriminating pair before any
+row was scored. Both bear on threads this document carries. Neither is written
+down anywhere in the repo:
+
+- **Stop distance** — 327 closed positions, 11 Asia stations, 2026-08-17..09-06:
+  30% (live) −13.2%, 40% −12.5%, 50% **−13.8%, worst of five**, 60% −11.7%,
+  none −11.4%. Every row negative. **This weakens §18's own closing sentence.**
+  §18 offers itself as "the strongest available argument for a time-dependent
+  carve-out" if P2-2 stays blocked; the sweep says loosening the stop does not
+  pay at any distance tested, pooled.
+- **Take-profit, both modes** — every row of both the engine and stored modes is
+  now negative (stored `none` moved +25.0% → −5.3%). That kills the standing
+  "remove the take and make money" reading and reframes the cheap band as an
+  **entry** problem.
+
+§17.2 and §18 both set the convention: a measured answer goes beside the
+constant it bears on. These two did not follow it. `LOTTERY_PROFIT_TAKE_PCT`
+(`config.py:1530`) and `STOP_LOSS_PCT` carry nothing dated 2026-09-07.
+
+### 20.6 A measured inversion in the live admission bar is absent from the plan
+
+`9367907` measured, on the live book scored hold-to-settlement, that the
+**highest `net_ev_per_dollar` quintile returns −31.7% while the second-lowest
+returns +30.6%**, the top quintile's mean price being 0.114. The sort was
+changed to `net_ev_per_share`. **The admission bar was not:**
+
+```
+ev_engine.py:474-479
+    viable = [
+        r for r in results
+        if r.net_ev_per_dollar is not None
+        and r.net_ev_per_dollar >= min_net_ev
+```
+
+The gate deciding which candidates surface at all is still keyed to the quantity
+this repo has now measured as inverted, and the inversion tracks price — the
+same direction as the lottery-band entry defect, as §20.5's cheap-band
+reframing, and as §16.3's entry-edge decay. Leaving the bar alone was the right
+call for a same-day change: widening or narrowing it is a trading change and
+needs replay evidence. **But it belongs in §19.3's OPEN list, and it is not
+there.** On this plan's own logic — entry selection is where the edge lives, and
+P2-2 deletes the exit rules anyway — it outranks §18.
+
+### 20.7 Three things are startable now, none needing the operator
+
+Against §19.3's "nothing is startable":
+
+1. **Replay the admission bar on `net_ev_per_share`.** `9367907` names this as
+   the required next evidence, and `eedabca` repaired the harness the same day,
+   so the replay that would have returned a fake null on 2026-09-02 is now
+   possible.
+2. **`ENTRY_PRICE_BLOCK_BAND`** ships `None` (`config.py:2042`) with the
+   machinery already wired at `entry_manager.py:846`. Same harness, same
+   evidence.
+3. **Separate hour from hold duration in §18.** §18 declines to act partly
+   because the two are collinear (median 2.3h before 10:00 against 6.0h after) —
+   but both quantities sit on every row. Stratifying by duration inside an hour
+   band is a query, not a decision.
+
+§19.3 is right about P2-2. It is wrong that P2-2 is the only thing between here
+and work.
+
+### 20.8 Two smaller things
+
+- **§18 says "237 closed stops"; its table covers 223.** The six cells sum to
+  64+61+27+11+35+25 = 223; 237 is §17.2's parent set (114 loose + 123 tight).
+  The 14 rows outside are entries below 0.15 or exit hours outside 06–14.
+  Nothing is wrong — but §3 of this document is four paragraphs on the cost of
+  leaving two nearly-equal totals unreconciled in the same breath.
+- **P1-11 answered a question its own note said could not be answered that way.**
+  `config.py:1419` records that `stop_loss_audit.py`'s held-to-settlement column
+  "is explicitly an upper bound and cannot answer it"; §17.2 then answers with
+  held-to-settlement costs. The answer is a *difference* between two bands
+  measured identically, so a proportional upper-bound bias largely cancels —
+  which is probably why it is legitimate. The plan does not say so, and it is
+  the objection the original note pre-registered.
+
+### 20.9 What this review would change in §19.3
+
+```
+BLOCKED    P2-2   on funding the EOA and redeeming one real winner (unchanged)
+           P1-11's cadence half, behind P2-2 (unchanged)
+
+STARTABLE  replay the admission bar on net_ev_per_share       (§20.6, §20.7)
+no operator replay ENTRY_PRICE_BLOCK_BAND                     (§20.7)
+decision   hour vs hold-duration inside §18                   (§20.7)
+needed     record 2026-09-07's two sweep answers in config.py (§20.5)
+           decide whether 4c3827f deploys, or why it need not (§20.3)
+
+DEFER      P0-1 P0-2 P0-3 P3-1 P3-2 P3-3 P3-5  (unchanged)
+
+OPEN       §18    now weakened by the stop sweep              (§20.5)
+           §13.4  should P3-6's map be smoothed (Platt)?
+           §9.5   what does a kill-criterion firing mean? before ~10-03
+```
+
+**If you do only one thing:** replay the admission bar. It is the only item here
+that touches which trades get made, the evidence it needs is now producible, and
+every other entry-side finding this repo has recorded in the last three weeks
+points at the same band.
