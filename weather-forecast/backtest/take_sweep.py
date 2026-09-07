@@ -120,16 +120,33 @@ NO_TAKE = 99.0
 
 @contextmanager
 def _lottery_take(pct: float):
-    """Set both lottery take constants for the duration, then put them back."""
+    """
+    Set both lottery take constants for the duration, then put them back --
+    and ARM the cohort, without which none of it means anything.
+
+    Same defect and same fix as stop_sweep._stop_distance(), whose docstring
+    carries the full account: config.HOLD_TO_SETTLEMENT_MODES = ("paper",)
+    short-circuits risk_manager.evaluate_exit() to "hold" for exactly the
+    cohort both replay paths here produce -- engine.run()'s positions, which
+    are is_paper=True on the Position default execution_mode, and
+    replay_stored()'s, which are the paper book's own rows. Without the empty
+    tuple every take distance returns "hold" and the table is a fake null.
+
+    Restoring it matters for the same reason: config is process-global, and
+    the daemon reads the same module.
+    """
     old_loose = config.LOTTERY_PROFIT_TAKE_PCT
     old_tight = config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT
+    old_modes = config.HOLD_TO_SETTLEMENT_MODES
     config.LOTTERY_PROFIT_TAKE_PCT = pct
     config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = pct
+    config.HOLD_TO_SETTLEMENT_MODES = ()
     try:
         yield
     finally:
         config.LOTTERY_PROFIT_TAKE_PCT = old_loose
         config.TIGHTENED_LOTTERY_PROFIT_TAKE_PCT = old_tight
+        config.HOLD_TO_SETTLEMENT_MODES = old_modes
 
 
 class StoredRun:
