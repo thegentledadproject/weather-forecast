@@ -190,9 +190,19 @@ def station_ordering(off_by_station, on_by_station):
     traded under one cell and not the other, which is not evidence about the
     ordering, and counting it would be the easiest way for this tool to
     flatter the band.
+
+    A station that traded on NEITHER side is excluded too, and that one was a
+    real defect in the first run of this tool. RPLL is force-collection-only,
+    so it replays 0 entries under every cell and scores ret 0.0 on both sides
+    -- which the equality branch below reported as "tied". A tie means the band
+    changed nothing at a station that traded; this means there was nothing
+    there. It made every ordering line read "5 better, 3 worse, 1 tied" over
+    eight stations of evidence, not nine.
     """
     better, worse, tied = [], [], []
     for icao in sorted(set(off_by_station) & set(on_by_station)):
+        if not off_by_station[icao].get("n") and not on_by_station[icao].get("n"):
+            continue
         off_ret = off_by_station[icao]["ret"]
         on_ret = on_by_station[icao]["ret"]
         if on_ret > off_ret:

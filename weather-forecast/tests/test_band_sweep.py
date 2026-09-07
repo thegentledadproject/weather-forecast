@@ -131,8 +131,10 @@ def test_ordering_verdict_counts_stations_both_ways():
     records as "not a result" -- so the helper reports the split rather than a
     boolean anyone could round in their favour.
     """
-    off = {"WSSS": {"ret": -0.10}, "WMKK": {"ret": -0.20}, "ZGGG": {"ret": -0.30}}
-    on = {"WSSS": {"ret": -0.05}, "WMKK": {"ret": -0.40}, "ZGGG": {"ret": -0.10}}
+    off = {"WSSS": {"ret": -0.10, "n": 33}, "WMKK": {"ret": -0.20, "n": 19},
+           "ZGGG": {"ret": -0.30, "n": 17}}
+    on = {"WSSS": {"ret": -0.05, "n": 31}, "WMKK": {"ret": -0.40, "n": 14},
+          "ZGGG": {"ret": -0.10, "n": 13}}
 
     better, worse, tied = band_sweep.station_ordering(off, on)
 
@@ -147,8 +149,8 @@ def test_ordering_ignores_stations_absent_from_either_side():
     about the ordering, and silently scoring it as a win would be the easiest
     way for this tool to flatter the band.
     """
-    off = {"WSSS": {"ret": -0.10}, "RPLL": {"ret": -0.50}}
-    on = {"WSSS": {"ret": -0.05}}
+    off = {"WSSS": {"ret": -0.10, "n": 33}, "RPLL": {"ret": -0.50, "n": 6}}
+    on = {"WSSS": {"ret": -0.05, "n": 31}}
 
     better, worse, tied = band_sweep.station_ordering(off, on)
 
@@ -167,3 +169,32 @@ def test_reuses_the_entry_bar_sweep_guards():
     from backtest import entry_bar_sweep
     assert band_sweep.assert_cohort_holds is entry_bar_sweep.assert_cohort_holds
     assert band_sweep.assert_measured_something is entry_bar_sweep.assert_measured_something
+
+
+def test_ordering_excludes_stations_that_traded_on_neither_side():
+    """
+    RPLL is force-collection-only, so it replays 0 entries under every cell and
+    scores ret 0.0 on both sides -- which the equality branch counted as
+    "tied". A tie means "the band changed nothing here"; this station means
+    "there was nothing here". Reporting it as a tie makes an absence read as
+    evidence, and the ordering line is the number this whole tool exists to
+    produce.
+    """
+    off = {"WSSS": {"ret": -0.10, "n": 33}, "RPLL": {"ret": 0.0, "n": 0}}
+    on = {"WSSS": {"ret": -0.05, "n": 31}, "RPLL": {"ret": 0.0, "n": 0}}
+
+    better, worse, tied = band_sweep.station_ordering(off, on)
+
+    assert better == ["WSSS"]
+    assert tied == [], "a station that never traded is not a tie"
+    assert "RPLL" not in better + worse + tied
+
+
+def test_a_genuine_tie_is_still_reported():
+    """The exclusion must be about absence, not about equal returns."""
+    off = {"VHHH": {"ret": -0.055, "n": 26}}
+    on = {"VHHH": {"ret": -0.055, "n": 26}}
+
+    better, worse, tied = band_sweep.station_ordering(off, on)
+
+    assert tied == ["VHHH"]
