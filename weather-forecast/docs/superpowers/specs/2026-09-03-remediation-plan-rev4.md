@@ -1645,3 +1645,101 @@ sd around 170%, so the standard error is ~17 points against a 15-point gap. What
 makes it worth recording is the consistency across all seven cells — and those
 are seven correlated looks at overlapping entry sets, not seven independent
 tests. It is a reason to look, not a result to act on.
+
+---
+
+## 22. `ENTRY_PRICE_BLOCK_BAND`, replayed — 2026-09-07 evening
+
+Executes §20.7's second startable item. Tool merged as `98d5fb5`
+(`backtest/band_sweep.py`, 1647 tests green). **No live-code change and nothing
+for the daemon**: both enforcement sites already read
+`config.entry_price_is_blocked()`, and the daemon imports nothing from
+`backtest/`. `ENTRY_PRICE_BLOCK_BAND` stays `None`.
+
+### 22.1 Why the question was open at all
+
+The standing verdict — `config.py`'s "WHY IT IS STILL OFF — AND NOW THAT IS A
+MEASUREMENT, NOT A CAUTION" — was replayed over 2026-08-06..08-24 and written
+up around 08-27. **`config.HOLD_TO_SETTLEMENT_MODES` landed 2026-09-02
+(`2c8db40`).** So that verdict was measured with the replay's stop and take
+**armed**, under an exit regime this book no longer runs.
+
+That matters specifically for this gate, because the entire case for the band
+is a held-to-settlement one: `config.py` records 0.15–0.25 as "THE ONLY BAND
+NEGATIVE ON THE HELD-TO-SETTLEMENT COUNTERFACTUAL", arguing that a band losing
+at its upper bound loses under every honest counterfactual. When that was
+written, holding to settlement was a counterfactual. It is now the policy. The
+measurement and the book finally agree, and nobody had re-asked.
+
+### 22.2 The answer is NO, and the band now fails its bar in both dimensions
+
+Two **disjoint** windows, the 9 UTC+8 stations the original verdict used, every
+admitted position held to settlement. Band `0.15–0.25`, 8 stations with entries:
+
+| | window A (08-06..08-24) | window B (08-25..09-06) |
+|---|---|---|
+| per-station ordering | **5 better, 3 worse** | **5 better, 3 worse** |
+| worse at | RCSS, ZGGG, ZSPD | ZGGG, ZGSZ, ZSPD |
+| pooled, off → blocked | −11.3% → −11.1% | −3.4% → **−5.4%** |
+
+Pooled, all cells:
+
+| band | window A n / return | window B n / return |
+|---|---|---|
+| off | 165 / −11.3% | 132 / −3.4% |
+| 0.15–0.25 | 144 / −11.1% | 104 / −5.4% |
+| 0.15–0.30 | 123 / −4.0% | 91 / −1.9% |
+| 0.20–0.25 | 161 / −9.9% | 124 / −3.2% |
+
+**Four readings:**
+
+1. **The ordering never holds — five-three in both windows.** That is the
+   identical split `config.py` already rejected as "not a result". Re-asking
+   under hold-to-settlement did not improve it.
+2. **The identity of the harmed stations is not stable across windows.** RCSS
+   goes from worse (−41.5% → −55.9%) to better (−13.2% → −12.3%); ZGSZ goes the
+   other way. This is not "the band hurts these three stations" — it is the
+   split reshuffling. Only ZGGG and ZSPD are harmed in both.
+3. **The pooled sign FLIPS, and the recent window is the negative one.** Window
+   A is a wash; window B says blocking is clearly worse. So "across windows"
+   fails at the pooled level too, in the direction of the newer data.
+4. **`0.15–0.30` is the best pooled cell in both windows** and is not a result
+   either: same five-three ordering, bought by removing **25–31% of all
+   entries**. ZGGG under it in window B goes +0.7% → **−100.0%**.
+
+### 22.3 One finding that is not about the band
+
+**The median trade is −100.0% in every cell of both windows.** Held to
+settlement, more than half of all positions go to zero and the book lives
+entirely on its tail.
+
+That is substantive on its own, and it has a direct consequence for this
+document: the **median is saturated and can no longer discriminate anything
+here**. It was the statistic that caught the problem in August — `config.py`
+records blocking improving the pooled return while the median got worse,
+−42.6% → −55.3%. That check is no longer available, which is worth knowing
+before anyone leans on it again.
+
+### 22.4 A correction to this tool's own first output
+
+Every ordering line initially read "5 better, 3 worse, **1 tied**", and the tie
+was always RPLL — which is force-collection-only, replays 0 entries under every
+cell, and therefore scored return 0.0 on both sides. The equality branch
+reported that as a tie.
+
+A tie means the band changed nothing at a station that traded. This meant there
+was nothing there. Fixed in the merge: a station with zero entries on both sides
+is excluded, while a genuine tie on real entries is still reported and is pinned
+separately so the exclusion cannot widen into "drop the ties". **The tables in
+§22.2 carry the corrected counts** — eight stations of evidence, not nine.
+
+### 22.5 What this changes
+
+- `ENTRY_PRICE_BLOCK_BAND` stays `None`. The `config.py` note is unchanged in
+  its conclusion and now rests on a stronger measurement than the one it was
+  written from.
+- §20.9's list: this item moves from STARTABLE to **ANSWERED**. One startable
+  item remains — separate hour from hold-duration in §18 (§20.7 item 3).
+- The repo now has a sweep that reports per-station orderings across windows,
+  which is the acceptance bar `config.py` sets and which no previous tool could
+  meet. The next gate question does not need it rebuilt.
