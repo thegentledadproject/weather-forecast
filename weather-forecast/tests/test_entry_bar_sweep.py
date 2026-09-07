@@ -126,3 +126,32 @@ def test_bar_context_refuses_when_a_second_entry_window_is_enabled(monkeypatch):
         with entry_bar_sweep._entry_bar("ratio", 0.15):
             pass
     assert config.ENTRY_BAR_BASIS == "ratio"
+
+
+# --- a sweep that measured nothing must say so ---------------------------
+
+def test_sweep_refuses_a_table_where_no_cell_admitted_anything():
+    """
+    THE FAILURE THIS EXISTS FOR, and it happened on the first real run.
+
+    backtest/settings.py keeps historical prices in a SEPARATE database
+    (MARKET_DATA_DB, "deliberately NOT config.DB_PATH"), and
+    price_store._connect() creates its schema lazily. Point a run at a
+    directory without that file and it silently makes an empty one: no
+    prices, so no EV rows, so no candidates, so zero entries in every cell
+    -- and the table printed seven identical rows of 0.0% with no error.
+
+    That is the same fake null stop_sweep printed for five days, arrived at
+    from the opposite direction: assert_cohort_holds() was satisfied because
+    the cohort WAS held; there just wasn't one. A guard on the premise is not
+    a guard on the result.
+    """
+    empty = {("ratio", 0.15): {"n": 0}, ("per_share", 0.045): {"n": 0}}
+    with pytest.raises(AssertionError, match="no cell admitted"):
+        entry_bar_sweep.assert_measured_something(empty)
+
+
+def test_sweep_accepts_a_table_with_entries_in_any_cell():
+    """One populated cell is a real result -- a bar that admits nothing is a finding."""
+    mixed = {("ratio", 0.15): {"n": 41}, ("per_share", 0.20): {"n": 0}}
+    assert entry_bar_sweep.assert_measured_something(mixed) is True

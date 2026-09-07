@@ -129,6 +129,37 @@ def assert_cohort_holds() -> bool:
     return True
 
 
+def assert_measured_something(results) -> bool:
+    """
+    Refuse to report a table in which no cell admitted a single entry.
+
+    THE FAILURE THIS EXISTS FOR, found on this tool's first real run.
+    backtest/settings.py keeps historical prices in a SEPARATE database --
+    MARKET_DATA_DB, "deliberately NOT config.DB_PATH" -- and
+    price_store._connect() creates its schema LAZILY. Run from a checkout
+    whose data directory lacks that file and sqlite makes an empty one: no
+    prices, so no EV rows, so no candidates, so zero entries in every cell.
+    Seven identical rows of 0.0%, no exception, nothing in the log.
+
+    That is stop_sweep's fake null reached from the opposite direction, and
+    assert_cohort_holds() does not catch it: the cohort WAS held, there just
+    was not one. A guard on the premise is not a guard on the result, so
+    this checks the result too.
+
+    One populated cell is enough. A bar that admits nothing is a finding;
+    a bar that admits nothing BECAUSE THERE WERE NO PRICES is a broken run,
+    and only the all-zero case cannot tell those apart.
+    """
+    assert any(s["n"] > 0 for s in results.values()), (
+        "no cell admitted a single entry, so this run measured nothing. The "
+        "usual cause is missing price history: backtest.settings.MARKET_DATA_DB "
+        "is a SEPARATE file from config.DB_PATH and price_store creates it "
+        "empty rather than failing. Check that file exists and covers the "
+        "requested window, or pass --market-db."
+    )
+    return True
+
+
 @contextmanager
 def _entry_bar(basis: str, bar=None):
     """
@@ -253,6 +284,7 @@ def sweep(stations, start: date, end: date, cells, market_db_path=None) -> dict:
                     print(f"  [entry_bar_sweep] {icao} failed at {basis}:{bar}: "
                           f"{type(exc).__name__}: {str(exc)[:100]}")
         out[(basis, bar)] = _score(runs)
+    assert_measured_something(out)
     return out
 
 
