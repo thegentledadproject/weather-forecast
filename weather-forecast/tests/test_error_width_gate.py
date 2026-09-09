@@ -178,6 +178,71 @@ def test_disabling_the_threshold_disables_the_gate(monkeypatch):
         "WSSS", error_width_ratio=99.0, **CLEAN) is None
 
 
+# --- the 2026-09-09 named stations -----------------------------------------
+
+# Measured off the live book 2026-09-09 04:59 UTC: naive forecast-error sd
+# as a multiple of the station's OWN bucket width (config.bucket_step_c, so
+# a 2F axis is 1.111C and not 2C). Every one of these is above the 1.0 the
+# error-width gate would stop them at, and every one of them has fewer than
+# MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE scored residuals, so the gate returns
+# None and cannot act.
+UNGUARDED_WIDE_2026_09_09 = {
+    "SBGR": 2.282,
+    "MMMX": 1.160,
+    "KSEA": 1.131,
+    "KMIA": 1.096,
+    "CYYZ": 1.010,
+    "KHOU": 1.002,
+}
+
+
+def test_unguarded_wide_stations_are_named_until_the_gate_can_see_them():
+    """
+    Six stations measured wider than their own bucket on 2026-09-09 while
+    sitting under MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE, so the gate returns
+    None for them and cannot stop them. They are named until it can.
+
+    Remove a name only when calibration.error_width_ratio() returns a
+    number for it that passes -- not merely because the sd moved.
+    """
+    for icao in UNGUARDED_WIDE_2026_09_09:
+        assert config.force_collection_only(icao), icao
+
+
+def test_naming_them_does_not_drop_rpll():
+    """
+    RPLL is a standing operator decision independent of any measurement
+    (see FORCE_COLLECTION_ONLY_STATIONS' own note). Adding names must not
+    disturb it.
+    """
+    assert config.force_collection_only("RPLL")
+
+
+def test_each_named_station_actually_opens_nothing():
+    """
+    Set membership is not the behaviour. The named stations must reach a
+    collection-only reason through the real gate function, on arguments
+    that would otherwise pass cleanly -- and with error_width_ratio=None,
+    which is exactly the "gate is blind" state they are named for.
+    """
+    for icao in UNGUARDED_WIDE_2026_09_09:
+        reason = entry_manager.collection_only_reason(
+            icao, error_width_ratio=None, **CLEAN)
+        assert reason is not None, icao
+        assert "FORCE_COLLECTION_ONLY_STATIONS" in reason, icao
+
+
+def test_every_named_ratio_would_fail_the_gate():
+    """
+    The names are justified BY the gate's own threshold, not by a new one.
+    If someone raises MAX_ERROR_RMSE_PER_BUCKET above one of these, that
+    station's name is no longer arguing from the gate and should be
+    re-examined rather than left standing on a stale number.
+    """
+    for icao, ratio in UNGUARDED_WIDE_2026_09_09.items():
+        assert ratio > config.MAX_ERROR_RMSE_PER_BUCKET, icao
+
+
 # --- helpers ----------------------------------------------------------------
 
 def _series(errors):

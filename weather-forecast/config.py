@@ -3652,6 +3652,44 @@ COLLECTION_GATE_OVERRIDE_STATIONS = {
 # was written about.
 FORCE_COLLECTION_ONLY_STATIONS = {
     "RPLL",
+    # --- 2026-09-09: the stations the gate above cannot yet see -------------
+    # MAX_ERROR_RMSE_PER_BUCKET stops a station whose corrected error is
+    # wider than its bucket, but corrected_error_rmse() returns None below
+    # MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE (15) scored residuals. Every
+    # Americas and European station is under that today (n_res 4-9), so the
+    # gate is BLIND on 23 of 35 stations for another 6-10 days. These six
+    # already measure wider than their own bucket on the statistic that
+    # does exist, and are named on the GATE'S OWN RULE rather than a new
+    # one -- the same move RPLL got before the gate existed.
+    #
+    # naive sd as a multiple of bucket_step_c(), n=9-10, measured 04:59 UTC:
+    #   SBGR 2.282   MMMX 1.160   KSEA 1.131
+    #   KMIA 1.096   CYYZ 1.010   KHOU 1.002
+    #
+    # THIS IS AN OPERATOR DECISION ON A THIN SAMPLE, and the two ends of
+    # that list are not the same claim. SBGR at 2.28x is not a marginal
+    # call at any n. KHOU (1.002) and CYYZ (1.010) are inside sampling
+    # noise of the threshold -- a naive sd at n=10 carries roughly 24%
+    # relative error -- and they are named because stopping a station that
+    # turns out fine costs missed trades while trading one that is
+    # unresolvable costs money, not because the measurement is decisive.
+    #
+    # The naive sd is also NOT the gate's statistic: it is taken about the
+    # sample's own mean, while the gate replays the bias correction each
+    # day really had. Those disagree in both directions (measured the same
+    # day: WSSS 0.624 -> 0.589, but ZSPD 0.696 -> 0.758). So a name here
+    # can be wrong in either direction and none of them is permanent.
+    #
+    # RE-CHECK EACH ONE once calibration.error_width_ratio() returns a
+    # number for it -- Europe ~2026-09-15, the Americas ~2026-09-19 -- and
+    # drop any that passes. KHOU and CYYZ first. See Task 5 of
+    # docs/superpowers/plans/2026-09-09-spread-width-remediation.md.
+    "SBGR",
+    "KSEA",
+    "KMIA",
+    "MMMX",
+    "KHOU",
+    "CYYZ",
 }
 
 
