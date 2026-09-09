@@ -1756,3 +1756,150 @@ separately so the exclusion cannot widen into "drop the ties". **The tables in
 - The repo now has a sweep that reports per-station orderings across windows,
   which is the acceptance bar `config.py` sets and which no previous tool could
   meet. The next gate question does not need it rebuilt.
+
+## 23. The edge mechanism, and the gate that now corrects it — 2026-09-09
+
+Answers "where does the edge come from, and why did it decay". It turned out to
+be one question with one answer, and the answer falsifies a belief this plan has
+been acting on since §19.
+
+Shipped: `d75b269`, merged `107e54f`, **DEPLOYED 2026-09-09 12:47 UTC** (targeted
+`git pull --ff-only` + `systemctl restart polyweather`; unit md5 `9506ce61`
+unchanged, `NRestarts=0`, no tracebacks). 1670 tests on the merged tree.
+
+### 23.1 The finding: the winner's curse, measured directly
+
+Over the candidate universe in `ev_snapshots`, causally, against settlement.
+Same model, same days, same stations — split only by whether the entry rule
+chose the ticket:
+
+| cut | n | model | settled | gap | CI |
+|---|---|---|---|---|---|
+| universe, NOT bought | 1539 | 0.464 | 0.470 | **+0.0066** | [−0.0013,+0.0139] |
+| universe, BOUGHT | 153 | 0.493 | 0.373 | **−0.1203** | [−0.1900,−0.0508] |
+
+**The model is a fair forecaster until it is asked to pick.** The market's own
+prices are calibrated in every bin with real n, so `model_prob - market_price`
+is very nearly the model's own ERROR, and maximising it selects that error.
+
+This is the common cause behind results this plan has been collecting
+separately: `raw_edge` quintiles not ranking (§19), `net_ev_at_size` ranking
+worst-first (§21), station P&L not persisting split-half, and the model's Brier
+on TRADED tickets (0.1924) being worse than the ask it traded against (0.1805).
+They are one defect seen from four angles.
+
+### 23.2 BREADTH IS FALSIFIED — this corrects §19
+
+§19 concluded "edge shrinks as breadth grows" and "the live lever is BREADTH,
+not calibration", flagging the time confound as unproven. **The confound is the
+whole effect.** Splitting each ISO week at its own median breadth, so calendar
+time — and therefore any deploy — is held fixed:
+
+- narrow − wide = **−0.0112**, P(narrow better) = 0.392. No effect, wrong sign.
+- Post-08-29 rows: breadth ≤17 → −0.0101, breadth >17 → **+0.0362**. Wrong
+  direction again.
+
+**Do not narrow the station list expecting the edge back.** The curse does not
+need a growing candidate set; it is always-on.
+
+Nor is the decay itself established: first-half − second-half CI
+[−0.0115,+0.1201], pre/post 08-29 CI [−0.0293,+0.1071]. Both span zero. The
+likelier reading is that the early +18.4% was the noisy estimate and the truth
+was always ≈0 — not that something broke on a date.
+
+### 23.3 What actually paid, and that it has stopped
+
+Whole window, price edge per share, cluster-bootstrapped: **YES side at ask
+0.25–0.60 is +0.1452 [+0.0678,+0.2236], n=143** — and everything else is zero
+(YES <0.25 −0.0088, NO 0.25–0.60 +0.0303, NO >0.60 +0.0030, outside the band
+pooled −0.0045). Not tail-driven: the top 20 of 715 trades are 23% of gross
+winnings.
+
+But across the recent universe that same cell prices at −0.0155
+[−0.0502,+0.0153]. **No mispricing left there.** We took 23 of 291 quotes in it
+(7.9%); 86% of days offering one took none.
+
+### 23.4 The fix: `ADMIT_ON_CALIBRATED_EDGE`
+
+Veto 0a2 (`MIN_ABS_RAW_EDGE`) now measures against the calibrated probability
+the sizing path has used since P3-6. **The estimator already existed** —
+`probability_calibration.fit_for_day()` is causal and is fitted on
+`cohort_monitor` rows, i.e. on tickets we BOUGHT, so the map already encodes the
+curse. P3-6's docstring named this as the open decision; it is now made.
+
+`sizing_edge()` and `admission_edge()` share one body and stay separately named.
+Sizing is deliberately NOT routed through the flag, so reverting admission
+cannot silently revert P3-6.
+
+**GATE ONLY — the ranking was replayed and deliberately not moved:**
+
+| top-k per station-day | k=1 | k=2 | k=3 |
+|---|---|---|---|
+| today (raw gate, raw rank) | +0.019 | −0.000 | −0.002 |
+| **calibrated GATE only** | **+0.041** | **+0.018** | **+0.019** |
+| calibrated gate + cal RANK | +0.007 | −0.000 | +0.013 |
+| calibrated RANK only | +0.011 | −0.008 | −0.003 |
+
+Veto 0a (the plausibility CEILING) also stays raw — it is a data-error detector
+and must see the number it is checking for corruption. `net_ev_per_dollar` and
+`clears_entry_bar()` are unmeasured here and untouched, the same reason P3-6
+shipped sizing-only.
+
+**HONEST ABOUT THE EVIDENCE: no CI above excludes zero.** Paired by station-day
+at k=2 it is 68 better / 69 worse / 58 tied, mean +0.0092, CI [−0.0270,+0.0435].
+`ev_snapshots` only reaches back to 2026-09-03, so this rests on six days. It
+ships because it is **conservative by construction — it can only ever REFUSE an
+entry, never add one** — and because the mechanism is measured even where the
+P&L is not. Blast radius ~half the candidates clearing the bar (619 → 311).
+
+Confirmed firing in production within 90s of restart: `KLAX 90°YES` model 0.222
+→ calibrated 0.080 refused; `KSFO 88°YES` model 0.288 → 0.103 refused.
+
+**No sweep can score this.** `backtest/entry_sim.py` reads the same helper so
+the arithmetic cannot drift, but replay rows carry no fitted map, so it stays
+raw. Pinned by a test in `tests/test_calibrated_admission.py` — this project has
+twice shipped a replay that silently scored the old rule while reporting the
+new one (§22's correction, and `backtest/engine.py:988`).
+
+### 23.5 The feedback loop — checked, and it does not erase the correction
+
+The map trains on bought rows, so a gate refusing the inflated ones could leave
+a sample with no bias left to learn from. Measured three ways, read-only:
+
+- **Fixed point.** Refit on survivors, re-filter, 8 generations: bias stays in
+  **+0.083..+0.113**, never trending to zero; the curve is stable at every
+  generation. Survivor pool oscillates 400↔454 — **never near
+  `MIN_CALIBRATION_SAMPLES` (30), so no silent self-disarm.**
+- **Why it is weak.** The gate filters on `|calibrated − price|`; the map learns
+  from `model_prob − outcome`. Near-orthogonal. Full retroactive filtering keeps
+  **71%** of rows and moves bias only +0.108 → +0.097. Dropped rows carry MORE
+  bias (+0.135) and settle 0.264 against survivors' 0.367 — the gate discards
+  measurably worse tickets, which is independent evidence it works.
+- **No domain erosion.** Every `model_prob` band keeps 55–79% of its rows;
+  fitted range 0.074–0.873 → 0.074–0.856.
+
+> **A probe result discarded, deliberately visible.** An intermediate run
+> reported that ZSPD/ZGSZ/VHHH/RKSI would be demoted from `station_isotonic` to
+> `pooled_isotonic`. **That is an artifact — it retroactively filters history,
+> which production never does.** The fit is cumulative (`HISTORY_LIMIT=5000`
+> per station, no time window), so those stations keep their existing
+> 44/36/34/33 rows permanently and their counts only grow. No station can be
+> demoted by this change.
+
+Timescale: ~29 settled rows/day, ~15 post-gate, so post-change rows are 44% of
+the pool at 30 days and 70% at 90. The blended fit stays flat out to +90d — but
+that blend resamples today's survivors, so it bounds the CENSORING effect only
+and cannot see a regime change or the shifted joint distribution the new gate
+actually buys from.
+
+### 23.6 What this changes
+
+- §19's "the live lever is BREADTH" is **withdrawn**. Narrowing the station list
+  is not the lever and was never measured to be one.
+- "Do NOT tune the model further" (§19) is **strengthened, for a new reason**:
+  the model is not miscalibrated, it is mis-selected. Centering and width were
+  already right; correcting them further corrects nothing.
+- **FALSIFIER, ~2026-09-20**, when `ev_snapshots` has a fortnight: re-run the
+  bought-vs-unbought gap. The bought-side −0.120 must shrink toward the unbought
+  +0.007. **If it has not, set `ADMIT_ON_CALIBRATED_EDGE = False` rather than
+  tuning it.**
