@@ -18,6 +18,37 @@
 - **Do not run the test suite on the box** — `test_no_fd_leak.py` writes the real DB.
 - `MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE = 15` and `MAX_ERROR_RMSE_PER_BUCKET = 1.0` are deliberate, documented values with out-of-sample evidence behind them. Tasks 1 and 3 work *around* them; neither may be edited without its own argument.
 
+
+## STATUS — closed out 2026-09-09
+
+| Task | State | Commit | Deployed |
+|---|---|---|---|
+| 1 Stop six unguarded wide stations | **done** | 3bea266 → b80690b | 05:09 UTC |
+| 2 Price on the lag-aware residual | **done** | 98a09d6 → 4e49682 | 05:21 UTC |
+| 3 Stand the floor down | **skipped** (operator) | — | — |
+| 4 Correct the config.py rationale | **done** | d294d90 → b9354b1 | 05:37 UTC |
+| 5 Re-check the named stations | **blocked** to ~09-19 | — | — |
+
+1658 tests green throughout. Box and `main` in sync at b9354b1.
+
+**THREE THINGS THIS PLAN GOT WRONG, corrected in place below:**
+
+1. **The replay gate does not exist.** Tasks 2 and 3 both said a `backtest/compare.py` run
+   must pass before merge. `backtest/engine.py` passes `allow_measured_spread=False`
+   **unconditionally**, so a replay never reaches either measured tier and cannot see any
+   spread change. Running it returns a baseline-identical number that reads as "no harm" —
+   the fake-null shape of [[exit-sweeps-inert]]. **Task 3 therefore has no safety net and
+   needs a different argument before anyone restarts it.**
+2. **Two bucket widths were wrong.** SBGR and CYYZ trade a 1.0C axis, not the 2F axis most
+   Americas stations use. Corrected in the table above; SBGR's ratio is 2.282.
+3. **Task 4's draft comment referenced `SPREAD_FLOOR_MIN_PAIRS`**, a constant Task 3
+   introduces. With Task 3 skipped it does not exist, so the reference was dropped.
+
+**What actually changed for the book:** seven stations open nothing (six new), and three
+trading stations price on a more honest spread — VHHH −0.06, WMKK −0.04, ZSPD +0.05.
+WSSS did not move; both its old and new measurements floor to 0.700, which is Task 3's
+subject. Entries stopped: ~13.6%, all paper, no live-armed station touched.
+
 ---
 
 ## Measured state, 2026-09-09 (the numbers every task argues from)
@@ -67,7 +98,7 @@ Europe crosses `n_res = 15` in roughly 6 days (~2026-09-15), the Americas in rou
 
 ---
 
-### Task 1: Stop the six unguarded wide stations by name
+### Task 1: Stop the six unguarded wide stations by name — ✅ DONE (3bea266, merged b80690b, deployed 05:09 UTC)
 
 **Rationale:** The gate already encodes the decision ("error wider than the bucket means open nothing"). These six satisfy it on the only statistic available and cannot be caught for another 6-10 days. `FORCE_COLLECTION_ONLY_STATIONS` exists for exactly this: RPLL was named because a measurement was obvious before a gate existed. **This is an operator decision, not a proof** — n is 9-10, and a naive sd at n=10 carries roughly +/-24% relative error. Say so in the commit message.
 
@@ -79,7 +110,7 @@ Europe crosses `n_res = 15` in roughly 6 days (~2026-09-15), the Americas in rou
 - Consumes: `config.force_collection_only(station_icao) -> bool` (exists)
 - Produces: nothing new
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_unguarded_wide_stations_are_named_until_the_gate_can_see_them():
@@ -95,12 +126,12 @@ def test_unguarded_wide_stations_are_named_until_the_gate_can_see_them():
     assert config.force_collection_only("RPLL"), "RPLL must not be dropped"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_error_width_gate.py -k unguarded -v`
 Expected: FAIL with `assert False` on `SBGR`
 
-- [ ] **Step 3: Make the change**
+- [x] **Step 3: Make the change**
 
 ```python
 FORCE_COLLECTION_ONLY_STATIONS = {
@@ -120,12 +151,12 @@ FORCE_COLLECTION_ONLY_STATIONS = {
 }
 ```
 
-- [ ] **Step 4: Run the test and the gate suite**
+- [x] **Step 4: Run the test and the gate suite**
 
 Run: `python -m pytest tests/test_error_width_gate.py tests/test_collection_gate_override.py -v`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add config.py tests/test_error_width_gate.py
@@ -146,7 +177,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 ---
 
-### Task 2: Price on the lag-aware residual, not the naive sd
+### Task 2: Price on the lag-aware residual, not the naive sd — ✅ DONE (98a09d6, merged 4e49682, deployed 05:21 UTC)
 
 **Rationale:** `calibration.measured_error_spread()` — feeding the priced spread at `calibration.py:527` — takes the sd about the sample's own mean, i.e. what would be left if the bias correction were perfect and instantaneous. `calibration.corrected_error_rmse()` replays the correction the entry path really had. They disagree in **both** directions (WSSS 0.624 -> 0.589; ZSPD 0.696 -> **0.758**). The gate already trusts the second one. The pricing path should use the same number, so a station's priced width and its gate verdict cannot be computed from different statistics.
 
@@ -160,7 +191,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 - Consumes: `calibration.corrected_error_rmse(station_icao) -> (rmse_c | None, n_scored)` (exists)
 - Produces: `estimate_std_dev(...)` gains source string `"corrected_error"`; `"measured_error"` remains as the fallback below 15 pairs. **`config.LOW_CONFIDENCE_SPREAD_SOURCES` must NOT gain `"corrected_error"`** — it is station-specific, and marking it low-confidence would make every entry clear a doubled edge bar.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_priced_spread_prefers_the_lag_aware_residual(monkeypatch):
@@ -197,12 +228,12 @@ def test_priced_spread_falls_back_to_naive_sd_below_the_pair_floor(monkeypatch):
     assert sd == 0.7  # SPREAD_FLOOR_C still binds here; Task 3 changes that
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `python -m pytest tests/test_cycle_calibration.py -k lag_aware -v`
 Expected: FAIL with `assert 'measured_error' == 'corrected_error'`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 Replace the `measured_error` tier at `calibration.py:525-528`:
 
@@ -226,22 +257,31 @@ Replace the `measured_error` tier at `calibration.py:525-528`:
             return _clamp_spread(measured, station_icao), "measured_error"
 ```
 
-- [ ] **Step 4: Verify the new source is not treated as low-confidence**
+- [x] **Step 4: Verify the new source is not treated as low-confidence**
 
 Run: `python -c "import config; assert 'corrected_error' not in config.LOW_CONFIDENCE_SPREAD_SOURCES; print('ok')"`
 Expected: `ok`
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `python -m pytest tests/ -q`
 Expected: PASS with no regressions. Record the test count.
 
-- [ ] **Step 6: Replay before committing**
+- [x] **Step 6: ~~Replay before committing~~ NOT RUNNABLE — measured directly instead**
 
-Run: `python -m backtest.compare --since 2026-08-17`
-Expected: record exits-off and armed totals for both arms. **The only four stations whose priced number changes today are WSSS, ZSPD, WMKK and VHHH** — every other station is under 15 pairs and unchanged. A materially worse replay blocks the merge.
+`backtest/engine.py:988` passes `allow_measured_spread=False` unconditionally, so the
+replay takes `estimate_std_dev`'s `replay_constant` branch and never reaches either
+measured tier. Proven by execution, not inspection:
+`tests/test_corrected_error_spread_tier.py::test_the_backtest_path_is_untouched` raises if
+the replay path calls these functions, and it passes.
 
-- [ ] **Step 7: Commit**
+Measured the before/after priced spread on the live record instead. **11 stations move and
+8 of them get WIDER** (correction lag adds width where bias drifts): RJTT 1.26→1.38, ZGSZ
+1.08→1.20, ZGGG 1.22→1.32, RKPK 0.94→1.01, ZSPD 0.71→0.76, RPLL/RKSI/ZBAA smaller; VHHH
+0.88→0.82, WMKK 0.84→0.80, RCSS 1.35→1.32 narrow. **Eight of the eleven are already
+stopped by the width gate, so the live blast radius is 3 stations.** WSSS does not move.
+
+- [x] **Step 7: Commit**
 
 ```bash
 git add calibration.py tests/test_cycle_calibration.py
@@ -265,7 +305,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 ---
 
-### Task 3: Let a well-determined residual stand the floor down
+### Task 3: Let a well-determined residual stand the floor down — ⏸️ SKIPPED by operator 2026-09-09
 
 **Rationale:** `SPREAD_FLOOR_C = 0.7` exists because a too-narrow spread makes the model look certain and inflates edge. That is real. But the floor is unconditional, so it also fires on a station that has *measured* itself narrower — and on a bucket market with a `NO` side the cost is not "missed trades", it is manufactured `NO` bets against the favourite. WSSS is the one station where the lag-aware residual exists and sits under the floor (0.589, n_res 34).
 
@@ -382,10 +422,17 @@ for s in sorted(config.STATIONS):
 
 Expected on 2026-09-09 data: **WSSS only.** If more than two stations appear, stop and re-read — the change is wider than this plan argued.
 
-- [ ] **Step 8: Replay**
+- [ ] **Step 8: ~~Replay~~ — THIS GATE DOES NOT EXIST, DO NOT RELY ON IT**
 
-Run: `python -m backtest.compare --since 2026-08-17`
-Expected: WSSS is the station that moves. **WSSS carries the book** (see the `station-performance-divergence` memory), so a worse WSSS replay blocks this outright.
+Discovered while doing Task 2: `backtest/engine.py:988` passes
+`allow_measured_spread=False` unconditionally, so **no replay can see a spread change**.
+A `compare.py` run here returns a baseline-identical number that reads as "no harm".
+
+This task changes what the book buys at WSSS, which carries the book, and it has no
+working safety net. Before restarting it, pick one: teach the backtest to reconstruct the
+spread as of each simulated instant (real work, fixes the blindness permanently); or ship
+to WSSS and measure forward on live paper rows; or wait until EDDM crosses 15 scored pairs
+(~2026-09-15) so the change is testable somewhere other than the live-armed station.
 
 - [ ] **Step 9: Commit**
 
@@ -412,14 +459,14 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 
 ---
 
-### Task 4: Correct the reasoning in config.py
+### Task 4: Correct the reasoning in config.py — ✅ DONE (d294d90, merged b9354b1, deployed 05:37 UTC)
 
 **Rationale:** `config.py:4012` says *"A too-wide spread only costs missed trades."* That sentence is why the floor is unconditional, and it is false on a two-sided bucket market. Leaving it in place means the next person re-derives the same design.
 
 **Files:**
 - Modify: `config.py:4008-4014`
 
-- [ ] **Step 1: Replace the comment**
+- [x] **Step 1: Replace the comment**
 
 ```python
 # A too-narrow spread makes the model look certain, which inflates the gap
@@ -434,16 +481,18 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
 # actually settled BELOW the market on 10 of 10 days (mean -0.34), all 7
 # NO bets were against the bucket that hit, and EDDM is 0-for-11 on NO all
 # time. The floor is wrong in BOTH directions, not conservative in one.
-# See SPREAD_FLOOR_MIN_PAIRS for the opt-out that bounds it.
+# THIS IS DOCUMENTED, NOT FIXED -- see Task 3, which is skipped.
+# (The draft referenced SPREAD_FLOOR_MIN_PAIRS; that constant belongs to
+# Task 3 and does not exist.)
 SPREAD_FLOOR_C = 0.7
 ```
 
-- [ ] **Step 2: Verify nothing reads the comment text**
+- [x] **Step 2: Verify nothing reads the comment text**
 
 Run: `python -m pytest tests/ -q`
 Expected: PASS
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add config.py
@@ -452,7 +501,7 @@ git commit -m "Correct the SPREAD_FLOOR_C rationale: too-wide is not free"
 
 ---
 
-### Task 5: Re-check the named stations once the gate can see them
+### Task 5: Re-check the named stations once the gate can see them — ⛔ BLOCKED until ~2026-09-19
 
 **Rationale:** Task 1's names are an operator decision on a thin sample and must not become permanent by inertia. Europe crosses 15 scored pairs around 2026-09-15, the Americas around 2026-09-19.
 
