@@ -470,9 +470,13 @@ def estimate_std_dev(
     Estimate spread (std dev, in degrees C) for the probability step, and
     report WHICH tier produced it.
 
-    Returns (std_dev_c, source), source being one of "ensemble",
-    "measured_error", "pooled_error", "replay_constant",
-    "fallback_default". The source
+    Returns (std_dev_c, source), source being one of "corrected_error",
+    "ensemble", "measured_error", "pooled_error", "replay_constant",
+    "fallback_default". "corrected_error" and "measured_error" are both
+    this station's own error record; they differ in whether the bias
+    correction's LAG is charged to it -- see the measured tier below, and
+    prefer corrected_error when reading a spread_source out of the
+    ev_snapshots table. The source
     matters as much as the number -- see
     config.LOW_CONFIDENCE_SPREAD_SOURCES, which makes an entry computed on
     a non-station-specific spread clear a doubled edge bar.
@@ -522,6 +526,34 @@ def estimate_std_dev(
         return _clamp_spread(config.POOLED_SPREAD_FALLBACK_C, station_icao), "replay_constant"
 
     if station_icao:
+        # THE LAG-AWARE RESIDUAL FIRST (2026-09-09).
+        #
+        # THE GATE AND THE PRICE MUST BE THE SAME STATISTIC.
+        # corrected_error_rmse() replays the bias correction the entry path
+        # really had on each day and scores no day against a bias that saw
+        # it; measured_error_spread() takes the standard deviation about
+        # the sample's own mean, which is what would be left if the
+        # correction were perfect and instantaneous. The error-width gate
+        # (config.MAX_ERROR_RMSE_PER_BUCKET) already stops stations on the
+        # former. Pricing on the latter meant a station was GATED on one
+        # number and TRADED on another -- two different claims about one
+        # forecast.
+        #
+        # NOT A NARROWING CHANGE, and that is the point. Measured on the
+        # live book 2026-09-09: WSSS 0.624 -> 0.589 but ZSPD 0.696 ->
+        # 0.758. The correction's own lag ADDS width at a station whose
+        # bias drifts, and the old tier was hiding that.
+        #
+        # Falls through to the older tier below 15 scored residuals rather
+        # than skipping to the ensemble: every Europe and Americas station
+        # is under that floor today, and treating "not enough days to
+        # replay the correction" as "no measurement for this station" would
+        # drop them onto a tier config.LOW_CONFIDENCE_SPREAD_SOURCES makes
+        # clear a DOUBLED edge bar.
+        corrected, _ = corrected_error_rmse(station_icao)
+        if corrected is not None:
+            return _clamp_spread(corrected, station_icao), "corrected_error"
+
         measured, _ = measured_error_spread(station_icao)
         if measured is not None:
             return _clamp_spread(measured, station_icao), "measured_error"
