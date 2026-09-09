@@ -4044,11 +4044,42 @@ MIN_SPREAD_PAIRS = 5
 # Hard band on any returned spread, whatever tier produced it.
 #
 # The floor is the safety-critical end and is deliberately ABOVE the grid
-# optimum. A too-NARROW spread is the dangerous direction: it makes the
-# model look certain, which inflates the gap between model probability and
-# market price, which is an edge the entry gates will happily size into.
-# A too-wide spread only costs missed trades. WSSS's own measured spread
-# (~0.56C) sits below this floor and gets raised to it.
+# optimum. A too-NARROW spread is dangerous: it makes the model look
+# certain, which inflates the gap between model probability and market
+# price, which is an edge the entry gates will happily size into. WSSS's
+# own measured spread (0.589C on the lag-aware residual, 2026-09-09) sits
+# below this floor and gets raised to it.
+#
+# CORRECTED 2026-09-09. This note used to end "A too-wide spread only costs
+# missed trades." THAT IS FALSE ON A TWO-SIDED BUCKET MARKET, and it is the
+# reason this floor is unconditional.
+#
+# A too-wide spread does not skip trades. It MANUFACTURES them. Spreading
+# mass off the modal bucket underprices the bucket the market favours, and
+# the entry path reads that as a NO-side edge on the bucket most likely to
+# win -- then sizes into it. The cost is not opportunity, it is losses.
+#
+# MEASURED at EDDM and MMMX over 2026-09-02..08. The model priced the
+# bucket that ACTUALLY SETTLED below the market on 10 of 10 days (mean
+# -0.34, never once above). All 7 NO bets in the window were against the
+# bucket that hit. EDDM is 0-for-11 on NO all time (23 trades, 9% win rate,
+# -$85.09). EDDM's priced sd pins by least squares to EXACTLY this floor
+# (residual 0.000000) against a measured error of 0.452C, and on 09-02 its
+# centre landed exactly on the settled bucket and BOTH legs still lost.
+#
+# So the floor is not conservative in one direction. It is wrong in both,
+# depending on whether a station's own measurement sits under or over it.
+# Raising a genuinely sharp station to 0.70 is an active harm, not a
+# missed opportunity.
+#
+# THIS IS DOCUMENTED, NOT FIXED. The floor is still unconditional and still
+# binds on every station measuring under 0.70. Standing it down for a
+# well-measured station is a real change to what the book buys and is
+# deliberately NOT made here -- see
+# docs/superpowers/plans/2026-09-09-spread-width-remediation.md Task 3,
+# and note that its planned replay gate does not exist:
+# backtest/engine.py passes allow_measured_spread=False unconditionally, so
+# no replay can see a spread change at all.
 SPREAD_FLOOR_C = 0.7
 SPREAD_CEILING_C = 2.0
 
