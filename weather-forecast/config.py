@@ -2096,6 +2096,55 @@ COOLDOWN_COUNTED_EXIT_STATUSES = ("closed_stop_loss", "closed_trailing_stop")
 # catches absurdly LARGE edges); this catches meaninglessly SMALL ones.
 MIN_ABS_RAW_EDGE = 0.03
 
+# WHICH PROBABILITY MIN_ABS_RAW_EDGE IS MEASURED AGAINST -- the model's stated
+# one, or the calibrated one the SIZING path (P3-6) already uses.
+#
+# THE MEASUREMENT, 2026-09-09, over the candidate universe in `ev_snapshots`,
+# causally and against settlement. The model is CALIBRATED on the 1,539
+# candidates it did NOT buy (settle rate minus model_prob = +0.007, CI
+# [-0.001,+0.014]) and TWELVE POINTS HOT on the 153 it DID buy (-0.120, CI
+# [-0.190,-0.051]). Same model, same days, same stations; the only difference
+# is the selection step. The market's own prices are calibrated in every bin
+# with real n, so `model_prob - market_price` is very nearly the model's own
+# ERROR, and admitting on the largest such disagreement selects that error.
+# That is the winner's curse, and it is the common cause behind raw_edge
+# quintiles not ranking, net_ev_at_size ranking worst-first, and the model's
+# Brier on TRADED tickets (0.1924) being worse than the ask it traded against
+# (0.1805).
+#
+# THE GATE MOVES AND THE SORT DOES NOT, and that split is measured rather than
+# convenient. Replaying top-k per station-day over the same universe:
+#
+#     k per station-day              k=1      k=2      k=3
+#     today (raw gate, raw rank)   +0.019   -0.000   -0.002
+#     calibrated GATE only         +0.041   +0.018   +0.019
+#     calibrated gate + cal RANK   +0.007   -0.000   +0.013
+#     calibrated RANK only         +0.011   -0.008   -0.003
+#
+# Calibrating the ranking hurt at every k and cancelled the gate's gain, so
+# ev_engine's sort stays on raw_edge. Veto 0a (the plausibility CEILING) also
+# stays raw: it is a data-error detector and has to see the number it is
+# checking for corruption. net_ev_per_dollar and clears_entry_bar() are
+# untouched -- unmeasured here, and bundling them would make this
+# unattributable, the same reason P3-6 shipped sizing-only.
+#
+# HONEST ABOUT THE EVIDENCE: none of those CIs excludes zero. `ev_snapshots`
+# only reaches back to 2026-09-03, so this rests on SIX DAYS. It ships anyway
+# because it is conservative by construction -- it can only ever REFUSE an
+# entry, never add one -- and because the mechanism is measured even where the
+# P&L is not. Blast radius measured at roughly half the candidates that clear
+# the bar (619 -> 311 over those six days). RE-SCORE AFTER ~2026-09-20, when
+# the universe has a fortnight; if the gate has not helped by then, set this
+# False rather than tuning it.
+#
+# KNOWN AND NOT FIXED HERE: the map is fitted on rows the book BOUGHT, so
+# changing what it buys shifts the map's own training sample. Whether that
+# unwinds the correction over time is unmeasured and is the first thing the
+# re-score should look at.
+#
+# False restores the pre-change rule exactly, with no other behaviour attached.
+ADMIT_ON_CALIBRATED_EDGE = True
+
 # WHICH QUANTITY THE ADMISSION BAR IS KEYED ON. Ships "ratio", which is what
 # this book has always run: net_ev_per_dollar >= min_net_ev, where
 # net_ev_per_dollar = (raw_edge / price) - slippage - fee. "per_share" tests

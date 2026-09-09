@@ -286,25 +286,16 @@ def _calibration_note(ev_result: EVResult) -> str:
     return f"{source} -- raw model_prob {ev_result.model_prob:.3f}, double buffer retained"
 
 
-def sizing_edge(ev_result: EVResult) -> float:
+def _calibrated_or_raw_edge(ev_result: EVResult) -> float:
     """
-    The edge Kelly should size on: calibrated where a map exists, raw where
-    none does.
+    The edge measured against the calibrated probability where a map exists,
+    against the raw one where none does.
 
-    THE SIZING PATH ONLY (P3-6). ev_result.raw_edge stays computed from
-    model_prob and is what the edge GATE reads -- whether that gate should also
-    move onto the calibrated probability is a separate decision with a
-    different risk profile, and bundling them would make the result
-    unattributable.
-
-    WHY THIS SHRINKS POSITIONS. The map is fitted on a book whose stated 0.432
-    came true 0.344 of the time, so it pulls probabilities toward the realised
-    rate; the edge shrinks and so does the size. That is offset by retiring
-    gap_risk_haircut on the books that qualify (see
-    probability_calibration.haircut_applies), which grows them 1.4x at 0.50 and
-    2.0x at 0.20. The net can go either way, and the point is that it now goes
-    there for a MEASURED reason rather than as the product of two buffers
-    neither of which was fitted to anything.
+    ONE IMPLEMENTATION, TWO CALLERS -- sizing_edge() and admission_edge(). They
+    are separate names because they are separate decisions that happen to share
+    arithmetic: sizing has read this number since P3-6, admission only since
+    ADMIT_ON_CALIBRATED_EDGE, and either could move again without the other.
+    Sharing the body is what stops them drifting on what "calibrated" means.
     """
     # getattr, not attribute access: several callers and the backtest's parity
     # replica pass duck-typed EV stubs that predate these fields, and a sizing
@@ -320,6 +311,53 @@ def sizing_edge(ev_result: EVResult) -> float:
     ):
         return calibrated - ev_result.market_price
     return ev_result.raw_edge
+
+
+def admission_edge(ev_result: EVResult) -> float:
+    """
+    The edge veto 0a2 (config.MIN_ABS_RAW_EDGE) is applied to.
+
+    THE WINNER'S-CURSE CORRECTION, at the one gate that was measured to benefit
+    from it. See config.ADMIT_ON_CALIBRATED_EDGE for the measurement, for why
+    the RANKING deliberately did not move with it, and for the six-day limit on
+    the evidence.
+
+    Falls back to the raw edge when the flag is off, and -- via
+    _calibrated_or_raw_edge -- whenever no map exists for this station and day.
+    A station nothing has measured is not a station with a corrected
+    probability, and refusing it would be a trading change nothing here scored.
+    """
+    if not config.ADMIT_ON_CALIBRATED_EDGE:
+        return ev_result.raw_edge
+    return _calibrated_or_raw_edge(ev_result)
+
+
+def sizing_edge(ev_result: EVResult) -> float:
+    """
+    The edge Kelly should size on: calibrated where a map exists, raw where
+    none does.
+
+    UNCONDITIONAL, and deliberately not routed through
+    config.ADMIT_ON_CALIBRATED_EDGE. P3-6 shipped and was scored on its own
+    terms; reverting the admission change must not silently revert sizing too.
+
+    (This docstring used to say the gate moving onto the calibrated probability
+    was "a separate decision". It was, it has now been made, and it is
+    admission_edge() above -- gate only, ranking unchanged.)
+
+    WHY THIS SHRINKS POSITIONS. The map is fitted on a book whose stated 0.432
+    came true 0.344 of the time, so it pulls probabilities toward the realised
+    rate; the edge shrinks and so does the size. That is offset by retiring
+    gap_risk_haircut on the books that qualify (see
+    probability_calibration.haircut_applies), which grows them 1.4x at 0.50 and
+    2.0x at 0.20. The net can go either way, and the point is that it now goes
+    there for a MEASURED reason rather than as the product of two buffers
+    neither of which was fitted to anything.
+    """
+    # getattr, not attribute access: several callers and the backtest's parity
+    # replica pass duck-typed EV stubs that predate these fields, and a sizing
+    # function that raises on them would turn a missing optional into a dead
+    return _calibrated_or_raw_edge(ev_result)
 
 
 def count_open_positions_for_bucket(
@@ -896,10 +934,25 @@ def evaluate_entry(
     if spread_source in config.LOW_CONFIDENCE_SPREAD_SOURCES:
         min_abs_edge *= config.LOW_CONFIDENCE_EDGE_MULTIPLIER
 
-    if raw_edge is not None and abs(raw_edge) < min_abs_edge:
+    # THE EDGE THIS BAR IS MEASURED AGAINST is the calibrated one wherever a
+    # map exists -- see config.ADMIT_ON_CALIBRATED_EDGE. The model is measurably
+    # 12 points overconfident on exactly the tickets this veto is deciding
+    # about, so applying a noise floor to the uncorrected number was applying it
+    # to the noise. Ranking is NOT moved with it; that was measured separately
+    # and was worse.
+    gate_edge = admission_edge(ev_result)
+    if gate_edge is not None and abs(gate_edge) < min_abs_edge:
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
+        # Name the number that refused, for the same reason
+        # config.entry_bar_label() exists: these lines are read off the journal
+        # when a station stops entering, and "edge 0.001 below minimum" against
+        # a stored raw_edge of 0.132 is unreadable without the basis.
+        basis_note = (
+            f" [bar applied to the calibrated edge: {_calibration_note(ev_result)}]"
+            if gate_edge != raw_edge else ""
+        )
         return _rejected(
-            f"Absolute edge {raw_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note} "
+            f"Absolute edge {gate_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note}{basis_note} "
             f"-- inside book noise, not a tradeable disagreement."
         )
 
