@@ -22,6 +22,9 @@ pure function, and REUSING the parts that are already pure, keeps the
 seam explicit and testable.
 
 Reused verbatim from entry_manager (imported, never copied):
+  - admission_edge()              (which probability veto 0a2 is measured
+                                   against -- falls through to the raw edge
+                                   here, because replay rows carry no map)
   - compute_kelly_fraction()
   - veto_same_bucket_conflicts()
   - apply_portfolio_budget()      (both the per-station and the
@@ -102,6 +105,7 @@ from models import EVResult, EntryDecision
 import probability_calibration
 from entry_manager import (
     _calibration_note,
+    admission_edge,
     compute_kelly_fraction,
     gap_risk_haircut,
     max_plausible_edge_for,
@@ -242,10 +246,22 @@ def evaluate_entry_sim(
     if spread_source in config.LOW_CONFIDENCE_SPREAD_SOURCES:
         min_abs_edge *= config.LOW_CONFIDENCE_EDGE_MULTIPLIER
 
-    if raw_edge is not None and abs(raw_edge) < min_abs_edge:
+    # Same helper as live (config.ADMIT_ON_CALIBRATED_EDGE), so the two cannot
+    # drift on what "calibrated" means. IN PRACTICE THE REPLAY STAYS RAW: the
+    # rows the engine feeds this carry no fitted map, so admission_edge() falls
+    # through to raw_edge. That means a sweep CANNOT score the calibrated gate,
+    # which is a limitation of the replay's inputs and not of this line -- see
+    # tests/test_calibrated_admission.py, which pins it so nobody reads a sweep
+    # as evidence about a rule it never ran.
+    gate_edge = admission_edge(ev)
+    if gate_edge is not None and abs(gate_edge) < min_abs_edge:
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
+        basis_note = (
+            f" [bar applied to the calibrated edge: {_calibration_note(ev)}]"
+            if gate_edge != raw_edge else ""
+        )
         return _rejected(
-            f"Absolute edge {raw_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note} "
+            f"Absolute edge {gate_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note}{basis_note} "
             f"-- inside book noise, not a tradeable disagreement."
         )
 

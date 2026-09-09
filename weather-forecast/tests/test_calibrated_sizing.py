@@ -311,14 +311,19 @@ def test_a_calibrated_probability_below_the_price_sizes_to_nothing():
     ) <= 0
 
 
-def test_the_edge_gate_still_reads_the_raw_edge(monkeypatch):
+def test_the_edge_gate_reads_the_raw_edge_when_admission_is_not_calibrated(monkeypatch):
     """
-    SIZING ONLY, deliberately. Whether the edge GATE should move onto the
-    calibrated probability is a separate decision with a different risk
-    profile, and bundling them makes the result unattributable. An entry whose
-    raw edge clears the bar must still reach sizing even when calibration
-    shrinks it below the bar.
+    P3-6's ORIGINAL BEHAVIOUR, now reachable via config.ADMIT_ON_CALIBRATED_EDGE
+    = False, and kept because that flag is a real revert path.
+
+    P3-6 shipped sizing-only and said the GATE was "a separate decision with a
+    different risk profile". That decision was taken on 2026-09-09 and went the
+    other way -- the model is 12 points overconfident on precisely the tickets
+    this gate admits -- so the shipped default now refuses this entry. See
+    tests/test_calibrated_admission.py for the change and its measurement; this
+    test pins what turning it back off restores.
     """
+    monkeypatch.setattr(config, "ADMIT_ON_CALIBRATED_EDGE", False)
     monkeypatch.setattr(entry_manager.market_client, "estimate_slippage", lambda t, s: 0.0)
     monkeypatch.setattr(entry_manager.market_client, "get_available_depth_usd", lambda t: 100_000.0)
     monkeypatch.setattr(entry_manager, "count_open_positions_for_bucket", lambda *a, **k: 0)
