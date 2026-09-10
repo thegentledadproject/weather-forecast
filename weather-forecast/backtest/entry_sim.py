@@ -44,6 +44,9 @@ from live even when the approve/reject verdict matched.
 
   0. Veto 00   market_price > config.MAX_ENTRY_PRICE      -> reject
   0b. Veto 00b config.entry_price_is_blocked(price)       -> reject
+  0c. Veto 00c config.no_side_prob_is_blocked(side, model_prob)
+               (the NO-side confidence floor, on the RAW model_prob
+               -- see config.NO_SIDE_MIN_MODEL_PROB)      -> reject
   1. Veto 0a   |raw edge| > entry_manager.max_plausible_edge_for(price)
                (the flat MAX_PLAUSIBLE_RAW_EDGE below price 0.50, the
                price-relative headroom ceiling above it)  -> reject
@@ -128,9 +131,10 @@ from ev_engine import best_opportunities  # noqa: F401  (re-exported for tests)
 # one, so it lives in decide_portfolio_entries()/_sim() beside the
 # portfolio budget rather than inside evaluate_entry(). Nothing was added
 # to or removed from the per-candidate sequence below.
-GATE_COUNT = 16  # 12 until 2026-08-09 (Veto 00, MAX_ENTRY_PRICE);
+GATE_COUNT = 17  # 12 until 2026-08-09 (Veto 00, MAX_ENTRY_PRICE);
                  # 16 from 2026-08-27 (Veto 00b, ENTRY_PRICE_BLOCK_BAND);
-                 # 13 -> 15 on 2026-08-25 (Veto 0b2, the opposite-side lock)
+                 # 13 -> 15 on 2026-08-25 (Veto 0b2, the opposite-side lock);
+                 # 17 from 2026-09-09 (Veto 00c, NO_SIDE_MIN_MODEL_PROB)
 
 
 def _maturity_for(station_icao: str, station_maturity: Optional[str]) -> str:
@@ -225,6 +229,18 @@ def evaluate_entry_sim(
         return _rejected(
             f"Entry price {ev.market_price:.3f} is inside the blocked "
             f"{low:.2f}-{high:.2f} band (ENTRY_PRICE_BLOCK_BAND)."
+        )
+
+    # --- Gate 0c: Veto 00c, NO-side confidence floor ---------------------
+    # config.no_side_prob_is_blocked() rather than a restated comparison, for
+    # the same reason Veto 00b above defers to config: the boundary semantics
+    # (>=, and the raw-not-calibrated input) must not be able to differ
+    # between live and replay.
+    if config.no_side_prob_is_blocked(ev.side, ev.model_prob):
+        return _rejected(
+            f"model_prob {ev.model_prob:.3f} is below the NO-side confidence floor "
+            f"({config.NO_SIDE_MIN_MODEL_PROB:.2f}, NO_SIDE_MIN_MODEL_PROB) -- the model is barely "
+            f"better than a coin flip here and this cohort loses held to settlement."
         )
 
     # --- Gate 1: Veto 0a, edge plausibility ------------------------------

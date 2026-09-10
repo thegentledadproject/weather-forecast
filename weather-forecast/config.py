@@ -2063,6 +2063,91 @@ def entry_price_is_blocked(price) -> bool:
     low, high = band
     return low <= price < high
 
+
+# THE NO-SIDE CONFIDENCE FLOOR (Veto 00c). Below this stated model_prob the book
+# does not buy NO at all. None disables the gate entirely.
+#
+# THE MEASUREMENT, 2026-09-09, over 715 settled rows (2026-08-06..09-08,
+# $5,053.75 staked) scored held-to-settlement through cohort_monitor. The model
+# overstates its own win rate by +10.7 points on the traded sample: mean
+# model_prob 0.445 against an actual win rate of 0.338. The market, on the same
+# trades, is off by -2.7 points and in our favour. So the model claims an edge
+# of +0.134 and truly has +0.027 -- roughly FIVE TIMES the edge it has -- and
+# model_prob exceeds the realised win rate in 11 of 12 side-by-decile cells.
+#
+# The overstatement concentrates on the NO side at low confidence, where a
+# claimed ~55% is nearer a coin flip and the book pays spread and fee to take
+# it. Refusing NO below 0.70:
+#
+#     book (held)              n     staked   return
+#     baseline               559     $3,295   +7.7%   CI [-6.5%, +22.3%]
+#     NO floor at 0.70       449     $2,533  +17.2%   CI [+1.7%, +33.6%]
+#     the trades it cuts     110       $762  -23.9%   CI [-45.3%, -1.7%]
+#
+# Station-day clustered bootstrap on the improvement: median +9.5 pts, 90% CI
+# [+4.5, +14.7], P(improves) = 1.00.
+#
+# WHY 0.65 AND NOT THE SWEPT PEAK OF 0.70. Peaks of a swept parameter move when
+# data arrives. 0.65 still improves BOTH disjoint windows (Aug 6-25 +17.2% ->
+# +19.3%; Aug 26-Sep 8 +3.8% -> +11.8%) and cuts 74 trades rather than 110. The
+# ~3 points given up buys the robustness, and this is the standard the band
+# above set: act only where the ordering holds per station AND across windows.
+#
+# THE WORST SINGLE CELL, for the mechanism: NO bought at price 0.25-0.40 (n=37,
+# $234). Model says 52%, market says 34.5%, truth is 19%. Held -71.5%, CI
+# [-91%, -42%], negative in both months. Mean model_prob there is 0.522, so
+# this floor removes nearly all of it. Same failure the spread-floor work
+# named: the model underprices the WINNING bucket and therefore sells the right
+# bucket as NO.
+#
+# NOT REDUNDANT WITH ADMIT_ON_CALIBRATED_EDGE, which shipped the same day and
+# targets the same root cause. Measured rather than assumed: of the 74 trades
+# this floor refuses, 66 -- 89% -- are STILL admitted by that gate, and those
+# 66 are worth -28.8% held on $432.39. The correction is far too small here,
+# mapping a mean model_prob of 0.553 to 0.524 and leaving a calibrated edge of
+# +0.121 against a MIN_ABS_RAW_EDGE bar of 0.03. The two rules are
+# complementary, and each is a single flag, so either reverts alone.
+#
+# PREDICTED BLAST RADIUS, recorded before shipping so it can be checked: 49 of
+# 254 September entries refused (19.3%), which is 40% of all NO-side entries.
+# It reaches live money -- WSSS is live-armed and all 3 of its NO entries in
+# the last 7 days sit below 0.65.
+#
+# HONEST ABOUT THE EVIDENCE. The axis was chosen after inspecting the data; the
+# two-window split is the mitigation and it holds in both, but this is not a
+# true out-of-sample result. $3,295 of the $5,054 is paper and live is $82, so
+# it is a paper-book conclusion applied to a live gate. RE-SCORE ~2026-09-23,
+# and if it has not helped by then set this None rather than tuning it.
+NO_SIDE_MIN_MODEL_PROB = 0.65
+
+
+def no_side_prob_is_blocked(side, model_prob) -> bool:
+    """
+    Whether NO_SIDE_MIN_MODEL_PROB forbids buying NO at this stated probability.
+
+    THE RAW model_prob, DELIBERATELY -- not the calibrated one that
+    ADMIT_ON_CALIBRATED_EDGE moved veto 0a2 onto. On the pooled map (30 of 35
+    stations) claims of 0.55, 0.60 and 0.65 ALL map to 0.489: a flat step. The
+    calibrated probability carries no information across exactly the range this
+    gate discriminates in, so reading it would be gating on a constant. That
+    gate tests the model's EDGE; this one tests its CONFIDENCE, and they need
+    different inputs.
+
+    Boundary is >=, so a 0.65 print is admitted -- the same half-open
+    convention entry_price_is_blocked() uses, and the one the sweep scored.
+
+    An unknown probability is NOT blocked, matching entry_price_is_blocked().
+    Every other gate here already fails closed on its own terms, and failing
+    closed twice would turn one missing field into a silent second veto whose
+    reason names the wrong thing. Verified safe when this shipped: model_prob
+    was NULL on 0 of 254 September rows (171 of 506 August rows are the
+    pre-backfill era).
+    """
+    floor = NO_SIDE_MIN_MODEL_PROB
+    if floor is None or model_prob is None or side != "NO":
+        return False
+    return model_prob < floor
+
 # After this many stop-loss exits on the same (station, date, bucket, side),
 # entries there are blocked for the rest of the day. The per-bucket open-
 # position cap stops STACKING but has no memory of exits, so on 2026-08-03
