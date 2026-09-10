@@ -172,6 +172,7 @@ _REASON_PREFIXES: Tuple[Tuple[str, str], ...] = (
     # is why the AST test below scans both modules.
     ("Collection-only", "collection_only"),
     ("Entry price", "entry_price_ceiling"),
+    ("model_prob", "no_side_confidence_floor"),
     ("Absolute edge", "edge_immaterial"),
     ("Open positions unreadable", "open_positions_unreadable"),
     ("Per-bucket cap", "per_bucket_cap"),

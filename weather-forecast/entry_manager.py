@@ -892,6 +892,25 @@ def evaluate_entry(
             f"{low:.2f}-{high:.2f} band (ENTRY_PRICE_BLOCK_BAND)."
         )
 
+    # Veto 00c: the NO-side confidence floor. A property of the SIGNAL rather
+    # than of the edge, so it sits with the instrument gates above rather than
+    # among the edge-quality ones below -- no size and no price rescues a NO
+    # bet the model itself is barely more than coin-flip confident in. Reads
+    # the RAW model_prob on purpose; see config.no_side_prob_is_blocked().
+    if config.no_side_prob_is_blocked(ev_result.side, ev_result.model_prob):
+        print(
+            f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: model_prob "
+            f"{ev_result.model_prob:.3f} is below the {config.NO_SIDE_MIN_MODEL_PROB:.2f} NO-side "
+            f"confidence floor (config.NO_SIDE_MIN_MODEL_PROB). This book's stated probabilities run "
+            f"+10.7 points hot on the trades it takes, and NO entries below the floor returned -23.9% "
+            f"held to settlement."
+        )
+        return _rejected(
+            f"model_prob {ev_result.model_prob:.3f} is below the NO-side confidence floor "
+            f"({config.NO_SIDE_MIN_MODEL_PROB:.2f}, NO_SIDE_MIN_MODEL_PROB) -- the model is barely "
+            f"better than a coin flip here and this cohort loses held to settlement."
+        )
+
     # Veto 0a: edge plausibility. An edge this large on a liquid weather
     # market is bad data, not alpha -- reject before it can be sized.
     raw_edge = ev_result.raw_edge
