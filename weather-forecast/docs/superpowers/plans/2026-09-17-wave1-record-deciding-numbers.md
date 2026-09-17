@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+**Status:** COMPLETE — merged 0dcc5f6, deployed 2026-09-17 17:03 UTC, 1757 tests.
+
 **Goal:** Persist, for every entry decision the daemon makes (approved or not, primary or paper-shadow) and for every executor refusal, the exact numbers that decided it — without changing a single decision.
 **Architecture:** Five nullable columns on `positions` plus a new append-only `entry_decisions` table, both migrated through `storage._connect()`'s idempotent column-list pattern; `entry_manager` stamps a `rule_id` and the four deciding numbers on every `EntryDecision` return site (mirrored in `backtest/entry_sim.py`); `scheduler._run_full_cycle` records the decisions best-effort before calling the executor, and for live stations re-runs the same cycle as a read-only paper twin through an explicit `execution_mode="paper"` override parameter (never by mutating `executor.EXECUTION_MODE`); executor refusals become `live_order_attempts` rows with `outcome='refused'` that the daily order cap ignores.
 **Tech Stack:** Python 3.12, sqlite3, pytest; no numpy/scipy (not on the box)
@@ -49,7 +51,7 @@
 **Files:** Modify `storage.py` (CREATE TABLE positions 217-245; ALTER column list 296-314; after the `ix_loa_ts` index at 375) / Test `tests/test_wave1_schema.py`
 **Interfaces:** Consumes: nothing new / Produces: columns `positions.calibrated_prob REAL, calibration_source TEXT, admission_edge REAL, sizing_edge REAL, kelly_size_preclamp_usd REAL`; table `entry_decisions` with columns in the exact order of `storage.ENTRY_DECISION_COLUMNS` (defined here, used by Task 5); indexes `ix_ed_cycle`, `ix_ed_pair`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave1_schema.py
@@ -166,9 +168,9 @@ def test_entry_decisions_has_the_pairing_index(tmp_path, monkeypatch):
     assert {"ix_ed_cycle", "ix_ed_pair"} <= names
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_schema.py -v` / Expected: FAIL with `AttributeError: module 'storage' has no attribute 'ENTRY_DECISION_COLUMNS'` and `assert 'calibrated_prob' in cols`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_schema.py -v` / Expected: FAIL with `AttributeError: module 'storage' has no attribute 'ENTRY_DECISION_COLUMNS'` and `assert 'calibrated_prob' in cols`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 storage.py, module level, directly above `def _connect() -> sqlite3.Connection:` (line 189):
 
@@ -287,9 +289,9 @@ storage.py, directly after `conn.execute("CREATE INDEX IF NOT EXISTS ix_loa_ts O
     )
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_schema.py -v` / Expected: PASS (5 passed)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1681
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_schema.py -v` / Expected: PASS (5 passed)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1681
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -312,7 +314,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:** Modify `models.py` (Position after `net_ev_at_size` at 356-358; EntryDecision after `min_net_ev` at 532), `storage.py` (`_row_to_position` 990-1032; `open_position` INSERT 1056-1108), `executor.py` (`_position` closure inside `open_position`, 828-870) / Test `tests/test_wave1_deciding_numbers_persisted.py`
 **Interfaces:** Consumes: Task 1 columns / Produces: `EntryDecision.calibrated_prob: Optional[float]`, `.calibration_source: str = "uncalibrated"`, `.admission_edge: Optional[float]`, `.sizing_edge: Optional[float]`, `.kelly_size_preclamp_usd: Optional[float]`, `.rule_id: str = "unspecified"`; `Position.calibrated_prob`, `.calibration_source: Optional[str]`, `.admission_edge`, `.sizing_edge`, `.kelly_size_preclamp_usd` (all default None)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave1_deciding_numbers_persisted.py
@@ -429,9 +431,9 @@ def test_executor_copies_the_five_fields_onto_the_position(monkeypatch):
     assert stored.net_ev_at_size == pytest.approx(0.08)
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_deciding_numbers_persisted.py -v` / Expected: FAIL with `TypeError: Position.__init__() got an unexpected keyword argument 'calibrated_prob'` (and the same for EntryDecision)
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_deciding_numbers_persisted.py -v` / Expected: FAIL with `TypeError: Position.__init__() got an unexpected keyword argument 'calibrated_prob'` (and the same for EntryDecision)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 models.py `Position` — old (line 356-358):
 ```python
@@ -587,9 +589,9 @@ new:
         )
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_deciding_numbers_persisted.py -v` / Expected: PASS (6 passed)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1687
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_deciding_numbers_persisted.py -v` / Expected: PASS (6 passed)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1687
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -635,7 +637,7 @@ Rule ids by site (spec 1b's set, plus three the spec's prose implies but its lis
 | apply_portfolio_budget exhausted | `budget_exhausted` |
 | apply_portfolio_budget scaled | `budget_scaled` |
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tests/test_gate_census.py`:
 
@@ -839,9 +841,9 @@ def test_budget_sites_relabel_but_keep_the_numbers(monkeypatch):
     assert not exhausted[0].approved and exhausted[0].rule_id == "budget_exhausted"
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_gate_census.py tests/test_wave1_deciding_numbers_carried.py -v` / Expected: FAIL with `AttributeError: module 'entry_manager' has no attribute 'ENTRY_RULE_IDS'` and `decision site has no rule_id`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_gate_census.py tests/test_wave1_deciding_numbers_carried.py -v` / Expected: FAIL with `AttributeError: module 'entry_manager' has no attribute 'ENTRY_RULE_IDS'` and `decision site has no rule_id`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 entry_manager.py — after `max_plausible_edge_for = config.max_plausible_edge_for` (line 120):
 
@@ -1133,9 +1135,9 @@ from entry_manager import (
 ```
 `evaluate_entry_sim` — after `maturity = _maturity_for(station_icao, station_maturity)` add `deciding = deciding_numbers(ev)`; `def _rejected(reason: str, rule_id: str)` with `**deciding, rule_id=rule_id,` after `min_net_ev=min_net_ev,`; every `_rejected(...)` call gets the same `rule_id="..."` as the live site it mirrors — gate 0 → `"00"`, 0b → `"00b"`, 0c → `"00c"`, 1 → `"0a"`, 2 → `"0a2"`, 3 → `"0b"`, 4 → `"0b"`, 4b → `"0b2"`, 4c → `"0b2"`, 5 → `"0c"`, 6 → `"0c"`; gate 2's `gate_edge = admission_edge(ev)` becomes `gate_edge = deciding["admission_edge"]`; gate 7 adds `**deciding, rule_id="kelly_nonpositive",`; after the haircut block add `preclamp_usd = size_usd`; gates 8-12 add `**deciding, kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd), rule_id=...` with `depth`, `size_floor`, `slippage`, `net_ev_bar`, `approved` (gate 8 passes `preclamp_size_usd(preclamp_usd, None)` since `depth_usd` is None there). `GATE_COUNT` stays 17.
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_gate_census.py tests/test_wave1_deciding_numbers_carried.py tests/test_parity_entry.py -v` / Expected: PASS (the parity test is the proof that live and sim stamp identical values at every gate)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1701
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_gate_census.py tests/test_wave1_deciding_numbers_carried.py tests/test_parity_entry.py -v` / Expected: PASS (the parity test is the proof that live and sim stamp identical values at every gate)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1701
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1158,7 +1160,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:** Modify `executor.py` (`_resolved_size_ok` signature 261 and the `net_ev = ...` line 377; `_position` closure 828; `_open_via_order_path` 972, 1024-1028, 1051-1057) / Test `tests/test_wave1_resolved_net_ev.py`
 **Interfaces:** Consumes: Task 2 / Produces: `executor._resolved_size_ok(spec, decision, out: Optional[dict] = None) -> tuple` writing `out["net_ev_at_size"]` when it computes one; `make_position(..., net_ev_at_size=None)` closure parameter (Task 6 reuses `out`)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave1_resolved_net_ev.py
@@ -1266,9 +1268,9 @@ def test_resolved_size_ok_still_works_without_out(monkeypatch):
     assert ok and "net EV" in note
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_resolved_net_ev.py -v` / Expected: FAIL with `TypeError: _resolved_size_ok() got an unexpected keyword argument 'out'` and `assert 0.30 == approx(0.28...)`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_resolved_net_ev.py -v` / Expected: FAIL with `TypeError: _resolved_size_ok() got an unexpected keyword argument 'out'` and `assert 0.30 == approx(0.28...)`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 executor.py — old:
 ```python
@@ -1363,9 +1365,9 @@ new:
     ))
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_resolved_net_ev.py tests/test_live_execution.py tests/test_entry_bar_basis.py -v` / Expected: PASS
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1705
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_resolved_net_ev.py tests/test_live_execution.py tests/test_entry_bar_basis.py -v` / Expected: PASS
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1705
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1386,7 +1388,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:** Modify `storage.py` (new functions after `load_live_order_attempts`, end of file), `scheduler.py` (new helpers after `_last_collection_ts` at 96; `_run_full_cycle` 380-411) / Test `tests/test_wave1_entry_decisions_recorded.py`
 **Interfaces:** Consumes: `ENTRY_DECISION_COLUMNS` (Task 1), Task 3 fields / Produces: `storage.record_entry_decisions(decisions, *, book: str, cycle_ts: str, config_sha: Optional[str]) -> int`, `storage.load_entry_decisions(book: Optional[str] = None, cycle_ts: Optional[str] = None, limit: int = 1000) -> List[dict]`, `scheduler._config_sha() -> Optional[str]`, `scheduler._record_entry_decisions(decisions, station_icao, book, cycle_ts) -> None` (Task 8 reuses it), `cycle_ts`/`book` locals in `_run_full_cycle`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave1_entry_decisions_recorded.py
@@ -1584,9 +1586,9 @@ def test_record_and_load_round_trip(temp_db):
     assert storage.record_entry_decisions([], book="paper", cycle_ts="x", config_sha=None) == 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_entry_decisions_recorded.py -v` / Expected: FAIL with `AttributeError: module 'storage' has no attribute 'record_entry_decisions'`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_entry_decisions_recorded.py -v` / Expected: FAIL with `AttributeError: module 'storage' has no attribute 'record_entry_decisions'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 storage.py, appended at the end of the file:
 
@@ -1728,9 +1730,9 @@ new:
                     executor.open_position(decision)
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_entry_decisions_recorded.py -v` / Expected: PASS (6 passed)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1711
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_entry_decisions_recorded.py -v` / Expected: PASS (6 passed)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1711
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1774,7 +1776,7 @@ Refusal sites and codes (executor.py at HEAD):
 
 Line 1040 (unfilled order) is already recorded by `_record_attempt` as `killed`/`not_submitted` and is not a refusal. Rows are written only when the station's mode is `live` — the table is the live audit trail and `_record_attempt` has the same scope.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave1_refusal_rows.py
@@ -2007,9 +2009,9 @@ def test_refused_rows_do_not_count_toward_the_daily_order_cap(tmp_path, monkeypa
     assert len(storage.load_live_order_attempts()) == 3
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_refusal_rows.py -v` / Expected: FAIL with `assert 0 == 1` for every parametrised site, `AttributeError` for `could not record the refusal`, and `assert 3 == 2` on the cap test
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_refusal_rows.py -v` / Expected: FAIL with `assert 0 == 1` for every parametrised site, `AttributeError` for `could not record the refusal`, and `assert 3 == 2` on the cap test
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 storage.py `count_live_order_attempts` — the two queries, old:
 ```python
@@ -2152,9 +2154,9 @@ executor.py `_open_via_order_path` — the five sites, old → new:
             return
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_refusal_rows.py tests/test_live_execution.py -v` / Expected: PASS (20 passed in the new file)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1731
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_refusal_rows.py tests/test_live_execution.py -v` / Expected: PASS (20 passed in the new file)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1731
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -2177,7 +2179,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:** Modify `entry_manager.py` (`_execution_mode` 123, `_candidate_is_paper` 128, `_book_has_stop` 145, `live_size_cap_usd` 158, `evaluate_entry` signature 828 and lines 982/1143/1164, `decide_entries` 1313, `decide_portfolio_entries` 1543/1571), `ev_engine.py` (new function after `compute_ev_table`, before `book_dislocation` at 393) / Test `tests/test_wave1_mode_override.py`
 **Interfaces:** Consumes: Task 3 / Produces: `entry_manager.evaluate_entry(ev_result, token_id, min_net_ev=0.15, execution_mode: Optional[str] = None)`, `entry_manager.decide_entries(ev_results, token_map, min_net_ev=0.15, execution_mode=None)`, `entry_manager.decide_portfolio_entries(ev_results, token_map, min_net_ev=0.15, forecast_sources=None, execution_mode=None)`, the three helpers with `execution_mode: Optional[str] = None`; `ev_engine.reprice_for_mode(results: List[EVResult], execution_mode: Optional[str]) -> List[EVResult]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave1_mode_override.py
@@ -2325,9 +2327,9 @@ def test_reprice_round_trips():
     assert [dataclasses.asdict(r) for r in back] == [dataclasses.asdict(r) for r in live]
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_mode_override.py -v` / Expected: FAIL with `TypeError: _execution_mode() takes 1 positional argument but 2 were given` and `AttributeError: module 'ev_engine' has no attribute 'reprice_for_mode'`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_mode_override.py -v` / Expected: FAIL with `TypeError: _execution_mode() takes 1 positional argument but 2 were given` and `AttributeError: module 'ev_engine' has no attribute 'reprice_for_mode'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 entry_manager.py — old (123-164):
 ```python
@@ -2449,9 +2451,9 @@ def reprice_for_mode(results: List[EVResult], execution_mode: Optional[str]) -> 
     return out
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_mode_override.py tests/test_parity_entry.py tests/test_haircut_on_a_stopless_book.py tests/test_live_execution.py -v` / Expected: PASS
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1738
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_mode_override.py tests/test_parity_entry.py tests/test_haircut_on_a_stopless_book.py tests/test_live_execution.py -v` / Expected: PASS
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1738
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -2477,7 +2479,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 The signature carries the primary pass's `ev_run` (its `ev_results` and `token_map`) rather than re-discovering: the shadow is "the same cycle" only if it prices the same book, and `run_for_station_with_map` would write a second set of price snapshots.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave1_shadow_pass.py
@@ -2671,9 +2673,9 @@ def test_shadow_reads_the_paper_book_and_restores_the_log_dedup_sets(live_cycle,
     assert entry_manager._bucket_cap_vetoes_logged == before
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_shadow_pass.py -v` / Expected: FAIL with `AttributeError: module 'scheduler' has no attribute '_run_shadow_pass'` and `assert 0 == 2` for the shadow rows
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_shadow_pass.py -v` / Expected: FAIL with `AttributeError: module 'scheduler' has no attribute '_run_shadow_pass'` and `assert 0 == 2` for the shadow rows
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 scheduler.py — new function after `_record_entry_decisions`:
 
@@ -2789,9 +2791,9 @@ new:
                 print(f"[scheduler] {station_icao}: paper shadow pass failed: {exc} -- primary decisions unaffected.")
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_shadow_pass.py tests/test_wave1_entry_decisions_recorded.py tests/test_cycle_calibration.py tests/test_exit_snapshot_capture.py -v` / Expected: PASS
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1746
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_shadow_pass.py tests/test_wave1_entry_decisions_recorded.py tests/test_cycle_calibration.py tests/test_exit_snapshot_capture.py -v` / Expected: PASS
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1746
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -2815,7 +2817,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 **Files:** Create `wave1_falsifier.py` / Test `tests/test_wave1_falsifier.py`
 **Interfaces:** Consumes: `entry_decisions`, `positions` (Tasks 1-8) / Produces: `wave1_falsifier.run(db_path: str, deploy_ts: str) -> dict` with keys `refusals_by_cycle: list[tuple[str, int]]`, `refusals_total: int`, `calibration_gap_rows: int`, `paper_shadow_rows: int`, `entries_per_station_day_before: dict[str, dict[str, int]]`, `entries_per_station_day_after: dict[str, dict[str, int]]`; CLI `python wave1_falsifier.py --deploy-ts 2026-09-19T05:00:00+00:00 [--db PATH]`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave1_falsifier.py
@@ -2899,9 +2901,9 @@ def test_main_prints_every_check(db, capsys):
         assert label in out
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_falsifier.py -v` / Expected: FAIL with `ModuleNotFoundError: No module named 'wave1_falsifier'`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave1_falsifier.py -v` / Expected: FAIL with `ModuleNotFoundError: No module named 'wave1_falsifier'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 # wave1_falsifier.py
@@ -3020,9 +3022,9 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_falsifier.py -v` / Expected: PASS (3 passed)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1749
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave1_falsifier.py -v` / Expected: PASS (3 passed)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1749
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
