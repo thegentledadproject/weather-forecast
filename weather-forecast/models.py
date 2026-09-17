@@ -351,6 +351,18 @@ class Position:
     raw_edge: Optional[float] = None        # EVResult.raw_edge -- model_prob - market_price
     net_ev_at_size: Optional[float] = None  # EntryDecision.net_ev_at_size -- net EV per dollar
                                               # re-checked at the size actually ordered
+    # WAVE 1 (2026-09-17): WHAT THE GATES ACTUALLY COMPARED. model_prob and
+    # raw_edge above stay raw. These five are copied off the EntryDecision by
+    # executor.open_position, never recomputed, and are None on every row
+    # written before they existed (not backfilled: the calibration map that
+    # would have applied then is gone). calibration_source is None on those
+    # rows and "uncalibrated" on a new row that had no map -- different facts.
+    calibrated_prob: Optional[float] = None          # P3-6 map output, sizing/admission input
+    calibration_source: Optional[str] = None         # the map tier, as probability_calibration names it
+    admission_edge: Optional[float] = None           # the edge veto 0a2 compared
+    sizing_edge: Optional[float] = None              # the edge Kelly sized on
+    kelly_size_preclamp_usd: Optional[float] = None  # the paper-equivalent stake: recommended size
+                                                     # before the live $1.00 clamp and the exchange bump
 
     def __post_init__(self):
         if self.high_water_mark is None:
@@ -521,6 +533,24 @@ class EntryDecision:
     # so has no bar to carry (it also leaves net_ev_at_size None, which
     # skips the re-check that reads this).
     min_net_ev: Optional[float] = None
+    # WAVE 1 (2026-09-17): the deciding numbers, set at every return site in
+    # entry_manager.evaluate_entry / apply_portfolio_budget and mirrored by
+    # backtest/entry_sim.py. Persisted to entry_decisions every cycle and,
+    # for a fill, onto Position. See entry_manager.deciding_numbers().
+    calibrated_prob: Optional[float] = None
+    calibration_source: str = "uncalibrated"
+    admission_edge: Optional[float] = None
+    sizing_edge: Optional[float] = None
+    # recommended_size_usd BEFORE the live $1.00 clamp and before the
+    # exchange 5-share bump -- what the paper path would have staked. None
+    # when nothing was sized (a pre-sizing veto).
+    kelly_size_preclamp_usd: Optional[float] = None
+    # A stable code for WHICH rule produced this decision -- one of
+    # entry_manager.ENTRY_RULE_IDS. `reason` stays the prose beside it;
+    # nothing parses prose any more. "unspecified" is the value for a
+    # decision built outside the gate chain (manual_trigger), and a census
+    # test asserts no gate site ever leaves it there.
+    rule_id: str = "unspecified"
 
 
 @dataclass

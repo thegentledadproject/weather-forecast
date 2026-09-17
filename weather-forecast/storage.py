@@ -1099,6 +1099,11 @@ def _row_to_position(r) -> Position:
     exit_blocked_reason = r[22] if len(r) > 22 else None
     entry_fee_per_share = r[23] if len(r) > 23 else None
     trigger_price = r[24] if len(r) > 24 else None
+    calibrated_prob = r[25] if len(r) > 25 else None
+    calibration_source = r[26] if len(r) > 26 else None
+    admission_edge = r[27] if len(r) > 27 else None
+    sizing_edge = r[28] if len(r) > 28 else None
+    kelly_size_preclamp_usd = r[29] if len(r) > 29 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -1125,6 +1130,11 @@ def _row_to_position(r) -> Position:
         exit_blocked_reason=exit_blocked_reason,
         entry_fee_per_share=entry_fee_per_share,
         trigger_price=trigger_price,
+        calibrated_prob=calibrated_prob,
+        calibration_source=calibration_source,
+        admission_edge=admission_edge,
+        sizing_edge=sizing_edge,
+        kelly_size_preclamp_usd=kelly_size_preclamp_usd,
     )
 
 
@@ -1165,8 +1175,11 @@ def open_position(position: Position) -> None:
                 exit_price, exit_time, exit_reason, token_id, is_paper,
                 size_shares, execution_mode, order_id,
                 model_prob, raw_edge, net_ev_at_size, entry_bid,
-                exit_blocked_reason, entry_fee_per_share
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                exit_blocked_reason, entry_fee_per_share,
+                calibrated_prob, calibration_source, admission_edge,
+                sizing_edge, kelly_size_preclamp_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?)
             """,
             (
                 position.position_id,
@@ -1199,6 +1212,11 @@ def open_position(position: Position) -> None:
                 # real fee function; the backfill's inlined literal exists only
                 # for rows written before this column did.
                 _entry_fee_for(position),
+                position.calibrated_prob,
+                position.calibration_source,
+                position.admission_edge,
+                position.sizing_edge,
+                position.kelly_size_preclamp_usd,
             ),
         )
 

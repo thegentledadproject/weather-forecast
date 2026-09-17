@@ -862,6 +862,13 @@ def open_position(decision: EntryDecision) -> None:
             raw_edge=decision.raw_edge,
             net_ev_at_size=decision.net_ev_at_size,
             exit_blocked_reason=exit_blocked_reason,
+            # WAVE 1: the deciding numbers, copied for the same reason
+            # model_prob is -- see Position.calibrated_prob.
+            calibrated_prob=decision.calibrated_prob,
+            calibration_source=decision.calibration_source,
+            admission_edge=decision.admission_edge,
+            sizing_edge=decision.sizing_edge,
+            kelly_size_preclamp_usd=decision.kelly_size_preclamp_usd,
         )
 
     if mode == "manual_review":
