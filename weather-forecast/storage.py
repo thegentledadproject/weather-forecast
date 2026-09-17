@@ -1464,25 +1464,47 @@ def record_entry_decisions(
     """
     Append one entry_decisions row per EntryDecision. Returns the row count.
 
-    Column order is ENTRY_DECISION_COLUMNS, and the values are read straight
-    off the decision -- copied, never recomputed, for the same reason
-    Position.model_prob is. The caller (scheduler._record_entry_decisions)
-    owns the try/except: this function raises on a storage error so the
-    caller can log it, and the caller must never let it block a trade.
+    Each row is assembled as a dict KEYED BY COLUMN NAME, not a
+    hand-ordered positional tuple -- a hand-ordered tuple silently tracks
+    ENTRY_DECISION_COLUMNS only as long as nobody reorders either list, and
+    a reorder of one without the other would write correct-looking values
+    into the wrong columns with no error. cycle_ts/station_icao/book/
+    min_net_ev/config_sha/target_date (needs .isoformat(), not a bare
+    date) are not plain 1:1 EntryDecision attributes-by-name in the
+    caller's hands, so they are set explicitly; every other column is read
+    off the decision BY NAME via getattr(). Any ENTRY_DECISION_COLUMNS
+    entry that ends up with neither -- e.g. a new column added to the
+    table without a matching EntryDecision field -- raises here rather
+    than writing NULL. The caller (scheduler._record_entry_decisions)
+    owns the try/except: this function raises on a storage error, or on a
+    missing column, so the caller can log it, and the caller must never
+    let it block a trade.
     """
     if not decisions:
         return 0
-    rows = [
-        (
-            cycle_ts, d.station_icao, d.target_date.isoformat(), d.bucket_c, d.side, book,
-            int(bool(d.approved)), d.rule_id, d.reason,
-            d.entry_price, d.entry_bid, d.model_prob, d.calibrated_prob, d.calibration_source,
-            d.raw_edge, d.admission_edge, d.sizing_edge, d.net_ev_at_size,
-            d.kelly_size_preclamp_usd, d.recommended_size_usd, d.min_net_ev,
-            d.station_maturity, config_sha,
-        )
-        for d in decisions
-    ]
+    rows = []
+    for d in decisions:
+        row = {
+            "cycle_ts": cycle_ts,
+            "station_icao": d.station_icao,
+            "book": book,
+            "min_net_ev": d.min_net_ev,
+            "config_sha": config_sha,
+            "target_date": d.target_date.isoformat(),
+        }
+        for col in ENTRY_DECISION_COLUMNS:
+            if col in row:
+                continue
+            if not hasattr(d, col):
+                raise ValueError(
+                    f"entry_decisions column {col!r} has no matching EntryDecision "
+                    f"field -- ENTRY_DECISION_COLUMNS and EntryDecision have drifted"
+                )
+            row[col] = getattr(d, col)
+        missing = [c for c in ENTRY_DECISION_COLUMNS if c not in row]
+        if missing:
+            raise ValueError(f"entry_decisions row missing column(s): {missing}")
+        rows.append(tuple(row[c] for c in ENTRY_DECISION_COLUMNS))
     placeholders = ", ".join("?" for _ in ENTRY_DECISION_COLUMNS)
     with _db() as conn:
         conn.executemany(

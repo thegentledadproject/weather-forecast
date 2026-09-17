@@ -179,18 +179,66 @@ def test_every_deciding_field_on_entry_decision_has_a_column(temp_db):
 
 
 def test_record_and_load_round_trip(temp_db):
-    d = EntryDecision(
+    """
+    Every column in ENTRY_DECISION_COLUMNS is value-asserted against its
+    source -- either the EntryDecision field it mirrors or the explicit
+    record_entry_decisions() argument -- for two decisions: one with every
+    field set to a distinct non-default value, one left at the
+    dataclass's defaults. This is the field-parity check for VALUES, not
+    just column names: it is what would catch record_entry_decisions()
+    writing a correct-looking row into the wrong columns after a reorder.
+    """
+    d_full = EntryDecision(
         station_icao=STATION, target_date=TARGET, bucket_c=32, side="NO",
-        kelly_fraction_raw=0.0, kelly_fraction_applied=0.0, recommended_size_usd=0.0,
-        available_depth_usd=None, slippage_at_size_pct=None, net_ev_at_size=None,
+        kelly_fraction_raw=0.0, kelly_fraction_applied=0.0, recommended_size_usd=12.5,
+        available_depth_usd=None, slippage_at_size_pct=None, net_ev_at_size=0.05,
         approved=False, reason="model_prob below floor", station_maturity="mature",
         entry_price=0.60, entry_bid=0.58, model_prob=0.60, raw_edge=0.0, min_net_ev=0.15,
-        rule_id="00c",
+        rule_id="00c", calibrated_prob=0.42, calibration_source="isotonic",
+        admission_edge=0.11, sizing_edge=0.09, kelly_size_preclamp_usd=20.0,
     )
-    n = storage.record_entry_decisions([d], book="paper_shadow", cycle_ts="2026-09-17T21:00:00+00:00", config_sha=None)
-    assert n == 1
-    (row,) = storage.load_entry_decisions(book="paper_shadow")
-    assert row["rule_id"] == "00c" and row["approved"] == 0 and row["side"] == "NO"
-    assert row["calibration_source"] == "uncalibrated" and row["calibrated_prob"] is None
+    d_defaults = EntryDecision(
+        station_icao=STATION, target_date=TARGET, bucket_c=33, side="YES",
+        kelly_fraction_raw=0.02, kelly_fraction_applied=0.01, recommended_size_usd=5.0,
+        available_depth_usd=500.0, slippage_at_size_pct=0.01, net_ev_at_size=0.2,
+        approved=True, reason="approved", station_maturity="exploratory",
+    )
+    n = storage.record_entry_decisions(
+        [d_full, d_defaults], book="paper_shadow",
+        cycle_ts="2026-09-17T21:00:00+00:00", config_sha="deadbeef",
+    )
+    assert n == 2
+    rows = {r["bucket_c"]: r for r in storage.load_entry_decisions(book="paper_shadow")}
+
+    expected_full = {
+        "cycle_ts": "2026-09-17T21:00:00+00:00", "station_icao": STATION,
+        "target_date": "2026-09-17", "bucket_c": 32, "side": "NO", "book": "paper_shadow",
+        "approved": 0, "rule_id": "00c", "reason": "model_prob below floor",
+        "entry_price": 0.60, "entry_bid": 0.58, "model_prob": 0.60,
+        "calibrated_prob": 0.42, "calibration_source": "isotonic",
+        "raw_edge": 0.0, "admission_edge": 0.11, "sizing_edge": 0.09,
+        "net_ev_at_size": 0.05, "kelly_size_preclamp_usd": 20.0,
+        "recommended_size_usd": 12.5, "min_net_ev": 0.15,
+        "station_maturity": "mature", "config_sha": "deadbeef",
+    }
+    assert set(expected_full) == set(storage.ENTRY_DECISION_COLUMNS)
+    for col, val in expected_full.items():
+        assert rows[32][col] == val, f"column {col!r}: expected {val!r}, got {rows[32][col]!r}"
+
+    expected_defaults = {
+        "cycle_ts": "2026-09-17T21:00:00+00:00", "station_icao": STATION,
+        "target_date": "2026-09-17", "bucket_c": 33, "side": "YES", "book": "paper_shadow",
+        "approved": 1, "rule_id": "unspecified", "reason": "approved",
+        "entry_price": None, "entry_bid": None, "model_prob": None,
+        "calibrated_prob": None, "calibration_source": "uncalibrated",
+        "raw_edge": None, "admission_edge": None, "sizing_edge": None,
+        "net_ev_at_size": 0.2, "kelly_size_preclamp_usd": None,
+        "recommended_size_usd": 5.0, "min_net_ev": None,
+        "station_maturity": "exploratory", "config_sha": "deadbeef",
+    }
+    assert set(expected_defaults) == set(storage.ENTRY_DECISION_COLUMNS)
+    for col, val in expected_defaults.items():
+        assert rows[33][col] == val, f"column {col!r}: expected {val!r}, got {rows[33][col]!r}"
+
     assert storage.load_entry_decisions(book="live") == []
     assert storage.record_entry_decisions([], book="paper", cycle_ts="x", config_sha=None) == 0
