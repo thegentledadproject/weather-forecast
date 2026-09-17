@@ -110,6 +110,8 @@ from entry_manager import (
     _calibration_note,
     admission_edge,
     compute_kelly_fraction,
+    deciding_numbers,
+    preclamp_size_usd,
     gap_risk_haircut,
     max_plausible_edge_for,
     veto_same_bucket_conflicts,
@@ -193,8 +195,11 @@ def evaluate_entry_sim(
     """
     station_icao = ev.station_icao
     maturity = _maturity_for(station_icao, station_maturity)
+    # WAVE 1: computed once, compared below, carried on every return -- see
+    # entry_manager.evaluate_entry, which this function mirrors gate for gate.
+    deciding = deciding_numbers(ev)
 
-    def _rejected(reason: str) -> EntryDecision:
+    def _rejected(reason: str, rule_id: str) -> EntryDecision:
         """Uniform pre-sizing rejection shape -- mirrors evaluate_entry's nested _rejected()."""
         return EntryDecision(
             station_icao=station_icao, target_date=ev.target_date,
@@ -210,13 +215,16 @@ def evaluate_entry_sim(
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            rule_id=rule_id,
         )
 
     # --- Gate 0: Veto 00, entry price ceiling ----------------------------
     if ev.market_price is not None and ev.market_price > config.MAX_ENTRY_PRICE:
         return _rejected(
             f"Entry price {ev.market_price:.3f} above MAX_ENTRY_PRICE "
-            f"({config.MAX_ENTRY_PRICE:.2f}) -- too little upside left to justify the stake."
+            f"({config.MAX_ENTRY_PRICE:.2f}) -- too little upside left to justify the stake.",
+            rule_id="00",
         )
 
     # --- Gate 0b: Veto 00b, blocked entry-price band ---------------------
@@ -228,7 +236,8 @@ def evaluate_entry_sim(
         low, high = config.ENTRY_PRICE_BLOCK_BAND
         return _rejected(
             f"Entry price {ev.market_price:.3f} is inside the blocked "
-            f"{low:.2f}-{high:.2f} band (ENTRY_PRICE_BLOCK_BAND)."
+            f"{low:.2f}-{high:.2f} band (ENTRY_PRICE_BLOCK_BAND).",
+            rule_id="00b",
         )
 
     # --- Gate 0c: Veto 00c, NO-side confidence floor ---------------------
@@ -240,7 +249,8 @@ def evaluate_entry_sim(
         return _rejected(
             f"model_prob {ev.model_prob:.3f} is below the NO-side confidence floor "
             f"({config.NO_SIDE_MIN_MODEL_PROB:.2f}, NO_SIDE_MIN_MODEL_PROB) -- the model is barely "
-            f"better than a coin flip here and this cohort loses held to settlement."
+            f"better than a coin flip here and this cohort loses held to settlement.",
+            rule_id="00c",
         )
 
     # --- Gate 1: Veto 0a, edge plausibility ------------------------------
@@ -251,7 +261,8 @@ def evaluate_entry_sim(
     if raw_edge is not None and abs(raw_edge) > max_plausible_edge:
         return _rejected(
             f"VETOED: raw edge {raw_edge:+.1%} exceeds the plausibility ceiling "
-            f"({max_plausible_edge:.1%} at price {ev.market_price}) -- presumed data error, not alpha."
+            f"({max_plausible_edge:.1%} at price {ev.market_price}) -- presumed data error, not alpha.",
+            rule_id="0a",
         )
 
     # --- Gate 2: Veto 0a2, edge materiality ------------------------------
@@ -269,7 +280,7 @@ def evaluate_entry_sim(
     # which is a limitation of the replay's inputs and not of this line -- see
     # tests/test_calibrated_admission.py, which pins it so nobody reads a sweep
     # as evidence about a rule it never ran.
-    gate_edge = admission_edge(ev)
+    gate_edge = deciding["admission_edge"]
     if gate_edge is not None and abs(gate_edge) < min_abs_edge:
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         basis_note = (
@@ -278,24 +289,27 @@ def evaluate_entry_sim(
         )
         return _rejected(
             f"Absolute edge {gate_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note}{basis_note} "
-            f"-- inside book noise, not a tradeable disagreement."
+            f"-- inside book noise, not a tradeable disagreement.",
+            rule_id="0a2",
         )
 
     # --- Gate 3: Veto 0b, open positions unreadable ----------------------
     if open_count_for_bucket is None:
-        return _rejected("Open positions unreadable -- per-bucket cap unenforceable, refusing to open blind.")
+        return _rejected("Open positions unreadable -- per-bucket cap unenforceable, refusing to open blind.", rule_id="0b")
 
     # --- Gate 4: Veto 0b, per-bucket cap ---------------------------------
     if open_count_for_bucket >= config.MAX_OPEN_POSITIONS_PER_BUCKET:
         return _rejected(
             f"Per-bucket cap: {open_count_for_bucket} position(s) already open on this bucket/side "
-            f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET})."
+            f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET}).",
+            rule_id="0b",
         )
 
     # --- Gate 4b: Veto 0b2, opposite-side count unreadable ---------------
     if opposite_count_for_bucket is None:
         return _rejected(
-            "Open positions unreadable -- opposite-side lock unenforceable, refusing to open blind."
+            "Open positions unreadable -- opposite-side lock unenforceable, refusing to open blind.",
+            rule_id="0b2",
         )
 
     # --- Gate 4c: Veto 0b2, opposite side already open -------------------
@@ -306,18 +320,20 @@ def evaluate_entry_sim(
         opposite_side = "NO" if ev.side.upper() == "YES" else "YES"
         return _rejected(
             f"Opposite side already open: {opposite_count_for_bucket} {opposite_side} "
-            f"position(s) on this bucket."
+            f"position(s) on this bucket.",
+            rule_id="0b2",
         )
 
     # --- Gate 5: Veto 0c, position history unreadable --------------------
     if stop_outs_for_bucket is None:
-        return _rejected("Position history unreadable -- stop-out cooldown unenforceable, refusing to open blind.")
+        return _rejected("Position history unreadable -- stop-out cooldown unenforceable, refusing to open blind.", rule_id="0c")
 
     # --- Gate 6: Veto 0c, stop-out cooldown ------------------------------
     if stop_outs_for_bucket >= config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY:
         return _rejected(
             f"Stop-out cooldown: {stop_outs_for_bucket} stop-loss exit(s) on this bucket/side today "
-            f"(max {config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY})."
+            f"(max {config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY}).",
+            rule_id="0c",
         )
 
     # --- Gate 7: Kelly fraction ------------------------------------------
@@ -337,6 +353,8 @@ def evaluate_entry_sim(
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            rule_id="kelly_nonpositive",
         )
 
     kelly_applied = kelly_raw * config.KELLY_FRACTION
@@ -371,6 +389,11 @@ def evaluate_entry_sim(
     ):
         size_usd *= gap_risk_haircut(ev.market_price, station_icao, ev.market_bid)
 
+    # WAVE 1: the paper-equivalent stake, captured BEFORE any live clamp --
+    # the replica has no live/paper distinction, so this is just size_usd
+    # as it stands after every risk cap and haircut, mirroring live's site.
+    preclamp_usd = size_usd
+
     # --- Gate 8: depth unknown -------------------------------------------
     if depth_usd is None:
         return EntryDecision(
@@ -387,6 +410,9 @@ def evaluate_entry_sim(
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, None),
+            rule_id="depth",
         )
 
     # Cap 3: real order-book depth
@@ -408,6 +434,9 @@ def evaluate_entry_sim(
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd),
+            rule_id="size_floor",
         )
 
     # Re-check slippage and net EV at the ACTUAL recommended size, not the
@@ -432,6 +461,9 @@ def evaluate_entry_sim(
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd),
+            rule_id="slippage",
         )
 
     # --- Gate 11: net EV at actual size -----------------------------------
@@ -451,6 +483,9 @@ def evaluate_entry_sim(
             model_prob=ev.model_prob,
             raw_edge=ev.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd),
+            rule_id="net_ev_bar",
         )
 
     # --- Gate 12: approve --------------------------------------------------
@@ -475,6 +510,9 @@ def evaluate_entry_sim(
         model_prob=ev.model_prob,
         raw_edge=ev.raw_edge,
         min_net_ev=min_net_ev,
+        **deciding,
+        kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd),
+        rule_id="approved",
     )
 
 

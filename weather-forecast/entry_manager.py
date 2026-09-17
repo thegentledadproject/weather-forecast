@@ -119,6 +119,19 @@ _collection_only_logged = set()
 # reading naturally at the call site.
 max_plausible_edge_for = config.max_plausible_edge_for
 
+# WAVE 1 (2026-09-17). The closed set of EntryDecision.rule_id values. Every
+# `return EntryDecision(...)` / `return _rejected(...)` site in evaluate_entry,
+# the budget and same-bucket sites, and collection_only_decision stamps one of
+# these; backtest/entry_sim.py stamps the SAME ones at the same sites, so the
+# replay funnel and the live funnel share a key (tests/test_gate_census.py).
+# The prose `reason` stays beside it -- nothing parses prose any more.
+ENTRY_RULE_IDS = frozenset({
+    "00", "00b", "00c", "0a", "0a2", "0b", "0b2", "0c",
+    "kelly_nonpositive", "depth", "size_floor", "slippage", "net_ev_bar",
+    "approved", "collection_gate", "same_bucket_conflict",
+    "budget_exhausted", "budget_scaled",
+})
+
 
 def _execution_mode(station_icao: str) -> str:
     """This station's executor mode, defaulted the same way executor does."""
@@ -358,6 +371,40 @@ def sizing_edge(ev_result: EVResult) -> float:
     # replica pass duck-typed EV stubs that predate these fields, and a sizing
     # function that raises on them would turn a missing optional into a dead
     return _calibrated_or_raw_edge(ev_result)
+
+
+def deciding_numbers(ev_result: EVResult) -> dict:
+    """
+    The four Wave 1 fields every EntryDecision carries off its EVResult,
+    as keyword arguments: the calibrated probability and its tier exactly
+    as the EV table stamped them, the edge veto 0a2 is measured against,
+    and the edge Kelly sizes on. ONE computation per candidate -- the same
+    values evaluate_entry then compares, so what is recorded is what
+    decided, not a recomputation that could drift. getattr for the
+    duck-typed stubs the replay feeds, as _calibrated_or_raw_edge explains.
+    """
+    return {
+        "calibrated_prob": getattr(ev_result, "calibrated_prob", None),
+        "calibration_source": getattr(ev_result, "calibration_source", probability_calibration.NO_TIER),
+        "admission_edge": admission_edge(ev_result),
+        "sizing_edge": sizing_edge(ev_result),
+    }
+
+
+def preclamp_size_usd(size_usd: float, depth_usd: Optional[float]) -> float:
+    """
+    EntryDecision.kelly_size_preclamp_usd: recommended_size_usd as the PAPER
+    path would have produced it -- the Kelly size after every risk cap and the
+    haircut, BEFORE the live fixed-size clamp (config.LIVE_TRADE_SIZE_USD) and
+    before the exchange minimum bump, depth-capped where depth is known and
+    rounded like the approval size. On a paper station it equals
+    recommended_size_usd before budget scaling; on a live station it is the
+    stake the same ticket would have carried on paper. Shared with
+    backtest/entry_sim.py so the two cannot drift.
+    """
+    if depth_usd is not None:
+        size_usd = min(size_usd, depth_usd * config.MAX_DEPTH_UTILIZATION_PCT)
+    return round(size_usd, 2)
 
 
 def count_open_positions_for_bucket(
@@ -801,7 +848,9 @@ def collection_only_reason(
     return None
 
 
-def collection_only_decision(ev_result: EVResult, token_id: Optional[str], reason: str) -> EntryDecision:
+def collection_only_decision(
+    ev_result: EVResult, token_id: Optional[str], reason: str,
+) -> EntryDecision:
     """
     The EntryDecision a collection-only station produces for one
     candidate: rejected, nothing sized, reason intact so the funnel shows
@@ -821,6 +870,8 @@ def collection_only_decision(ev_result: EVResult, token_id: Optional[str], reaso
         token_id=token_id,
         model_prob=ev_result.model_prob,
         raw_edge=ev_result.raw_edge,
+        **deciding_numbers(ev_result),
+        rule_id="collection_gate",
     )
 
 
@@ -839,8 +890,10 @@ def evaluate_entry(
     """
     station_icao = ev_result.station_icao
     maturity = config.STATION_MATURITY.get(station_icao, "exploratory")
+    # WAVE 1: computed once, compared below, carried on every return.
+    deciding = deciding_numbers(ev_result)
 
-    def _rejected(reason: str) -> EntryDecision:
+    def _rejected(reason: str, rule_id: str) -> EntryDecision:
         """Uniform shape for a pre-sizing rejection -- nothing was sized, so every sizing field is empty."""
         return EntryDecision(
             station_icao=station_icao, target_date=ev_result.target_date,
@@ -856,6 +909,8 @@ def evaluate_entry(
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            rule_id=rule_id,
         )
 
     # Veto 00: entry price ceiling. Above MAX_ENTRY_PRICE the instrument
@@ -873,7 +928,8 @@ def evaluate_entry(
         )
         return _rejected(
             f"Entry price {ev_result.market_price:.3f} above MAX_ENTRY_PRICE "
-            f"({config.MAX_ENTRY_PRICE:.2f}) -- too little upside left to justify the stake."
+            f"({config.MAX_ENTRY_PRICE:.2f}) -- too little upside left to justify the stake.",
+            rule_id="00",
         )
 
     # Veto 00b: the blocked price band. A property of the instrument, like
@@ -889,7 +945,8 @@ def evaluate_entry(
         )
         return _rejected(
             f"Entry price {ev_result.market_price:.3f} is inside the blocked "
-            f"{low:.2f}-{high:.2f} band (ENTRY_PRICE_BLOCK_BAND)."
+            f"{low:.2f}-{high:.2f} band (ENTRY_PRICE_BLOCK_BAND).",
+            rule_id="00b",
         )
 
     # Veto 00c: the NO-side confidence floor. A property of the SIGNAL rather
@@ -908,7 +965,8 @@ def evaluate_entry(
         return _rejected(
             f"model_prob {ev_result.model_prob:.3f} is below the NO-side confidence floor "
             f"({config.NO_SIDE_MIN_MODEL_PROB:.2f}, NO_SIDE_MIN_MODEL_PROB) -- the model is barely "
-            f"better than a coin flip here and this cohort loses held to settlement."
+            f"better than a coin flip here and this cohort loses held to settlement.",
+            rule_id="00c",
         )
 
     # Veto 0a: edge plausibility. An edge this large on a liquid weather
@@ -925,7 +983,8 @@ def evaluate_entry(
         )
         return _rejected(
             f"VETOED: raw edge {raw_edge:+.1%} exceeds the plausibility ceiling "
-            f"({max_plausible_edge:.1%} at price {ev_result.market_price}) -- presumed data error, not alpha."
+            f"({max_plausible_edge:.1%} at price {ev_result.market_price}) -- presumed data error, not alpha.",
+            rule_id="0a",
         )
 
     # Veto 0a2: edge MATERIALITY -- the mirror of 0a. Percentage EV explodes
@@ -959,7 +1018,7 @@ def evaluate_entry(
     # about, so applying a noise floor to the uncorrected number was applying it
     # to the noise. Ranking is NOT moved with it; that was measured separately
     # and was worse.
-    gate_edge = admission_edge(ev_result)
+    gate_edge = deciding["admission_edge"]
     if gate_edge is not None and abs(gate_edge) < min_abs_edge:
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         # Name the number that refused, for the same reason
@@ -972,7 +1031,8 @@ def evaluate_entry(
         )
         return _rejected(
             f"Absolute edge {gate_edge:+.3f} below required minimum {min_abs_edge:.3f}{low_conf_note}{basis_note} "
-            f"-- inside book noise, not a tradeable disagreement."
+            f"-- inside book noise, not a tradeable disagreement.",
+            rule_id="0a2",
         )
 
     # Veto 0b: per-bucket position cap. This bet is either already on, or
@@ -989,7 +1049,7 @@ def evaluate_entry(
             f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: could not read "
             f"open positions, so the per-bucket cap cannot be enforced -- refusing to open blind."
         )
-        return _rejected("Open positions unreadable -- per-bucket cap unenforceable, refusing to open blind.")
+        return _rejected("Open positions unreadable -- per-bucket cap unenforceable, refusing to open blind.", rule_id="0b")
 
     if open_count >= config.MAX_OPEN_POSITIONS_PER_BUCKET:
         # Log the full explanation ONCE per bucket/side/day: a held position
@@ -1008,7 +1068,8 @@ def evaluate_entry(
             )
         return _rejected(
             f"Per-bucket cap: {open_count} position(s) already open on this bucket/side "
-            f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET})."
+            f"(max {config.MAX_OPEN_POSITIONS_PER_BUCKET}).",
+            rule_id="0b",
         )
 
     # Veto 0b2: the OPPOSITE side of the same bucket is already open.
@@ -1045,7 +1106,8 @@ def evaluate_entry(
             f"open positions, so the opposite-side lock cannot be enforced -- refusing to open blind."
         )
         return _rejected(
-            "Open positions unreadable -- opposite-side lock unenforceable, refusing to open blind."
+            "Open positions unreadable -- opposite-side lock unenforceable, refusing to open blind.",
+            rule_id="0b2",
         )
 
     if opposite_count > 0:
@@ -1060,7 +1122,8 @@ def evaluate_entry(
                 f"not hedged. (Further opposite-side vetoes for this bucket today will not be logged.)"
             )
         return _rejected(
-            f"Opposite side already open: {opposite_count} {opposite_side} position(s) on this bucket."
+            f"Opposite side already open: {opposite_count} {opposite_side} position(s) on this bucket.",
+            rule_id="0b2",
         )
 
     # Veto 0c: stop-out cooldown. The open-position cap (0b) stops STACKING
@@ -1076,7 +1139,7 @@ def evaluate_entry(
             f"[entry_manager] VETOED {station_icao} {ev_result.bucket_c}°{ev_result.side}: could not read "
             f"position history, so the stop-out cooldown cannot be enforced -- refusing to open blind."
         )
-        return _rejected("Position history unreadable -- stop-out cooldown unenforceable, refusing to open blind.")
+        return _rejected("Position history unreadable -- stop-out cooldown unenforceable, refusing to open blind.", rule_id="0c")
 
     if stop_outs >= config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY:
         veto_key = (station_icao, ev_result.target_date, ev_result.bucket_c, ev_result.side.upper())
@@ -1091,7 +1154,8 @@ def evaluate_entry(
             )
         return _rejected(
             f"Stop-out cooldown: {stop_outs} stop-loss exit(s) on this bucket/side today "
-            f"(max {config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY})."
+            f"(max {config.MAX_STOP_OUTS_PER_BUCKET_PER_DAY}).",
+            rule_id="0c",
         )
 
     kelly_raw = compute_kelly_fraction(ev_result)
@@ -1110,6 +1174,8 @@ def evaluate_entry(
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            rule_id="kelly_nonpositive",
         )
 
     kelly_applied = kelly_raw * config.KELLY_FRACTION
@@ -1161,6 +1227,9 @@ def evaluate_entry(
     # prints and the P&L attribution reads -- would describe a trade that
     # never happened. Clamping first costs nothing and keeps every
     # downstream number about the order that actually gets built.
+    # WAVE 1: the paper-equivalent stake, captured BEFORE the live clamp.
+    preclamp_usd = size_usd
+
     live_cap = live_size_cap_usd(station_icao)
     if live_cap is not None:
         size_usd = min(size_usd, live_cap)
@@ -1182,6 +1251,9 @@ def evaluate_entry(
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, None),
+            rule_id="depth",
         )
 
     depth_capped_usd = min(size_usd, depth_usd * config.MAX_DEPTH_UTILIZATION_PCT)
@@ -1201,6 +1273,9 @@ def evaluate_entry(
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd),
+            rule_id="size_floor",
         )
 
     # Re-check slippage and net EV at the ACTUAL recommended size, not the
@@ -1231,6 +1306,9 @@ def evaluate_entry(
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd),
+            rule_id="slippage",
         )
 
     if not config.clears_entry_bar(net_ev_at_size, ev_result.market_price, min_net_ev):
@@ -1249,6 +1327,9 @@ def evaluate_entry(
             model_prob=ev_result.model_prob,
             raw_edge=ev_result.raw_edge,
             min_net_ev=min_net_ev,
+            **deciding,
+            kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd),
+            rule_id="net_ev_bar",
         )
 
     return EntryDecision(
@@ -1274,6 +1355,9 @@ def evaluate_entry(
         model_prob=ev_result.model_prob,
         raw_edge=ev_result.raw_edge,
         min_net_ev=min_net_ev,
+        **deciding,
+        kelly_size_preclamp_usd=preclamp_size_usd(preclamp_usd, depth_usd),
+        rule_id="approved",
     )
 
 
@@ -1317,7 +1401,9 @@ def decide_entries(
     ]
 
 
-def veto_same_bucket_conflicts(decisions: List[EntryDecision]) -> List[EntryDecision]:
+def veto_same_bucket_conflicts(
+    decisions: List[EntryDecision],
+) -> List[EntryDecision]:
     """
     Detects and vetoes any bucket where BOTH YES and NO were approved
     in the same cycle. Per the NegRisk mechanism (confirmed earlier):
@@ -1352,6 +1438,7 @@ def veto_same_bucket_conflicts(decisions: List[EntryDecision]) -> List[EntryDeci
                 if d.approved:
                     result.append(EntryDecision(
                         **{**d.__dict__, "approved": False,
+                           "rule_id": "same_bucket_conflict",
                            "reason": "VETOED: same-bucket YES+NO conflict -- see entry_manager logs."}
                     ))
                 else:
@@ -1509,6 +1596,7 @@ def apply_portfolio_budget(
                     **{**d.__dict__,
                        "approved": False,
                        "recommended_size_usd": 0.0,
+                       "rule_id": "budget_exhausted",
                        "reason": d.reason + f" [rejected: {binding_label} budget exhausted "
                                             f"(${binding_spent:.2f} of ${binding_cap:.2f} already deployed)]"}
                 ))
@@ -1533,6 +1621,7 @@ def apply_portfolio_budget(
             result.append(EntryDecision(
                 **{**d.__dict__,
                    "recommended_size_usd": round(d.recommended_size_usd * scale, 2),
+                   "rule_id": "budget_scaled",
                    "reason": d.reason + f" [scaled {scale:.0%} for shared portfolio budget]"}
             ))
         else:
