@@ -63,6 +63,7 @@ config.py, models.py, probability.py (local)
 clients/market_client.py (local)
 """
 
+import dataclasses
 import json
 import os
 import time
@@ -388,6 +389,38 @@ def compute_ev_table(
             ))
 
     return results
+
+
+def reprice_for_mode(results: List[EVResult], execution_mode: Optional[str]) -> List[EVResult]:
+    """
+    The same EV table as it would have been computed under `execution_mode`,
+    WITHOUT re-reading the book. Only two fields depend on the mode in
+    compute_ev_table -- expected_exit_fee_pct (charged only on a book that
+    sells before settlement) and net_ev_per_dollar, which subtracts it --
+    so those two are recomputed from the row's own price, edge, slippage and
+    entry fee, and every other field is copied. Unpriced rows are returned
+    as they are.
+
+    WAVE 1: the paper shadow pass prices a live station's cycle as paper
+    from the primary pass's own results, so both books see the identical
+    quotes and slippage. Re-running run_for_station_with_map would
+    re-discover the market and write a second set of price snapshots.
+
+    Valid for tables built with fee_rate_pct=None (the production default):
+    a flat fee override suppresses the exit fee in compute_ev_table, and a
+    row cannot say whether it was built under one. tests/test_wave1_mode_
+    override.py pins this against compute_ev_table field for field.
+    """
+    sells = _sells_before_settlement(execution_mode)
+    out = []
+    for r in results:
+        if r.market_price is None or r.market_price <= 0 or r.raw_edge is None:
+            out.append(r)
+            continue
+        exit_fee_pct = expected_exit_fee_pct_of_notional(r.market_price) if sells else 0.0
+        net_ev = (r.raw_edge / r.market_price) - r.estimated_slippage_pct - r.fee_rate_pct - exit_fee_pct
+        out.append(dataclasses.replace(r, expected_exit_fee_pct=exit_fee_pct, net_ev_per_dollar=net_ev))
+    return out
 
 
 def book_dislocation(token_map: Dict[int, dict]) -> Optional[float]:

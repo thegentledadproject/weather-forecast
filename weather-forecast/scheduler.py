@@ -96,6 +96,109 @@ MIN_SLEEP_SECONDS = 30
 # _collection_due() for why that is the right direction to be wrong in.
 _last_collection_ts: Dict[str, float] = {}
 
+# WAVE 1. The git sha stamped on every entry_decisions row, resolved once per
+# process: config._current_git_sha() shells out to git, and a subprocess per
+# station-cycle is not a cost the entry leg should carry. Keyed dict rather
+# than a bare Optional so "not yet asked" and "asked, no git" stay distinct.
+_config_sha_cache: Dict[str, Optional[str]] = {}
+
+
+def _config_sha() -> Optional[str]:
+    if "sha" not in _config_sha_cache:
+        try:
+            _config_sha_cache["sha"] = config._current_git_sha()
+        except Exception:  # noqa: BLE001 -- provenance must never break a cycle
+            _config_sha_cache["sha"] = None
+    return _config_sha_cache["sha"]
+
+
+def _record_entry_decisions(decisions, station_icao: str, book: str, cycle_ts: str) -> None:
+    """
+    Persist a cycle's EntryDecisions as entry_decisions rows. BEST-EFFORT:
+    a storage failure here is printed and swallowed, because this runs
+    between the decision and the executor and must never be the reason a
+    trade did not happen (spec 1b).
+    """
+    try:
+        n = storage.record_entry_decisions(
+            decisions, book=book, cycle_ts=cycle_ts, config_sha=_config_sha(),
+        )
+        print(f"[scheduler] {station_icao}: recorded {n} entry decision(s) as book={book!r}.")
+    except Exception as exc:  # noqa: BLE001 -- recording is not trading
+        print(
+            f"[scheduler] {station_icao}: could not record entry decisions "
+            f"(book={book!r}): {exc} -- continuing, the trade path is unaffected."
+        )
+
+
+def _run_shadow_pass(station_icao: str, min_net_ev: float, cycle_ts: str,
+                     ev_run, forecast_sources) -> list:
+    """
+    WAVE 1 (spec 1d): the paper twin of a live station's entry cycle.
+
+    Re-prices the PRIMARY pass's own EV table for execution_mode="paper"
+    (same quotes, same slippage, no exit fee), screens it the same way, and
+    runs decide_portfolio_entries with the explicit execution_mode="paper"
+    override -- paper gates, paper Kelly (no $1 clamp), paper cap/budget
+    reads -- then records every decision as book='paper_shadow'.
+
+    READ-ONLY, by construction rather than by convention:
+      - never calls executor.open_position (tests/test_wave1_shadow_pass.py
+        walks the call graph and asserts it);
+      - never writes positions; the paper book's cap/budget state is read,
+        not consumed;
+      - never touches executor.EXECUTION_MODE -- the override is a parameter;
+      - restores entry_manager's once-per-day log dedup sets, so a shadow
+        veto cannot silence the primary's journal line for the same bucket;
+      - its own gate chatter is captured rather than printed, so the journal
+        does not show two VETOED lines per bucket per cycle.
+    """
+    import contextlib
+    import io
+    import entry_manager
+
+    paper_results = ev_engine.reprice_for_mode(ev_run.ev_results, execution_mode="paper")
+    best = ev_engine.best_opportunities(paper_results, min_net_ev=min_net_ev)
+    if not best:
+        print(f"[scheduler] {station_icao}: paper shadow -- no candidate clears the screen on the paper table; nothing recorded.")
+        return []
+
+    dedup_sets = (
+        entry_manager._bucket_cap_vetoes_logged,
+        entry_manager._opposite_side_vetoes_logged,
+        entry_manager._cooldown_vetoes_logged,
+        entry_manager._collection_only_logged,
+    )
+    saved = [set(s) for s in dedup_sets]
+    chatter = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(chatter):
+            decisions = entry_manager.decide_portfolio_entries(
+                best, ev_run.token_map, min_net_ev=min_net_ev,
+                forecast_sources=forecast_sources, execution_mode="paper",
+            )
+    except Exception as exc:
+        # A dying decide_portfolio_entries would otherwise vanish into the
+        # redirected `chatter` buffer and leave _run_full_cycle's failure
+        # log line with nothing to go on -- append its last couple of lines
+        # so the trace survives the redirect.
+        tail = "\n".join(chatter.getvalue().splitlines()[-2:])
+        if tail:
+            raise RuntimeError(f"{exc} -- last shadow output: {tail!r}") from exc
+        raise
+    finally:
+        for live_set, before in zip(dedup_sets, saved):
+            live_set.clear()
+            live_set.update(before)
+
+    _record_entry_decisions(decisions, station_icao, "paper_shadow", cycle_ts)
+    approved = sum(1 for d in decisions if d.approved)
+    print(
+        f"[scheduler] {station_icao}: paper shadow -- {len(decisions)} decision(s), "
+        f"{approved} approved, recorded as book='paper_shadow'; no position opened."
+    )
+    return decisions
+
 
 def local_now(tz_offset_hours: int = 8) -> Tuple[int, int]:
     """
@@ -373,8 +476,26 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
         print(f"[scheduler] {station_icao}: pipeline.run() failed this cycle: {exc}")
         return
 
+    # WAVE 1: one timestamp per cycle, shared by every row this cycle records
+    # (and by the paper shadow rows, so they pair on it); one book label per
+    # station, which is its executor mode.
+    cycle_ts = datetime.now(timezone.utc).isoformat()
+    book = executor.EXECUTION_MODE.get(station_icao, "manual_review")
+    # WAVE 1: what the paper shadow pass below needs from the primary pass,
+    # hoisted out of the try so a raise leaves them at their sentinels.
+    # primary_ok means the EVALUATION succeeded (pipeline -> EV -> decide ->
+    # record) -- NOT that every order placed cleanly. It is set as soon as
+    # this cycle's decisions exist (or as soon as we know there are none),
+    # before executor.open_position() runs, so a CLOB/network failure
+    # placing one order cannot retroactively suppress the shadow pass for
+    # decisions that were already recorded.
+    ev_run = None
+    forecast_sources = None
+    primary_ok = False
+
     try:
         estimate = result["estimate"]
+        forecast_sources = list(getattr(estimate, "inputs_used", None) or [])
         # ONE discovery per station-cycle. The EV table, the bucket bounds
         # the model probabilities were computed on, and the token ids entry
         # sizing trades against all come out of the same StationEVRun --
@@ -396,6 +517,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                 f"[scheduler] {station_icao}: station-day VETOED by discovery "
                 f"({ev_run.veto_reason}) -- no entries this cycle, exits still checked below."
             )
+            primary_ok = True
         elif ev_results:
             best = ev_engine.best_opportunities(ev_results, min_net_ev=min_net_ev)
             if best:
@@ -409,12 +531,36 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                     forecast_sources=estimate.inputs_used,
                 )
                 entry_manager.print_entry_decisions(entry_decisions)
+                # WAVE 1: recorded BEFORE any executor call, best-effort.
+                _record_entry_decisions(entry_decisions, station_icao, book, cycle_ts)
+                # The EVALUATION is done as of this line -- flip primary_ok
+                # BEFORE the executor loop, so an order-placement failure
+                # below (a CLOB/network error on one decision) cannot
+                # retroactively cancel the shadow pass for decisions that
+                # were already recorded.
+                primary_ok = True
                 for decision in entry_decisions:
                     executor.open_position(decision)
             else:
                 print(f"[scheduler] {station_icao}: no opportunities clearing the {config.entry_bar_label(min_net_ev)} net EV threshold this cycle.")
+                primary_ok = True
+        else:
+            primary_ok = True
     except Exception as exc:
         print(f"[scheduler] {station_icao}: EV computation failed this cycle: {exc}")
+
+    # WAVE 1: the paper shadow twin, for live stations only, AFTER the
+    # primary pass and only if it completed. Its own failure is contained.
+    if executor.EXECUTION_MODE.get(station_icao) == "live":
+        if not primary_ok:
+            print(f"[scheduler] {station_icao}: paper shadow pass skipped -- the primary pass raised.")
+        elif ev_run is None or ev_run.veto_reason or not ev_run.ev_results:
+            print(f"[scheduler] {station_icao}: paper shadow pass skipped -- no EV table this cycle.")
+        else:
+            try:
+                _run_shadow_pass(station_icao, min_net_ev, cycle_ts, ev_run, forecast_sources)
+            except Exception as exc:  # noqa: BLE001 -- the shadow must never take the cycle down
+                print(f"[scheduler] {station_icao}: paper shadow pass failed: {exc} -- primary decisions unaffected.")
 
     # DELIBERATELY None: no exit-path capture inside an entry window.
     #

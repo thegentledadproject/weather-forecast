@@ -186,6 +186,22 @@ def _ensure_position_economics_view(conn: sqlite3.Connection) -> None:
         "CREATE VIEW ", "CREATE VIEW IF NOT EXISTS ", 1))
 
 
+# WAVE 1 (2026-09-17). One row per EntryDecision per cycle, approved or not,
+# in the column order record_entry_decisions() writes them. The dataclass
+# fields these mirror are named identically so tests/test_wave1_entry_
+# decisions_recorded.py can assert parity by name. `book` is the executor
+# mode the decision was made under, or 'paper_shadow' for the read-only
+# paper twin a live station runs beside its primary pass.
+ENTRY_DECISION_COLUMNS = (
+    "cycle_ts", "station_icao", "target_date", "bucket_c", "side", "book",
+    "approved", "rule_id", "reason",
+    "entry_price", "entry_bid", "model_prob", "calibrated_prob", "calibration_source",
+    "raw_edge", "admission_edge", "sizing_edge", "net_ev_at_size",
+    "kelly_size_preclamp_usd", "recommended_size_usd", "min_net_ev",
+    "station_maturity", "config_sha",
+)
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DB_PATH)
     conn.execute(
@@ -239,7 +255,12 @@ def _connect() -> sqlite3.Connection:
             entry_bid REAL,
             exit_blocked_reason TEXT,
             entry_fee_per_share REAL,
-            trigger_price REAL
+            trigger_price REAL,
+            calibrated_prob REAL,
+            calibration_source TEXT,
+            admission_edge REAL,
+            sizing_edge REAL,
+            kelly_size_preclamp_usd REAL
         )
         """
     )
@@ -306,6 +327,20 @@ def _connect() -> sqlite3.Connection:
         # a guess here corrupts the exact distribution the column exists to
         # measure. NULL on every pre-P1-10 row is the honest value.
         ("trigger_price", "trigger_price REAL"),
+        # WAVE 1 (2026-09-17): THE NUMBERS THAT DECIDED THE TRADE. model_prob
+        # and raw_edge above stay RAW (the isotonic map is fitted on
+        # model_prob); these are what the gates and Kelly actually compared:
+        # the P3-6 calibrated probability and its tier, the edge veto 0a2 was
+        # applied to, the edge Kelly sized on, and the Kelly size BEFORE the
+        # live $1.00 clamp and the exchange minimum. NULL on every earlier
+        # row, never backfilled: the map that would have applied is not
+        # honestly reconstructible. Same order as the CREATE TABLE above --
+        # _row_to_position reads SELECT * by position.
+        ("calibrated_prob", "calibrated_prob REAL"),
+        ("calibration_source", "calibration_source TEXT"),
+        ("admission_edge", "admission_edge REAL"),
+        ("sizing_edge", "sizing_edge REAL"),
+        ("kelly_size_preclamp_usd", "kelly_size_preclamp_usd REAL"),
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
@@ -371,6 +406,50 @@ def _connect() -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_loa_ts ON live_order_attempts(kind, ts)")
+
+    # WAVE 1: every EntryDecision, every cycle, whether or not it traded.
+    # `positions` records what was DONE; this records what was DECIDED and
+    # the numbers it was decided on, so the funnel between the EV screen and
+    # a fill can be read from rows instead of reconstructed from journal
+    # prose. Append-only. Candidates refused before evaluate_entry (the
+    # best_opportunities screen) do not get rows -- ev_snapshots holds that
+    # universe. See ENTRY_DECISION_COLUMNS for the meaning of `book`.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entry_decisions (
+            cycle_ts TEXT NOT NULL,
+            station_icao TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            bucket_c INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            book TEXT NOT NULL,
+            approved INTEGER NOT NULL,
+            rule_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            entry_price REAL,
+            entry_bid REAL,
+            model_prob REAL,
+            calibrated_prob REAL,
+            calibration_source TEXT,
+            raw_edge REAL,
+            admission_edge REAL,
+            sizing_edge REAL,
+            net_ev_at_size REAL,
+            kelly_size_preclamp_usd REAL,
+            recommended_size_usd REAL,
+            min_net_ev REAL,
+            station_maturity TEXT,
+            config_sha TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_ed_cycle ON entry_decisions(cycle_ts)")
+    # The shadow-twin pairing key (spec 1d): entry_decisions(book='paper_shadow')
+    # joined to positions(execution_mode='live') on (station, date, bucket, side).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_ed_pair ON entry_decisions"
+        "(book, station_icao, target_date, bucket_c, side)"
+    )
 
     # WHICH BUCKET THE MARKET SETTLED INTO, per station-day. DELIBERATELY
     # NOT `observations`, and the distinction is the whole point.
@@ -481,6 +560,23 @@ def _connect() -> sqlite3.Connection:
     # After the ALTER TABLE migration above, so the view is defined against
     # the migrated `positions` shape rather than a short one.
     _ensure_position_economics_view(conn)
+
+    # WAVE 1 (2026-09-17). The entry-fee backfill above is a DML statement
+    # (UPDATE), and under sqlite3's default (legacy) transaction control that
+    # opens an implicit transaction covering every statement after it --
+    # including every CREATE TABLE / CREATE INDEX / ALTER TABLE below it in
+    # this function. Every normal caller goes through _db(), whose `with
+    # conn:` commits on the way out, so this was invisible. But
+    # `storage._connect().close()` is ALSO an established idiom across this
+    # suite (test_no_fd_leak.py, test_station_maturity.py, and this file's
+    # own tests) for "just run the migration" -- and .close() on a
+    # connection with a pending transaction rolls it back, silently, with no
+    # exception. On a legacy database that still needs the entry-fee
+    # backfill, that discarded every table/index created after it, including
+    # this Wave's entry_decisions. Committing explicitly here makes
+    # `_connect()` durable on its own, matching what `_db()` already gave
+    # every other caller.
+    conn.commit()
     return conn
 
 
@@ -1003,6 +1099,11 @@ def _row_to_position(r) -> Position:
     exit_blocked_reason = r[22] if len(r) > 22 else None
     entry_fee_per_share = r[23] if len(r) > 23 else None
     trigger_price = r[24] if len(r) > 24 else None
+    calibrated_prob = r[25] if len(r) > 25 else None
+    calibration_source = r[26] if len(r) > 26 else None
+    admission_edge = r[27] if len(r) > 27 else None
+    sizing_edge = r[28] if len(r) > 28 else None
+    kelly_size_preclamp_usd = r[29] if len(r) > 29 else None
     return Position(
         position_id=r[0],
         station_icao=r[1],
@@ -1029,6 +1130,11 @@ def _row_to_position(r) -> Position:
         exit_blocked_reason=exit_blocked_reason,
         entry_fee_per_share=entry_fee_per_share,
         trigger_price=trigger_price,
+        calibrated_prob=calibrated_prob,
+        calibration_source=calibration_source,
+        admission_edge=admission_edge,
+        sizing_edge=sizing_edge,
+        kelly_size_preclamp_usd=kelly_size_preclamp_usd,
     )
 
 
@@ -1069,8 +1175,11 @@ def open_position(position: Position) -> None:
                 exit_price, exit_time, exit_reason, token_id, is_paper,
                 size_shares, execution_mode, order_id,
                 model_prob, raw_edge, net_ev_at_size, entry_bid,
-                exit_blocked_reason, entry_fee_per_share
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                exit_blocked_reason, entry_fee_per_share,
+                calibrated_prob, calibration_source, admission_edge,
+                sizing_edge, kelly_size_preclamp_usd
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?)
             """,
             (
                 position.position_id,
@@ -1103,6 +1212,11 @@ def open_position(position: Position) -> None:
                 # real fee function; the backfill's inlined literal exists only
                 # for rows written before this column did.
                 _entry_fee_for(position),
+                position.calibrated_prob,
+                position.calibration_source,
+                position.admission_edge,
+                position.sizing_edge,
+                position.kelly_size_preclamp_usd,
             ),
         )
 
@@ -1299,12 +1413,19 @@ def count_live_order_attempts(
     gating on this must treat an unreadable count as "cannot authorise",
     the same way the reconciliation check does -- a rate limit that fails
     open is not a rate limit.
+
+    `outcome='refused'` rows (WAVE 1: executor refusals that never built or
+    never submitted an order) are EXCLUDED. This cap counts submissions, and
+    a refusal is the one outcome that is not one -- counting them would let
+    a morning of refusals exhaust the real order budget, which would be a
+    trading change wearing a recording change's clothes.
     """
     try:
         with _db() as conn:
             if station_icaos is None:
                 row = conn.execute(
-                    "SELECT COUNT(*) FROM live_order_attempts WHERE kind = ? AND ts >= ?",
+                    "SELECT COUNT(*) FROM live_order_attempts "
+                    "WHERE kind = ? AND ts >= ? AND outcome != 'refused'",
                     (kind, since_iso),
                 ).fetchone()
             elif not station_icaos:
@@ -1313,7 +1434,8 @@ def count_live_order_attempts(
                 placeholders = ",".join("?" for _ in station_icaos)
                 row = conn.execute(
                     f"SELECT COUNT(*) FROM live_order_attempts "
-                    f"WHERE kind = ? AND ts >= ? AND station_icao IN ({placeholders})",
+                    f"WHERE kind = ? AND ts >= ? AND outcome != 'refused' "
+                    f"AND station_icao IN ({placeholders})",
                     (kind, since_iso, *station_icaos),
                 ).fetchone()
         return int(row[0]) if row else 0
@@ -1334,3 +1456,91 @@ def load_live_order_attempts(limit: int = 50) -> List[dict]:
     keys = ("ts", "kind", "station_icao", "target_date", "bucket_c", "side",
             "notional_usd", "size_shares", "limit_price", "outcome", "order_id", "detail")
     return [dict(zip(keys, r)) for r in rows]
+
+
+# --------------------------------------------------------------------------
+# Entry decisions (Wave 1)
+# --------------------------------------------------------------------------
+
+def record_entry_decisions(
+    decisions,
+    *,
+    book: str,
+    cycle_ts: str,
+    config_sha: Optional[str],
+) -> int:
+    """
+    Append one entry_decisions row per EntryDecision. Returns the row count.
+
+    Each row is assembled as a dict KEYED BY COLUMN NAME, not a
+    hand-ordered positional tuple -- a hand-ordered tuple silently tracks
+    ENTRY_DECISION_COLUMNS only as long as nobody reorders either list, and
+    a reorder of one without the other would write correct-looking values
+    into the wrong columns with no error. cycle_ts/station_icao/book/
+    min_net_ev/config_sha/target_date (needs .isoformat(), not a bare
+    date) are not plain 1:1 EntryDecision attributes-by-name in the
+    caller's hands, so they are set explicitly; every other column is read
+    off the decision BY NAME via getattr(). Any ENTRY_DECISION_COLUMNS
+    entry that ends up with neither -- e.g. a new column added to the
+    table without a matching EntryDecision field -- raises here rather
+    than writing NULL. The caller (scheduler._record_entry_decisions)
+    owns the try/except: this function raises on a storage error, or on a
+    missing column, so the caller can log it, and the caller must never
+    let it block a trade.
+    """
+    if not decisions:
+        return 0
+    rows = []
+    for d in decisions:
+        row = {
+            "cycle_ts": cycle_ts,
+            "station_icao": d.station_icao,
+            "book": book,
+            "min_net_ev": d.min_net_ev,
+            "config_sha": config_sha,
+            "target_date": d.target_date.isoformat(),
+        }
+        for col in ENTRY_DECISION_COLUMNS:
+            if col in row:
+                continue
+            if not hasattr(d, col):
+                raise ValueError(
+                    f"entry_decisions column {col!r} has no matching EntryDecision "
+                    f"field -- ENTRY_DECISION_COLUMNS and EntryDecision have drifted"
+                )
+            row[col] = getattr(d, col)
+        missing = [c for c in ENTRY_DECISION_COLUMNS if c not in row]
+        if missing:
+            raise ValueError(f"entry_decisions row missing column(s): {missing}")
+        rows.append(tuple(row[c] for c in ENTRY_DECISION_COLUMNS))
+    placeholders = ", ".join("?" for _ in ENTRY_DECISION_COLUMNS)
+    with _db() as conn:
+        conn.executemany(
+            f"INSERT INTO entry_decisions ({', '.join(ENTRY_DECISION_COLUMNS)}) "
+            f"VALUES ({placeholders})",
+            rows,
+        )
+    return len(rows)
+
+
+def load_entry_decisions(
+    book: Optional[str] = None,
+    cycle_ts: Optional[str] = None,
+    limit: int = 1000,
+) -> List[dict]:
+    """Rows as dicts keyed by ENTRY_DECISION_COLUMNS, newest cycle first. For tests and operator scripts."""
+    query = f"SELECT {', '.join(ENTRY_DECISION_COLUMNS)} FROM entry_decisions"
+    clauses, params = [], []
+    if book is not None:
+        clauses.append("book = ?")
+        params.append(book)
+    if cycle_ts is not None:
+        clauses.append("cycle_ts = ?")
+        params.append(cycle_ts)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY cycle_ts DESC, station_icao, bucket_c, side LIMIT ?"
+    params.append(limit)
+    with _db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(zip(ENTRY_DECISION_COLUMNS, r)) for r in rows]
