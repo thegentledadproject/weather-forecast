@@ -21,6 +21,7 @@ import executor
 import scheduler
 import storage
 from clients import market_client
+from executor import open_position
 from models import EVResult
 
 STATION = "WSSS"
@@ -34,11 +35,11 @@ FORBIDDEN = {
     ("executor", "open_position"), ("executor", "_open_via_order_path"),
     ("storage", "open_position"),
 }
-WALKED_MODULES = ("scheduler", "entry_manager", "ev_engine", "storage")
+WALKED_MODULES = ("scheduler", "entry_manager", "ev_engine", "storage", "executor")
 
 
 def _reachable(fn, seen=None):
-    """Transitively walk fn's calls into scheduler/entry_manager/ev_engine/storage, failing on a forbidden call."""
+    """Transitively walk fn's calls into scheduler/entry_manager/ev_engine/storage/executor, failing on a forbidden call."""
     seen = set() if seen is None else seen
     key = (fn.__module__, fn.__qualname__)
     if key in seen:
@@ -50,14 +51,20 @@ def _reachable(fn, seen=None):
             continue
         f = node.func
         if isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name):
-            pair = (f.value.id, f.attr)
-            assert pair not in FORBIDDEN, f"{fn.__module__}.{fn.__qualname__} reaches {pair[0]}.{pair[1]}"
             module = sys.modules.get(f.value.id)
             target = getattr(module, f.attr, None) if module is not None else None
         elif isinstance(f, ast.Name):
             target = fn.__globals__.get(f.id)
         else:
             continue
+        # Checked on the RESOLVED target's own (__module__, __name__), not
+        # the source text of the call -- so a bare open_position(...) call
+        # (an ast.Name, reachable via `from executor import open_position`)
+        # is caught exactly like the ast.Attribute form executor.open_
+        # position(...) is, and an aliased `import executor as ex` would be
+        # too, because the check no longer cares what name the caller wrote.
+        pair = (getattr(target, "__module__", None), getattr(target, "__name__", None))
+        assert pair not in FORBIDDEN, f"{fn.__module__}.{fn.__qualname__} reaches {pair[0]}.{pair[1]}"
         if inspect.isfunction(target) and target.__module__ in WALKED_MODULES:
             _reachable(target, seen)
     return seen
@@ -75,6 +82,20 @@ def test_the_guard_can_see_a_forbidden_call():
     """Negative control: the primary cycle DOES call executor.open_position, and the walker must say so."""
     with pytest.raises(AssertionError, match="executor.open_position"):
         _reachable(scheduler._run_full_cycle)
+
+
+def test_the_guard_catches_a_bare_open_position_call():
+    """
+    Negative control for hole (a): `from executor import open_position` (see
+    the module import above) then calling it BARE -- an ast.Name call, not
+    an ast.Attribute access like executor.open_position(...) -- must be
+    caught too. Before the fix, the FORBIDDEN check only ran in the
+    ast.Attribute branch, so this exact evasion was invisible.
+    """
+    def _sneaky_bare_call():
+        open_position(None)
+    with pytest.raises(AssertionError, match="executor.open_position"):
+        _reachable(_sneaky_bare_call)
 
 
 # --------------------------------------------------------------------------
@@ -165,6 +186,9 @@ def test_shadow_is_skipped_with_a_log_line_when_the_primary_raised(live_cycle, m
 
 
 def test_a_shadow_failure_never_touches_the_primary(live_cycle, monkeypatch, capsys):
+    exit_calls = []
+    monkeypatch.setattr(scheduler, "_run_exit_check", lambda *a, **kw: exit_calls.append((a, kw)))
+
     def _boom(results, execution_mode):
         raise RuntimeError("shadow blew up")
     monkeypatch.setattr(ev_engine, "reprice_for_mode", _boom)
@@ -174,6 +198,35 @@ def test_a_shadow_failure_never_touches_the_primary(live_cycle, monkeypatch, cap
     assert len(live_cycle) == 2
     assert len(storage.load_entry_decisions(book="live")) == 2
     assert "shadow pass failed" in capsys.readouterr().out
+    # The shadow's failure must not skip the rest of the cycle either.
+    assert len(exit_calls) == 1
+
+
+def test_shadow_still_records_when_order_placement_fails(live_cycle, monkeypatch, capsys):
+    """
+    Controller ruling (fix round 1, item 2): "the primary raised" means the
+    EVALUATION raised (pipeline -> EV -> decide -> record), not that every
+    order placed cleanly. primary_ok now flips right after the primary's
+    decisions are recorded, before the executor loop -- so a CLOB/network
+    error placing one of them still lets the shadow pass run for the same
+    cycle_ts, and the primary's own except still logs the order failure.
+    """
+    calls = []
+
+    def _flaky_open(d):
+        calls.append(d)
+        if len(calls) == 2:
+            raise RuntimeError("CLOB order failed")
+    monkeypatch.setattr(executor, "open_position", _flaky_open)
+
+    scheduler._run_full_cycle(STATION, min_net_ev=0.15)
+
+    live_rows = storage.load_entry_decisions(book="live")
+    shadow_rows = storage.load_entry_decisions(book="paper_shadow")
+    assert len(live_rows) == 2
+    assert len(shadow_rows) == 2
+    assert {r["cycle_ts"] for r in live_rows} == {r["cycle_ts"] for r in shadow_rows}
+    assert "EV computation failed this cycle" in capsys.readouterr().out
 
 
 def test_shadow_reads_the_paper_book_and_restores_the_log_dedup_sets(live_cycle, monkeypatch):

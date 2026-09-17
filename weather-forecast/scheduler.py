@@ -177,6 +177,15 @@ def _run_shadow_pass(station_icao: str, min_net_ev: float, cycle_ts: str,
                 best, ev_run.token_map, min_net_ev=min_net_ev,
                 forecast_sources=forecast_sources, execution_mode="paper",
             )
+    except Exception as exc:
+        # A dying decide_portfolio_entries would otherwise vanish into the
+        # redirected `chatter` buffer and leave _run_full_cycle's failure
+        # log line with nothing to go on -- append its last couple of lines
+        # so the trace survives the redirect.
+        tail = "\n".join(chatter.getvalue().splitlines()[-2:])
+        if tail:
+            raise RuntimeError(f"{exc} -- last shadow output: {tail!r}") from exc
+        raise
     finally:
         for live_set, before in zip(dedup_sets, saved):
             live_set.clear()
@@ -474,6 +483,12 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
     book = executor.EXECUTION_MODE.get(station_icao, "manual_review")
     # WAVE 1: what the paper shadow pass below needs from the primary pass,
     # hoisted out of the try so a raise leaves them at their sentinels.
+    # primary_ok means the EVALUATION succeeded (pipeline -> EV -> decide ->
+    # record) -- NOT that every order placed cleanly. It is set as soon as
+    # this cycle's decisions exist (or as soon as we know there are none),
+    # before executor.open_position() runs, so a CLOB/network failure
+    # placing one order cannot retroactively suppress the shadow pass for
+    # decisions that were already recorded.
     ev_run = None
     forecast_sources = None
     primary_ok = False
@@ -502,6 +517,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                 f"[scheduler] {station_icao}: station-day VETOED by discovery "
                 f"({ev_run.veto_reason}) -- no entries this cycle, exits still checked below."
             )
+            primary_ok = True
         elif ev_results:
             best = ev_engine.best_opportunities(ev_results, min_net_ev=min_net_ev)
             if best:
@@ -517,11 +533,19 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                 entry_manager.print_entry_decisions(entry_decisions)
                 # WAVE 1: recorded BEFORE any executor call, best-effort.
                 _record_entry_decisions(entry_decisions, station_icao, book, cycle_ts)
+                # The EVALUATION is done as of this line -- flip primary_ok
+                # BEFORE the executor loop, so an order-placement failure
+                # below (a CLOB/network error on one decision) cannot
+                # retroactively cancel the shadow pass for decisions that
+                # were already recorded.
+                primary_ok = True
                 for decision in entry_decisions:
                     executor.open_position(decision)
             else:
                 print(f"[scheduler] {station_icao}: no opportunities clearing the {config.entry_bar_label(min_net_ev)} net EV threshold this cycle.")
-        primary_ok = True
+                primary_ok = True
+        else:
+            primary_ok = True
     except Exception as exc:
         print(f"[scheduler] {station_icao}: EV computation failed this cycle: {exc}")
 
