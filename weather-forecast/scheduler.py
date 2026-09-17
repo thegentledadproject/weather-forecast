@@ -96,6 +96,40 @@ MIN_SLEEP_SECONDS = 30
 # _collection_due() for why that is the right direction to be wrong in.
 _last_collection_ts: Dict[str, float] = {}
 
+# WAVE 1. The git sha stamped on every entry_decisions row, resolved once per
+# process: config._current_git_sha() shells out to git, and a subprocess per
+# station-cycle is not a cost the entry leg should carry. Keyed dict rather
+# than a bare Optional so "not yet asked" and "asked, no git" stay distinct.
+_config_sha_cache: Dict[str, Optional[str]] = {}
+
+
+def _config_sha() -> Optional[str]:
+    if "sha" not in _config_sha_cache:
+        try:
+            _config_sha_cache["sha"] = config._current_git_sha()
+        except Exception:  # noqa: BLE001 -- provenance must never break a cycle
+            _config_sha_cache["sha"] = None
+    return _config_sha_cache["sha"]
+
+
+def _record_entry_decisions(decisions, station_icao: str, book: str, cycle_ts: str) -> None:
+    """
+    Persist a cycle's EntryDecisions as entry_decisions rows. BEST-EFFORT:
+    a storage failure here is printed and swallowed, because this runs
+    between the decision and the executor and must never be the reason a
+    trade did not happen (spec 1b).
+    """
+    try:
+        n = storage.record_entry_decisions(
+            decisions, book=book, cycle_ts=cycle_ts, config_sha=_config_sha(),
+        )
+        print(f"[scheduler] {station_icao}: recorded {n} entry decision(s) as book={book!r}.")
+    except Exception as exc:  # noqa: BLE001 -- recording is not trading
+        print(
+            f"[scheduler] {station_icao}: could not record entry decisions "
+            f"(book={book!r}): {exc} -- continuing, the trade path is unaffected."
+        )
+
 
 def local_now(tz_offset_hours: int = 8) -> Tuple[int, int]:
     """
@@ -373,6 +407,12 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
         print(f"[scheduler] {station_icao}: pipeline.run() failed this cycle: {exc}")
         return
 
+    # WAVE 1: one timestamp per cycle, shared by every row this cycle records
+    # (and by the paper shadow rows, so they pair on it); one book label per
+    # station, which is its executor mode.
+    cycle_ts = datetime.now(timezone.utc).isoformat()
+    book = executor.EXECUTION_MODE.get(station_icao, "manual_review")
+
     try:
         estimate = result["estimate"]
         # ONE discovery per station-cycle. The EV table, the bucket bounds
@@ -409,6 +449,8 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                     forecast_sources=estimate.inputs_used,
                 )
                 entry_manager.print_entry_decisions(entry_decisions)
+                # WAVE 1: recorded BEFORE any executor call, best-effort.
+                _record_entry_decisions(entry_decisions, station_icao, book, cycle_ts)
                 for decision in entry_decisions:
                     executor.open_position(decision)
             else:

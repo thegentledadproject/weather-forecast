@@ -1448,3 +1448,69 @@ def load_live_order_attempts(limit: int = 50) -> List[dict]:
     keys = ("ts", "kind", "station_icao", "target_date", "bucket_c", "side",
             "notional_usd", "size_shares", "limit_price", "outcome", "order_id", "detail")
     return [dict(zip(keys, r)) for r in rows]
+
+
+# --------------------------------------------------------------------------
+# Entry decisions (Wave 1)
+# --------------------------------------------------------------------------
+
+def record_entry_decisions(
+    decisions,
+    *,
+    book: str,
+    cycle_ts: str,
+    config_sha: Optional[str],
+) -> int:
+    """
+    Append one entry_decisions row per EntryDecision. Returns the row count.
+
+    Column order is ENTRY_DECISION_COLUMNS, and the values are read straight
+    off the decision -- copied, never recomputed, for the same reason
+    Position.model_prob is. The caller (scheduler._record_entry_decisions)
+    owns the try/except: this function raises on a storage error so the
+    caller can log it, and the caller must never let it block a trade.
+    """
+    if not decisions:
+        return 0
+    rows = [
+        (
+            cycle_ts, d.station_icao, d.target_date.isoformat(), d.bucket_c, d.side, book,
+            int(bool(d.approved)), d.rule_id, d.reason,
+            d.entry_price, d.entry_bid, d.model_prob, d.calibrated_prob, d.calibration_source,
+            d.raw_edge, d.admission_edge, d.sizing_edge, d.net_ev_at_size,
+            d.kelly_size_preclamp_usd, d.recommended_size_usd, d.min_net_ev,
+            d.station_maturity, config_sha,
+        )
+        for d in decisions
+    ]
+    placeholders = ", ".join("?" for _ in ENTRY_DECISION_COLUMNS)
+    with _db() as conn:
+        conn.executemany(
+            f"INSERT INTO entry_decisions ({', '.join(ENTRY_DECISION_COLUMNS)}) "
+            f"VALUES ({placeholders})",
+            rows,
+        )
+    return len(rows)
+
+
+def load_entry_decisions(
+    book: Optional[str] = None,
+    cycle_ts: Optional[str] = None,
+    limit: int = 1000,
+) -> List[dict]:
+    """Rows as dicts keyed by ENTRY_DECISION_COLUMNS, newest cycle first. For tests and operator scripts."""
+    query = f"SELECT {', '.join(ENTRY_DECISION_COLUMNS)} FROM entry_decisions"
+    clauses, params = [], []
+    if book is not None:
+        clauses.append("book = ?")
+        params.append(book)
+    if cycle_ts is not None:
+        clauses.append("cycle_ts = ?")
+        params.append(cycle_ts)
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY cycle_ts DESC, station_icao, bucket_c, side LIMIT ?"
+    params.append(limit)
+    with _db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [dict(zip(ENTRY_DECISION_COLUMNS, r)) for r in rows]
