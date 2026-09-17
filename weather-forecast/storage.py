@@ -186,6 +186,22 @@ def _ensure_position_economics_view(conn: sqlite3.Connection) -> None:
         "CREATE VIEW ", "CREATE VIEW IF NOT EXISTS ", 1))
 
 
+# WAVE 1 (2026-09-17). One row per EntryDecision per cycle, approved or not,
+# in the column order record_entry_decisions() writes them. The dataclass
+# fields these mirror are named identically so tests/test_wave1_entry_
+# decisions_recorded.py can assert parity by name. `book` is the executor
+# mode the decision was made under, or 'paper_shadow' for the read-only
+# paper twin a live station runs beside its primary pass.
+ENTRY_DECISION_COLUMNS = (
+    "cycle_ts", "station_icao", "target_date", "bucket_c", "side", "book",
+    "approved", "rule_id", "reason",
+    "entry_price", "entry_bid", "model_prob", "calibrated_prob", "calibration_source",
+    "raw_edge", "admission_edge", "sizing_edge", "net_ev_at_size",
+    "kelly_size_preclamp_usd", "recommended_size_usd", "min_net_ev",
+    "station_maturity", "config_sha",
+)
+
+
 def _connect() -> sqlite3.Connection:
     conn = sqlite3.connect(config.DB_PATH)
     conn.execute(
@@ -239,7 +255,12 @@ def _connect() -> sqlite3.Connection:
             entry_bid REAL,
             exit_blocked_reason TEXT,
             entry_fee_per_share REAL,
-            trigger_price REAL
+            trigger_price REAL,
+            calibrated_prob REAL,
+            calibration_source TEXT,
+            admission_edge REAL,
+            sizing_edge REAL,
+            kelly_size_preclamp_usd REAL
         )
         """
     )
@@ -306,6 +327,20 @@ def _connect() -> sqlite3.Connection:
         # a guess here corrupts the exact distribution the column exists to
         # measure. NULL on every pre-P1-10 row is the honest value.
         ("trigger_price", "trigger_price REAL"),
+        # WAVE 1 (2026-09-17): THE NUMBERS THAT DECIDED THE TRADE. model_prob
+        # and raw_edge above stay RAW (the isotonic map is fitted on
+        # model_prob); these are what the gates and Kelly actually compared:
+        # the P3-6 calibrated probability and its tier, the edge veto 0a2 was
+        # applied to, the edge Kelly sized on, and the Kelly size BEFORE the
+        # live $1.00 clamp and the exchange minimum. NULL on every earlier
+        # row, never backfilled: the map that would have applied is not
+        # honestly reconstructible. Same order as the CREATE TABLE above --
+        # _row_to_position reads SELECT * by position.
+        ("calibrated_prob", "calibrated_prob REAL"),
+        ("calibration_source", "calibration_source TEXT"),
+        ("admission_edge", "admission_edge REAL"),
+        ("sizing_edge", "sizing_edge REAL"),
+        ("kelly_size_preclamp_usd", "kelly_size_preclamp_usd REAL"),
     ):
         if column_name not in existing_columns:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {column_ddl}")
@@ -371,6 +406,50 @@ def _connect() -> sqlite3.Connection:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_loa_ts ON live_order_attempts(kind, ts)")
+
+    # WAVE 1: every EntryDecision, every cycle, whether or not it traded.
+    # `positions` records what was DONE; this records what was DECIDED and
+    # the numbers it was decided on, so the funnel between the EV screen and
+    # a fill can be read from rows instead of reconstructed from journal
+    # prose. Append-only. Candidates refused before evaluate_entry (the
+    # best_opportunities screen) do not get rows -- ev_snapshots holds that
+    # universe. See ENTRY_DECISION_COLUMNS for the meaning of `book`.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS entry_decisions (
+            cycle_ts TEXT NOT NULL,
+            station_icao TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            bucket_c INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            book TEXT NOT NULL,
+            approved INTEGER NOT NULL,
+            rule_id TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            entry_price REAL,
+            entry_bid REAL,
+            model_prob REAL,
+            calibrated_prob REAL,
+            calibration_source TEXT,
+            raw_edge REAL,
+            admission_edge REAL,
+            sizing_edge REAL,
+            net_ev_at_size REAL,
+            kelly_size_preclamp_usd REAL,
+            recommended_size_usd REAL,
+            min_net_ev REAL,
+            station_maturity TEXT,
+            config_sha TEXT
+        )
+        """
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_ed_cycle ON entry_decisions(cycle_ts)")
+    # The shadow-twin pairing key (spec 1d): entry_decisions(book='paper_shadow')
+    # joined to positions(execution_mode='live') on (station, date, bucket, side).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_ed_pair ON entry_decisions"
+        "(book, station_icao, target_date, bucket_c, side)"
+    )
 
     # WHICH BUCKET THE MARKET SETTLED INTO, per station-day. DELIBERATELY
     # NOT `observations`, and the distinction is the whole point.
@@ -481,6 +560,23 @@ def _connect() -> sqlite3.Connection:
     # After the ALTER TABLE migration above, so the view is defined against
     # the migrated `positions` shape rather than a short one.
     _ensure_position_economics_view(conn)
+
+    # WAVE 1 (2026-09-17). The entry-fee backfill above is a DML statement
+    # (UPDATE), and under sqlite3's default (legacy) transaction control that
+    # opens an implicit transaction covering every statement after it --
+    # including every CREATE TABLE / CREATE INDEX / ALTER TABLE below it in
+    # this function. Every normal caller goes through _db(), whose `with
+    # conn:` commits on the way out, so this was invisible. But
+    # `storage._connect().close()` is ALSO an established idiom across this
+    # suite (test_no_fd_leak.py, test_station_maturity.py, and this file's
+    # own tests) for "just run the migration" -- and .close() on a
+    # connection with a pending transaction rolls it back, silently, with no
+    # exception. On a legacy database that still needs the entry-fee
+    # backfill, that discarded every table/index created after it, including
+    # this Wave's entry_decisions. Committing explicitly here makes
+    # `_connect()` durable on its own, matching what `_db()` already gave
+    # every other caller.
+    conn.commit()
     return conn
 
 
