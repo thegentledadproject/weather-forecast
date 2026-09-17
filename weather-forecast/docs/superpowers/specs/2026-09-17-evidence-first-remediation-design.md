@@ -1,6 +1,6 @@
 # Evidence-first remediation — design
 
-Date: 2026-09-17. Status: approved in chat 2026-09-17; Wave 1 in progress.
+Date: 2026-09-17. Status: approved in chat 2026-09-17; Wave 1 MERGED (0dcc5f6) and DEPLOYED 2026-09-17 17:03 UTC; Wave 2 next.
 
 Source: the six read-only reviews of 2026-09-15 (architecture, trade
 logic, edge, stop/take, scheduler timing, paper-vs-live). Their findings
