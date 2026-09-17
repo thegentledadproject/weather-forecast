@@ -258,7 +258,7 @@ def _fmt_net_ev(value) -> str:
     return "unknown (no model ran)" if value is None else format(value, "+.1%")
 
 
-def _resolved_size_ok(spec, decision) -> tuple:
+def _resolved_size_ok(spec, decision, out: Optional[dict] = None) -> tuple:
     """
     Re-check the size-dependent gates at the notional that will ACTUALLY be
     submitted. Returns (ok, note); an empty note means the size did not move.
@@ -294,6 +294,10 @@ def _resolved_size_ok(spec, decision) -> tuple:
     slippage - fee, and of those only slippage moves with size, so the
     change is exactly the slippage increase. That needs no field the
     EntryDecision does not already carry.
+
+    `out`, when given, receives "net_ev_at_size": the net EV re-derived at the
+    resolved size (WAVE 1) -- the figure the stored live row now carries
+    instead of the $1.00 one. Only written on the branch that computes it.
     """
     requested = decision.recommended_size_usd or 0.0
     resolved = spec.notional_usd
@@ -375,6 +379,8 @@ def _resolved_size_ok(spec, decision) -> tuple:
         # spec that cannot report one.
         pad_cost = getattr(spec, "pad_cost_pct", 0.0)
         net_ev = decision.net_ev_at_size - (slippage - decision.slippage_at_size_pct) - pad_cost
+        if out is not None:
+            out["net_ev_at_size"] = net_ev
         # `<` against the bar, `<=` against the floor -- deliberately not one
         # expression. entry_manager approves a trade exactly ON the bar, so
         # re-testing it with `<=` would have this layer refuse an entry the
@@ -826,7 +832,7 @@ def open_position(decision: EntryDecision) -> None:
     position_id = f"{decision.station_icao}:{decision.target_date}:{decision.bucket_c}:{decision.side}:{entry_time}"
 
     def _position(size_usd: float, size_shares=None, entry_price=None, order_id=None,
-                  exit_blocked_reason=None) -> Position:
+                  exit_blocked_reason=None, net_ev_at_size=None) -> Position:
         return Position(
             position_id=position_id,
             station_icao=decision.station_icao,
@@ -860,7 +866,10 @@ def open_position(decision: EntryDecision) -> None:
             # stay distinguishable from "the model said 0".
             model_prob=decision.model_prob,
             raw_edge=decision.raw_edge,
-            net_ev_at_size=decision.net_ev_at_size,
+            # WAVE 1: the order path passes the figure re-derived at the
+            # RESOLVED size; the paper/manual paths pass nothing and keep the
+            # decision's own figure, which is the size they record at.
+            net_ev_at_size=net_ev_at_size if net_ev_at_size is not None else decision.net_ev_at_size,
             exit_blocked_reason=exit_blocked_reason,
             # WAVE 1: the deciding numbers, copied for the same reason
             # model_prob is -- see Position.calibrated_prob.
@@ -976,7 +985,8 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         print(f"[executor] {tag}: {label} order abandoned -- {drift_note}")
         return
 
-    size_ok, size_note = _resolved_size_ok(spec, decision)
+    resolved = {}
+    size_ok, size_note = _resolved_size_ok(spec, decision, out=resolved)
     if not size_ok:
         print(f"[executor] {tag}: {label} order abandoned -- {size_note}")
         return
@@ -1032,6 +1042,7 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
             size_usd=spec.notional_usd,
             size_shares=spec.size_shares,
             entry_price=spec.expected_price,
+            net_ev_at_size=resolved.get("net_ev_at_size"),
         ))
         return
 
@@ -1061,6 +1072,7 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         entry_price=fill_price,
         order_id=result.order_id,
         exit_blocked_reason=blocked,
+        net_ev_at_size=resolved.get("net_ev_at_size"),
     ))
 
 
