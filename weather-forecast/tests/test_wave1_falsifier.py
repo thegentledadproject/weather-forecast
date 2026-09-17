@@ -41,6 +41,13 @@ def db(tmp_path, monkeypatch):
                                    book="live", cycle_ts="2026-09-19T05:10:10+00:00", config_sha="s")
     storage.record_entry_decisions([_decision(32, True, "approved")],
                                    book="paper_shadow", cycle_ts="2026-09-19T05:00:10+00:00", config_sha="s")
+    # Before-window entry_decisions (2026-09-15, well inside [deploy-7d, deploy)):
+    # one approved, one refused -> WSSS before rate 1/2. Plus a paper_shadow
+    # row in the same window that must be excluded from the rate.
+    storage.record_entry_decisions([_decision(32, True, "approved"), _decision(33, False, "0a2")],
+                                   book="live", cycle_ts="2026-09-15T05:00:10+00:00", config_sha="s")
+    storage.record_entry_decisions([_decision(32, True, "approved")],
+                                   book="paper_shadow", cycle_ts="2026-09-15T05:00:10+00:00", config_sha="s")
     storage.open_position(_position("before-1", "2026-09-15T05:00:00+00:00", None, None))
     storage.open_position(_position("after-ok", "2026-09-19T05:30:00+00:00", 0.4, "pooled_isotonic"))
     storage.open_position(_position("after-uncal", "2026-09-19T05:31:00+00:00", None, "uncalibrated"))
@@ -51,12 +58,18 @@ def db(tmp_path, monkeypatch):
 def test_the_four_checks(db):
     out = wave1_falsifier.run(db, DEPLOY)
 
-    assert out["refusals_total"] == 3
-    assert out["refusals_by_cycle"] == [("2026-09-19T05:00:10+00:00", 1), ("2026-09-19T05:10:10+00:00", 2)]
+    assert out["refusals_total"] == 4
+    assert out["refusals_by_cycle"] == [
+        ("2026-09-15T05:00:10+00:00", 1),
+        ("2026-09-19T05:00:10+00:00", 1),
+        ("2026-09-19T05:10:10+00:00", 2),
+    ]
     assert out["calibration_gap_rows"] == 1            # after-gap only; pre-deploy NULL source is not a gap
-    assert out["paper_shadow_rows"] == 1
+    assert out["paper_shadow_rows"] == 2
     assert out["entries_per_station_day_before"] == {"WSSS": {"2026-09-15": 1}}
     assert out["entries_per_station_day_after"] == {"WSSS": {"2026-09-19": 3}}
+    assert out["approval_rate_by_station_before"] == {"WSSS": {"approved": 1, "total": 2, "rate": 0.5}}
+    assert out["approval_rate_by_station_after"] == {"WSSS": {"approved": 1, "total": 4, "rate": 0.25}}
 
 
 def test_the_connection_is_read_only(db, monkeypatch):
@@ -84,5 +97,27 @@ def test_write_attempt_raises_on_the_ro_connection(db):
 def test_main_prints_every_check(db, capsys):
     wave1_falsifier.main(["--db", db, "--deploy-ts", DEPLOY])
     out = capsys.readouterr().out
-    for label in ("refused decisions", "calibration gap", "paper_shadow rows", "entries per station-day"):
+    for label in ("refused decisions", "calibration gap", "paper_shadow rows", "entries per station-day",
+                  "APPROVAL RATE"):
         assert label in out
+
+
+def test_main_prints_the_per_station_approval_rates(db, capsys):
+    wave1_falsifier.main(["--db", db, "--deploy-ts", DEPLOY])
+    out = capsys.readouterr().out
+    assert "approval rate before 1/2 (50.0%), after 1/4 (25.0%)" in out
+
+
+def test_pre_wave1_schema_prints_clear_error_and_exits_nonzero(tmp_path, capsys):
+    path = str(tmp_path / "old.sqlite3")
+    con = sqlite3.connect(path)
+    con.execute("CREATE TABLE positions (station_icao TEXT, entry_time TEXT)")
+    con.commit()
+    con.close()
+
+    rc = wave1_falsifier.main(["--db", path, "--deploy-ts", DEPLOY])
+
+    out = capsys.readouterr().out
+    assert rc != 0
+    assert "schema predates Wave 1" in out
+    assert "run after the migration" in out
