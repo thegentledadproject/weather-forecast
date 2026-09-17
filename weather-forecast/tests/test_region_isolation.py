@@ -489,7 +489,7 @@ class TestPortfolioCapArgumentIsActuallyApplied:
         canned = _canned_decision(station="EUTEST", size=50.0)
         monkeypatch.setattr(
             entry_manager, "decide_entries",
-            lambda ev_results, token_map, min_net_ev=0.15: [canned],
+            lambda ev_results, token_map, min_net_ev=0.15, execution_mode=None: [canned],
         )
 
         ev_results = [_eu_ev(station="EUTEST")]

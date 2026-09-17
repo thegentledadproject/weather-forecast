@@ -136,12 +136,22 @@ ENTRY_RULE_IDS = frozenset({
 })
 
 
-def _execution_mode(station_icao: str) -> str:
-    """This station's executor mode, defaulted the same way executor does."""
+def _execution_mode(station_icao: str, execution_mode: Optional[str] = None) -> str:
+    """
+    This station's executor mode, defaulted the same way executor does.
+
+    `execution_mode`, when given, OVERRIDES the module-dict lookup for this
+    one evaluation (WAVE 1: the paper shadow pass evaluates a live station
+    as paper). It is threaded as a parameter and never written into
+    executor.EXECUTION_MODE, because a mutate-and-restore on the dict the
+    live order path reads would be a race with that path.
+    """
+    if execution_mode is not None:
+        return execution_mode
     return executor.EXECUTION_MODE.get(station_icao, "manual_review")
 
 
-def _candidate_is_paper(station_icao: str) -> bool:
+def _candidate_is_paper(station_icao: str, execution_mode: Optional[str] = None) -> bool:
     """
     Which track a candidate entry for this station belongs to, matching
     exactly what executor.open_position() stamps onto Position.is_paper.
@@ -155,10 +165,10 @@ def _candidate_is_paper(station_icao: str) -> bool:
     counts then disagree permanently, and the per-bucket cap silently stops
     binding on the track it is supposed to protect.
     """
-    return _execution_mode(station_icao) != "live"
+    return _execution_mode(station_icao, execution_mode) != "live"
 
 
-def _book_has_stop(station_icao: str) -> bool:
+def _book_has_stop(station_icao: str, execution_mode: Optional[str] = None) -> bool:
     """
     Whether a candidate entry for this station lands on a book that still has
     a stop-loss, i.e. whether risk_manager.evaluate_exit() can price-exit it.
@@ -168,16 +178,16 @@ def _book_has_stop(station_icao: str) -> bool:
     stop. "simulation" is not in that set and keeps its stop, because it
     exists to rehearse live decisions exactly.
     """
-    return _execution_mode(station_icao) not in config.HOLD_TO_SETTLEMENT_MODES
+    return _execution_mode(station_icao, execution_mode) not in config.HOLD_TO_SETTLEMENT_MODES
 
 
-def live_size_cap_usd(station_icao: str) -> Optional[float]:
+def live_size_cap_usd(station_icao: str, execution_mode: Optional[str] = None) -> Optional[float]:
     """
     The fixed notional this station must trade at, or None for normal Kelly
     sizing. Thin wrapper over config.live_size_cap_usd() that supplies the
     mode, so no caller has to remember to.
     """
-    return config.live_size_cap_usd(station_icao, _execution_mode(station_icao))
+    return config.live_size_cap_usd(station_icao, _execution_mode(station_icao, execution_mode))
 
 
 def gap_risk_haircut(
@@ -882,6 +892,7 @@ def evaluate_entry(
     ev_result: EVResult,
     token_id: str,
     min_net_ev: float = 0.15,
+    execution_mode: Optional[str] = None,
 ) -> EntryDecision:
     """
     Core entry point: turn one EVResult into a sized, gated
@@ -1042,7 +1053,7 @@ def evaluate_entry(
     # we can't tell -- either way, don't stack another leg onto it. Counted
     # within this candidate's own track (paper vs. real), matching how
     # executor.open_position() stamps Position.is_paper from the same mode.
-    candidate_is_paper = _candidate_is_paper(station_icao)
+    candidate_is_paper = _candidate_is_paper(station_icao, execution_mode)
     open_count = count_open_positions_for_bucket(
         station_icao, ev_result.target_date, ev_result.bucket_c, ev_result.side,
         is_paper=candidate_is_paper,
@@ -1209,7 +1220,7 @@ def evaluate_entry(
     # nothing has measured that bias. probability_calibration.haircut_applies
     # owns the rule; see the plan's section 12 for why this is conditional
     # rather than the flag flip the prerequisite originally asked for.
-    _has_stop = _book_has_stop(station_icao)
+    _has_stop = _book_has_stop(station_icao, execution_mode)
     if probability_calibration.haircut_applies(
         has_stop=_has_stop,
         calibration_source=getattr(ev_result, "calibration_source", probability_calibration.NO_TIER),
@@ -1233,7 +1244,7 @@ def evaluate_entry(
     # WAVE 1: the paper-equivalent stake, captured BEFORE the live clamp.
     preclamp_usd = size_usd
 
-    live_cap = live_size_cap_usd(station_icao)
+    live_cap = live_size_cap_usd(station_icao, execution_mode)
     if live_cap is not None:
         size_usd = min(size_usd, live_cap)
 
@@ -1390,6 +1401,7 @@ def decide_entries(
     ev_results: List[EVResult],
     token_map: dict,
     min_net_ev: float = 0.15,
+    execution_mode: Optional[str] = None,
 ) -> List[EntryDecision]:
     """
     Batch entry point: evaluate every candidate EVResult (typically
@@ -1399,7 +1411,7 @@ def decide_entries(
     was skipped, not just silently drop it.
     """
     return [
-        evaluate_entry(result, token_id, min_net_ev=min_net_ev)
+        evaluate_entry(result, token_id, min_net_ev=min_net_ev, execution_mode=execution_mode)
         for result, token_id in candidates_with_token_ids(ev_results, token_map)
     ]
 
@@ -1637,6 +1649,7 @@ def decide_portfolio_entries(
     token_map: dict,
     min_net_ev: float = 0.15,
     forecast_sources: Optional[list] = None,
+    execution_mode: Optional[str] = None,
 ) -> List[EntryDecision]:
     """
     The full, portfolio-aware entry point -- use this instead of calling
@@ -1655,12 +1668,15 @@ def decide_portfolio_entries(
          exceeds what REMAINS of the shared per-station-per-day budget
          after earlier cycles' entries, or of the portfolio-wide daily
          budget across all 13 stations (fail-closed if either can't be read)
+
+    execution_mode overrides executor.EXECUTION_MODE for this evaluation
+    only (see _execution_mode); None keeps today's lookup.
     """
     if not ev_results:
         return []
 
     station_icao = ev_results[0].station_icao
-    candidate_is_paper = _candidate_is_paper(station_icao)
+    candidate_is_paper = _candidate_is_paper(station_icao, execution_mode)
 
     # --- Stage 0: collection-first gate ----------------------------------
     bias_c, bias_n, bias_stderr = forecast_bias_stats(station_icao)
@@ -1714,7 +1730,7 @@ def decide_portfolio_entries(
                 f"is measured. Paper track only -- {station_icao} is not in LIVE_TRADING_STATIONS."
             )
 
-    decisions = decide_entries(ev_results, token_map, min_net_ev=min_net_ev)
+    decisions = decide_entries(ev_results, token_map, min_net_ev=min_net_ev, execution_mode=execution_mode)
     decisions = veto_same_bucket_conflicts(decisions)
 
     existing_usd = station_day_exposure_usd(

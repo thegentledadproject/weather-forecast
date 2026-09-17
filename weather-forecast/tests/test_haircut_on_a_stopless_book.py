@@ -102,10 +102,10 @@ def test_sizing_asks_whether_this_candidates_book_has_a_stop(monkeypatch):
                         lambda *a, **k: seen.append(k.get("has_stop")) or real(*a))
     monkeypatch.setattr(config, "HOLD_TO_SETTLEMENT_MODES", ("paper",))
 
-    monkeypatch.setattr(entry_manager, "_execution_mode", lambda icao: "paper")
+    monkeypatch.setattr(entry_manager, "_execution_mode", lambda icao, execution_mode=None: "paper")
     assert entry_manager._book_has_stop("WSSS") is False
-    monkeypatch.setattr(entry_manager, "_execution_mode", lambda icao: "live")
+    monkeypatch.setattr(entry_manager, "_execution_mode", lambda icao, execution_mode=None: "live")
     assert entry_manager._book_has_stop("WSSS") is True
-    monkeypatch.setattr(entry_manager, "_execution_mode", lambda icao: "simulation")
+    monkeypatch.setattr(entry_manager, "_execution_mode", lambda icao, execution_mode=None: "simulation")
     assert entry_manager._book_has_stop("WSSS") is True, \
         "simulation rehearses live and keeps both exits"

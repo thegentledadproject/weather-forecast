@@ -239,7 +239,7 @@ def test_the_exposure_is_read_on_the_candidate_track(monkeypatch):
 
     monkeypatch.setattr(entry_manager, "station_day_exposure_usd", station)
     monkeypatch.setattr(entry_manager, "portfolio_day_exposure_usd", portfolio)
-    monkeypatch.setattr(entry_manager, "_candidate_is_paper", lambda icao: False)
+    monkeypatch.setattr(entry_manager, "_candidate_is_paper", lambda icao, execution_mode=None: False)
 
     executor._resolved_size_ok(_spec(2.25), _decision(size_usd=0.30))
 

@@ -151,7 +151,7 @@ class TestItStaysNarrow:
         """
         _offline(monkeypatch)
         _book(monkeypatch, [_open(side="YES", is_paper=True)])
-        monkeypatch.setattr(entry_manager, "_candidate_is_paper", lambda icao: False)
+        monkeypatch.setattr(entry_manager, "_candidate_is_paper", lambda icao, execution_mode=None: False)
 
         decision = _decide(_ev(side="NO"))
 
