@@ -137,10 +137,13 @@ def _validated_mode(station_icao: str) -> str:
 # Live-track blast-radius checks
 # --------------------------------------------------------------------------
 
-def _live_budget_breach(size_usd: float, station_icao: str) -> Optional[str]:
+def _live_budget_breach(size_usd: float, station_icao: str, out: Optional[dict] = None) -> Optional[str]:
     """
     Whether opening one more live position would breach a config backstop.
     Returns the reason string, or None if the entry is within budget.
+
+    `out`, when given, receives "refusal_code" naming which backstop refused
+    (WAVE 1).
 
     These gate NEW ENTRIES ONLY. Exits are never blocked by a budget check
     anywhere in this module: refusing to close a real position because an
@@ -153,6 +156,11 @@ def _live_budget_breach(size_usd: float, station_icao: str) -> Optional[str]:
     slots. See config.REGION_LIVE_MAX_* for why this is a separate
     mechanism from the Kelly-side region pools.
     """
+    def _refuse(code: str, message: str) -> str:
+        if out is not None:
+            out["refusal_code"] = code
+        return message
+
     live_positions = [
         p for p in storage.load_open_positions(is_paper=False)
         if getattr(p, "execution_mode", "paper") == "live"
@@ -181,11 +189,11 @@ def _live_budget_breach(size_usd: float, station_icao: str) -> Optional[str]:
         live_positions, settled_tokens=storage.load_settled_live_tokens(),
     )
     if not recon.ok:
-        return (
+        return _refuse("recon", (
             f"exchange reconciliation did not pass -- {recon.describe()}. "
             f"Refusing to open anything new until the database and the exchange "
             f"agree, because every backstop below is computed from the database"
-        )
+        ))
 
     # AFTER reconciliation, DELIBERATELY. reconcile_cached() compares the
     # database's ENTIRE live book against the exchange's actual holdings;
@@ -202,20 +210,20 @@ def _live_budget_breach(size_usd: float, station_icao: str) -> Optional[str]:
 
     max_concurrent = config.REGION_LIVE_MAX_CONCURRENT_POSITIONS[region]
     if len(live_positions) >= max_concurrent:
-        return (
+        return _refuse("region_concurrent", (
             f"{len(live_positions)} live position(s) already open in region "
             f"{region!r}, at its REGION_LIVE_MAX_CONCURRENT_POSITIONS limit of "
             f"{max_concurrent}"
-        )
+        ))
 
     max_exposure = config.REGION_LIVE_MAX_TOTAL_EXPOSURE_USD[region]
     exposure = sum(p.size_usd for p in live_positions)
     if exposure + size_usd > max_exposure:
-        return (
+        return _refuse("region_exposure", (
             f"${exposure:.2f} live exposure in region {region!r} + ${size_usd:.2f} "
             f"would exceed its REGION_LIVE_MAX_TOTAL_EXPOSURE_USD ceiling of "
             f"${max_exposure:.2f}"
-        )
+        ))
 
     # SUBMISSIONS, not fills. This used to count rows in `positions`, and an
     # unfilled FOK writes no position -- deliberately, since a stored position
@@ -232,17 +240,17 @@ def _live_budget_breach(size_usd: float, station_icao: str) -> Optional[str]:
         "entry", today, station_icaos=config.stations_in_region(region),
     )
     if submitted is None:
-        return (
+        return _refuse("orders_per_day_unreadable", (
             "could not read today's live order count -- refusing to authorise on an "
             "unenforceable rate limit (a cap that fails open is not a cap)"
-        )
+        ))
     max_orders = config.REGION_LIVE_MAX_ORDERS_PER_DAY[region]
     if submitted >= max_orders:
-        return (
+        return _refuse("orders_per_day", (
             f"{submitted} live order(s) already SUBMITTED today (filled or not) in "
             f"region {region!r}, at its REGION_LIVE_MAX_ORDERS_PER_DAY limit of "
             f"{max_orders}"
-        )
+        ))
     return None
 
 
@@ -299,6 +307,11 @@ def _resolved_size_ok(spec, decision, out: Optional[dict] = None) -> tuple:
     resolved size (WAVE 1) -- the figure the stored live row now carries
     instead of the $1.00 one. Only written on the branch that computes it.
     """
+    def _refuse(code: str, message: str) -> tuple:
+        if out is not None:
+            out["refusal_code"] = code
+        return False, message
+
     requested = decision.recommended_size_usd or 0.0
     resolved = spec.notional_usd
     moved = resolved > requested + 1e-9
@@ -323,41 +336,41 @@ def _resolved_size_ok(spec, decision, out: Optional[dict] = None) -> tuple:
     try:
         depth = market_client.get_available_depth_usd(decision.token_id)
     except Exception as exc:  # noqa: BLE001 -- a failed re-check must not pass by default
-        return False, f"could not re-read depth at ${resolved:.2f} ({exc}) -- refusing to guess"
+        return _refuse("resolved_depth_unreadable", f"could not re-read depth at ${resolved:.2f} ({exc}) -- refusing to guess")
 
     if depth is None:
         # get_available_depth_usd documents None as "unknown depth", not
         # "zero depth", and entry_manager already treats unknown as a reason
         # to skip rather than to assume either extreme. Same stance here: a
         # gate that cannot be evaluated has not been passed.
-        return False, (
+        return _refuse("resolved_depth_unreadable", (
             f"depth is unreadable at submission (was ${decision.available_depth_usd:.2f} "
             f"at sizing) -- refusing to submit ${resolved:.2f} against an unknown book"
             if decision.available_depth_usd is not None else
             f"depth is unreadable at submission -- refusing to submit ${resolved:.2f} "
             f"against an unknown book"
-        )
+        ))
 
     ceiling = depth * config.MAX_DEPTH_UTILIZATION_PCT
     if resolved > ceiling:
-        return False, (
+        return _refuse("resolved_depth", (
             f"resolved notional ${resolved:.2f} is past {config.MAX_DEPTH_UTILIZATION_PCT:.0%} "
             f"of the ${depth:.2f} visible depth (${ceiling:.2f}); the entry was sized "
             f"at ${requested:.2f} against ${(decision.available_depth_usd or 0):.2f} "
             f"and the book has not held"
-        )
+        ))
 
     try:
         slippage = market_client.estimate_slippage(decision.token_id, resolved)
     except Exception as exc:  # noqa: BLE001 -- a failed re-check must not pass by default
-        return False, f"could not re-estimate slippage at ${resolved:.2f} ({exc}) -- refusing to guess"
+        return _refuse("resolved_slippage_unreadable", f"could not re-estimate slippage at ${resolved:.2f} ({exc}) -- refusing to guess")
 
     if slippage > config.MAX_ACCEPTABLE_SLIPPAGE_PCT:
-        return False, (
+        return _refuse("resolved_slippage", (
             f"slippage at the resolved ${resolved:.2f} is {slippage:.1%}, past the "
             f"{config.MAX_ACCEPTABLE_SLIPPAGE_PCT:.0%} hard gate (was "
             f"{(decision.slippage_at_size_pct or 0):.1%} at ${requested:.2f})"
-        )
+        ))
 
     if decision.net_ev_at_size is not None and decision.slippage_at_size_pct is not None:
         # THE THIRD CONSUMER OF THE SLIPPAGE BUDGET. Tick alignment, the limit
@@ -408,12 +421,12 @@ def _resolved_size_ok(spec, decision, out: Optional[dict] = None) -> tuple:
                 if bar is not None
                 else "the positive floor (no approval bar was carried on this decision)"
             )
-            return False, (
+            return _refuse("resolved_net_ev", (
                 f"net EV falls to {net_ev:+.1%} at the resolved ${resolved:.2f} "
                 f"(was {decision.net_ev_at_size:+.1%} at ${requested:.2f}), under "
                 f"{bar_text} -- the size the exchange forces is not the trade "
                 f"that was approved"
-            )
+            ))
         # THE THREE COMPONENTS, SEPARATELY. "Something ate the budget" is not
         # actionable; which one did determines the fix. Book-walk slippage is
         # the market, the pad is a config knob (LIVE_LIMIT_PAD_MAX_PCT), and
@@ -432,7 +445,7 @@ def _resolved_size_ok(spec, decision, out: Optional[dict] = None) -> tuple:
 
     budget_breach = _day_budget_breach(spec.notional_usd, decision)
     if budget_breach:
-        return False, budget_breach
+        return _refuse("day_budget", budget_breach)
 
     return True, note
 
@@ -557,6 +570,35 @@ def _record_attempt(kind, station_icao, spec, result, target_date=None,
             f"[executor] WARNING: could not record the live {kind} attempt for "
             f"{station_icao} ({outcome}): {exc}. The order itself is unaffected, but "
             f"LIVE_MAX_ORDERS_PER_DAY is now under-counting."
+        )
+
+
+def _record_refusal(decision, code: str, message: str, *, mode: str, spec=None) -> None:
+    """
+    WAVE 1: an executor refusal becomes one live_order_attempts row,
+    outcome='refused', detail='<code>: <message>' -- so a live entry that
+    was approved and then refused leaves a row and not only a print. Only
+    in live mode: this table is the live audit trail (see _record_attempt).
+    The daily order cap excludes these rows (storage.count_live_order_
+    attempts). Journal lines are untouched. Never raises.
+    """
+    if mode != "live":
+        return
+    built = spec is not None and getattr(spec, "ok", False)
+    try:
+        storage.record_live_order_attempt(
+            kind="entry", station_icao=decision.station_icao, outcome="refused",
+            target_date=decision.target_date, bucket_c=decision.bucket_c, side=decision.side,
+            notional_usd=spec.notional_usd if built else decision.recommended_size_usd,
+            size_shares=spec.size_shares if built else None,
+            limit_price=spec.limit_price if built else decision.entry_price,
+            order_id=None,
+            detail=f"{code}: {message}",
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[executor] WARNING: could not record the refusal ({code}) for "
+            f"{decision.station_icao} {decision.bucket_c}°{decision.side}: {exc}."
         )
 
 
@@ -825,6 +867,8 @@ def open_position(decision: EntryDecision) -> None:
 
     if decision.entry_price is None:
         print(f"[executor] {decision.station_icao} {decision.bucket_c}°{decision.side}: approved but no entry_price recorded -- refusing to open blind.")
+        _record_refusal(decision, "no_entry_price", "approved but no entry_price recorded -- refusing to open blind",
+                        mode=EXECUTION_MODE.get(decision.station_icao, "manual_review"))
         return
 
     mode = _validated_mode(decision.station_icao)
@@ -964,6 +1008,7 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
 
     if not decision.token_id:
         print(f"[executor] {tag}: {label} has no token_id -- cannot build an order, skipping.")
+        _record_refusal(decision, "no_token_id", "no token_id -- cannot build an order", mode=mode)
         return
 
     spec = wallet_client.build_entry_order(
@@ -978,25 +1023,30 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
 
     if not spec.ok:
         print(f"[executor] {tag}: {label} order NOT placeable -- {spec.reason}")
+        _record_refusal(decision, "order_not_placeable", spec.reason, mode=mode, spec=spec)
         return
 
     drift_ok, drift_note = _price_drift_ok(spec.limit_price, decision.entry_price)
     if not drift_ok:
         print(f"[executor] {tag}: {label} order abandoned -- {drift_note}")
+        _record_refusal(decision, "drift", drift_note, mode=mode, spec=spec)
         return
 
     resolved = {}
     size_ok, size_note = _resolved_size_ok(spec, decision, out=resolved)
     if not size_ok:
         print(f"[executor] {tag}: {label} order abandoned -- {size_note}")
+        _record_refusal(decision, resolved.get("refusal_code", "resolved_size"), size_note, mode=mode, spec=spec)
         return
     if size_note:
         print(f"[executor] {tag}: {label} resized -- {size_note}")
 
     if mode == "live":
-        breach = _live_budget_breach(spec.notional_usd, decision.station_icao)
+        backstop = {}
+        breach = _live_budget_breach(spec.notional_usd, decision.station_icao, out=backstop)
         if breach:
             print(f"[executor] LIVE: {label} entry BLOCKED by a risk backstop -- {breach}")
+            _record_refusal(decision, backstop.get("refusal_code", "live_backstop"), breach, mode=mode, spec=spec)
             return
 
     result = wallet_client.submit_order(spec, live=(mode == "live"))

@@ -1413,12 +1413,19 @@ def count_live_order_attempts(
     gating on this must treat an unreadable count as "cannot authorise",
     the same way the reconciliation check does -- a rate limit that fails
     open is not a rate limit.
+
+    `outcome='refused'` rows (WAVE 1: executor refusals that never built or
+    never submitted an order) are EXCLUDED. This cap counts submissions, and
+    a refusal is the one outcome that is not one -- counting them would let
+    a morning of refusals exhaust the real order budget, which would be a
+    trading change wearing a recording change's clothes.
     """
     try:
         with _db() as conn:
             if station_icaos is None:
                 row = conn.execute(
-                    "SELECT COUNT(*) FROM live_order_attempts WHERE kind = ? AND ts >= ?",
+                    "SELECT COUNT(*) FROM live_order_attempts "
+                    "WHERE kind = ? AND ts >= ? AND outcome != 'refused'",
                     (kind, since_iso),
                 ).fetchone()
             elif not station_icaos:
@@ -1427,7 +1434,8 @@ def count_live_order_attempts(
                 placeholders = ",".join("?" for _ in station_icaos)
                 row = conn.execute(
                     f"SELECT COUNT(*) FROM live_order_attempts "
-                    f"WHERE kind = ? AND ts >= ? AND station_icao IN ({placeholders})",
+                    f"WHERE kind = ? AND ts >= ? AND outcome != 'refused' "
+                    f"AND station_icao IN ({placeholders})",
                     (kind, since_iso, *station_icaos),
                 ).fetchone()
         return int(row[0]) if row else 0
