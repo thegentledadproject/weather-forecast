@@ -125,6 +125,9 @@ max_plausible_edge_for = config.max_plausible_edge_for
 # these; backtest/entry_sim.py stamps the SAME ones at the same sites, so the
 # replay funnel and the live funnel share a key (tests/test_gate_census.py).
 # The prose `reason` stays beside it -- nothing parses prose any more.
+# NOTE: `budget_scaled`/`budget_exhausted` OVERWRITE an incoming "approved" id (apply_portfolio_budget
+# relabels the decision it received) -- a funnel counting approved-and-sized rows by rule_id=="approved"
+# alone will undercount; it must also count "budget_scaled" rows.
 ENTRY_RULE_IDS = frozenset({
     "00", "00b", "00c", "0a", "0a2", "0b", "0b2", "0c",
     "kelly_nonpositive", "depth", "size_floor", "slippage", "net_ev_bar",

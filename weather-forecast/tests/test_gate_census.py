@@ -9,6 +9,7 @@ match. Adapted from the AST census in scratchpad/smoke_parity.py (section A).
 
 import ast
 import inspect
+import textwrap
 
 import entry_manager
 from backtest import entry_sim
@@ -16,7 +17,7 @@ from backtest import entry_sim
 
 def test_gate_count_matches_live_decision_sites():
     src = inspect.getsource(entry_manager.evaluate_entry)
-    tree = ast.parse(inspect.cleandoc(src))
+    tree = ast.parse(textwrap.dedent(src))
     fn = tree.body[0]
 
     decision_returns = 0
@@ -51,7 +52,7 @@ def _rule_id_literals(fn):
     _rejected factory passes `rule_id=rule_id` (a Name); that is the shape,
     not a site, and is skipped. Any other site without a literal fails.
     """
-    tree = ast.parse(inspect.cleandoc(inspect.getsource(fn)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
     literals = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Return) or not isinstance(node.value, ast.Call):
@@ -73,7 +74,7 @@ def _rule_id_literals(fn):
 
 def _dict_rule_ids(fn):
     """rule_id literals written through `EntryDecision(**{**d.__dict__, "rule_id": ...})`."""
-    tree = ast.parse(inspect.cleandoc(inspect.getsource(fn)))
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
     found = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Dict):
