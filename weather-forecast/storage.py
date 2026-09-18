@@ -693,9 +693,12 @@ def count_observations_from_source(station_icao: str, source: str) -> int:
 
 def _forecast_means_in_local_day(station_icao: str) -> Dict[date, float]:
     """
-    Per target date, the mean of the forecasts ISSUED DURING THAT
-    STATION'S OWN LOCAL TARGET DAY -- the set the live blend actually
-    averages, and the single definition both public callers below share.
+    Per target date, the mean of the forecasts fetched INSIDE THE ERROR-
+    SAMPLE WINDOW (config.error_sample_fetch_bounds_utc: local 04:00-08:00
+    of the target day since WAVE 2, the whole local day before it) -- the
+    single definition both public callers below share. Note this is
+    NARROWER than the set blend_central_estimate() averages on a given
+    tick, deliberately: see forecast_error_samples().
 
     THE WINDOW REPLACED A UTC DATE COMPARISON, AND IT CUTS BOTH ENDS.
     `date(fetched_at) <= target_date` was wrong in two ways at once once
@@ -720,25 +723,34 @@ def _forecast_means_in_local_day(station_icao: str) -> Dict[date, float]:
     """
     return {
         d: sum(t for _, t in rows) / len(rows)
-        for d, rows in _forecast_rows_in_local_day(station_icao).items()
+        for d, rows in _forecast_rows_in_sample_window(station_icao).items()
     }
 
 
-def _forecast_rows_in_local_day(station_icao: str) -> Dict[date, List[Tuple[str, float]]]:
+def forecast_rows_in_error_sample(
+    station_icao: str,
+    rows: List[Tuple[str, str, float, str]],
+    window_enabled: Optional[bool] = None,
+) -> Dict[date, List[Tuple[str, float]]]:
     """
-    {target_date: [(source, max_temp_c)]} for rows fetched INSIDE the
-    station's own local target day.
+    {target_date: [(source, max_temp_c)]} for the rows an ERROR SAMPLE may
+    be fitted on: fetched inside config.error_sample_fetch_bounds_utc() --
+    local 04:00-08:00 of the target day (WAVE 2, 2a), or the whole local
+    day when ERROR_SAMPLE_FETCH_WINDOW_ENABLED is off.
 
-    The single implementation of that window. _forecast_means_in_local_day()
+    PURE over `rows` in the shape forecast_rows_with_fetch_time() returns,
+    so wave2_falsifier.py can apply the same rule to rows it read through
+    a read-only connection. `window_enabled` overrides the flag for that
+    caller only; production callers leave it None.
+
+    The single implementation of the window. _forecast_means_in_local_day()
     averages it and forecast_source_mix_by_date() takes its key set, so the
-    bias and the mix that guards it can never be measured over different
-    forecast sets.
+    bias, the corrected RMSE, the measured and pooled spreads, bucket_bias
+    and the mix guard can never be measured over different forecast sets.
     """
     station = config.get_station(station_icao)
     buckets: Dict[date, List[Tuple[str, float]]] = {}
-    for target_date_iso, fetched_at, temp_c, source in forecast_rows_with_fetch_time(
-        station_icao
-    ):
+    for target_date_iso, fetched_at, temp_c, source in rows:
         try:
             target_date = date.fromisoformat(target_date_iso)
             fetched = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
@@ -748,11 +760,21 @@ def _forecast_rows_in_local_day(station_icao: str) -> Dict[date, List[Tuple[str,
             continue
         if fetched.tzinfo is None:
             fetched = fetched.replace(tzinfo=timezone.utc)
-        start, end = config.local_day_bounds_utc(station, target_date)
+        start, end = config.error_sample_fetch_bounds_utc(
+            station, target_date, enabled=window_enabled
+        )
         if not (start <= fetched < end):
             continue
         buckets.setdefault(target_date, []).append((source, temp_c))
     return buckets
+
+
+def _forecast_rows_in_sample_window(station_icao: str) -> Dict[date, List[Tuple[str, float]]]:
+    """forecast_rows_in_error_sample() over this station's stored rows --
+    the I/O wrapper every consumer in this module calls."""
+    return forecast_rows_in_error_sample(
+        station_icao, forecast_rows_with_fetch_time(station_icao)
+    )
 
 
 def forecast_error_samples(station_icao: str, source: str) -> List[float]:
@@ -768,19 +790,24 @@ def forecast_error_samples(station_icao: str, source: str) -> List[float]:
         count_observations_from_source(): the error must be measured
         against the record the market actually settles on, not against a
         convenient proxy.
-      - Only forecasts fetched on or before the target date count. A row
-        fetched afterwards has seen the day it is "forecasting" and would
-        flatter the bias toward zero -- the same lookahead the backtest
-        goes to lengths to avoid.
+      - Only forecasts fetched inside config.ERROR_SAMPLE_FETCH_WINDOW_LOCAL
+        (local 04:00-08:00 of the target day; WAVE 2, 2a) count. A row
+        fetched later has, at most stations, already seen the maximum it
+        is "forecasting" and would flatter the error toward zero -- the
+        same lookahead the backtest goes to lengths to avoid, one step
+        earlier in the day than the local-day cut caught it.
 
-    The per-date forecast mean mirrors blend_central_estimate's own
-    forecast term, so the number measured is the number corrected.
+    The per-date forecast mean is therefore the MORNING forecast term --
+    the one the 05:00-08:00 entry decision actually had -- and NOT the
+    all-day set blend_central_estimate() would average on a later tick.
+    The number measured is the number the entry path corrects with.
 
-    That mirror is why this excludes config.FORECAST_SOURCES_EXCLUDED_BY_STATION
-    too. A source kept out of the blend but left in this average would have the
-    bias correction chasing an error the estimate no longer contains -- and for
-    the case that motivated the exclusion list (RKSI/GFS, 3-7C cold) it would
-    push the corrected estimate the wrong way by roughly half that gap.
+    This window is also why the average excludes
+    config.FORECAST_SOURCES_EXCLUDED_BY_STATION. A source kept out of the
+    blend but left in this average would have the bias correction chasing
+    an error the estimate no longer contains -- and for the case that
+    motivated the exclusion list (RKSI/GFS, 3-7C cold) it would push the
+    corrected estimate the wrong way by roughly half that gap.
 
     A date whose ONLY forecast came from an excluded source drops out of the
     sample entirely, which is the same thing config.blendable_forecasts() does
@@ -824,9 +851,10 @@ def forecast_means_by_date(station_icao: str) -> Dict[date, float]:
     every target date it has any usable stored forecast for.
 
     THIS IS forecast_error_samples()' FORECAST TERM, LIFTED OUT. Same
-    sources, same exclusion list, same `date(f.fetched_at) <= target_date`
-    lookahead rule, same AVG -- the only thing dropped is the join to
-    observations, because the caller supplies the truth instead.
+    sources, same exclusion list, same fetch window
+    (config.error_sample_fetch_bounds_utc), same AVG -- the only thing
+    dropped is the join to observations, because the caller supplies the
+    truth instead.
 
     That caller is bucket_bias_audit.py, which measures the same bias
     against the bucket the MARKET settled into rather than against a
@@ -836,10 +864,10 @@ def forecast_means_by_date(station_icao: str) -> Dict[date, float]:
     forecast_error_samples() returns nothing at all for it.
 
     It lives HERE, next to forecast_error_samples(), and not in the audit
-    module, for exactly the reason that function's own docstring gives for
-    mirroring blend_central_estimate: two copies of "which forecasts count"
+    module, for the same reason that function's own docstring gives against
+    a second copy of the window: two copies of "which forecasts count"
     drift, and a bias measured over a different forecast set than the one
-    the estimate blends is not the number anybody thinks it is.
+    the estimate corrects is not the number anybody thinks it is.
     """
     return _forecast_means_in_local_day(station_icao)
 
@@ -858,15 +886,14 @@ def forecast_rows_with_fetch_time(station_icao: str) -> List[Tuple[str, str, flo
 
     THE TWO OMISSIONS ARE THE POINT, and neither is a relaxation.
     forecast_error_samples() and forecast_means_by_date() both AVG per
-    target date and both cut lookahead at `date(fetched_at) <= target_date`
-    -- a UTC calendar comparison. spread_audit.py needs to re-average the
-    subset of rows that existed at a given LEAD, measured against the end
-    of the station's own local day, so it needs the fetch times the AVG
-    throws away and a cutoff strictly tighter than the UTC one (a station
-    at UTC+8 finishes its day at 16:00Z, so 16:00Z-23:59Z on the target
-    date is same-calendar-day and still lookahead). Handing back rows and
-    letting the caller cut is the only way to get that; the caller is
-    responsible for applying a non-negative lead, and its tests pin it.
+    target date and both apply the error-sample fetch window
+    (forecast_rows_in_error_sample: local 04:00-08:00 of the target day).
+    spread_audit.py needs to re-average the subset of rows that existed at
+    a given LEAD, measured against the end of the station's own local day,
+    so it needs the fetch times the AVG throws away and its own cutoff.
+    Handing back rows and letting the caller cut is the only way to get
+    that; the caller is responsible for applying a non-negative lead, and
+    its tests pin it.
 
     What is NOT delegated is WHICH FORECASTS COUNT. The
     FORECAST_SOURCES_EXCLUDED_BY_STATION filter is applied here, for the
@@ -897,7 +924,7 @@ def forecast_source_mix_by_date(station_icao: str) -> Dict[date, frozenset]:
     {target_date: frozenset of forecast sources} over exactly the rows the
     bias correction is fitted on.
 
-    Shares _forecast_rows_in_local_day() with forecast_error_samples() ON
+    Shares _forecast_rows_in_sample_window() with forecast_error_samples() ON
     PURPOSE, for the reason that function's docstring gives about drift: a
     second copy of the local-day window rule would eventually answer a
     different question, and a mix measured over a different forecast set
@@ -906,7 +933,7 @@ def forecast_source_mix_by_date(station_icao: str) -> Dict[date, frozenset]:
     """
     return {
         d: frozenset(src for src, _ in rows)
-        for d, rows in _forecast_rows_in_local_day(station_icao).items()
+        for d, rows in _forecast_rows_in_sample_window(station_icao).items()
     }
 
 

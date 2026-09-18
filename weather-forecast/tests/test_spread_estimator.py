@@ -44,7 +44,10 @@ def seed_pairs(icao, errors, start=date(2026, 7, 1)):
         ))
         storage.save_forecast(PointForecast(
             station_icao=icao, source="open_meteo_ecmwf", target_date=target,
-            max_temp_c=truth + err, fetched_at=f"{target.isoformat()}T00:00:00+00:00",
+            max_temp_c=truth + err,
+            # 05:00 local, inside the WAVE 2 error-sample window for any offset.
+            fetched_at=(config.local_day_bounds_utc(icao, target)[0]
+                        + timedelta(hours=5)).isoformat(),
         ))
 
 

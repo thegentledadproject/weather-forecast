@@ -159,6 +159,44 @@ def local_day_bounds_utc(
     return start, start + timedelta(days=1)
 
 
+def error_sample_fetch_bounds_utc(
+    station: Union[str, StationConfig], target_date: date, enabled: Optional[bool] = None
+) -> tuple:
+    """
+    (start, end) of the fetch window a forecast row must fall in to enter
+    the error sample -- the bias, the corrected RMSE, the measured spread,
+    the pooled spread and the source mix are ALL fitted on this set
+    (storage.forecast_rows_in_error_sample). Half-open: start <= t < end.
+
+    WAVE 2 (2a). local_day_bounds_utc() above cuts hindsight at the END of
+    the local day, which stops a 23:00 row that has seen the maximum from
+    entering. It does not stop a 14:00 row, which at most stations has seen
+    it too: the daily maximum lands early-to-mid afternoon, and the
+    scheduler keeps fetching all day (scheduler._run_collection_cycle rides
+    along on every monitor_only tick). Measured on the production record
+    2026-09-15, the morning-only error sd is +6.5% wider than the all-day
+    one -- the all-day sample was making the model look sharper than the
+    05:00 decision actually is.
+
+    The window is ERROR_SAMPLE_FETCH_WINDOW_LOCAL in LOCAL hours of the
+    target day: (4, 8) is exactly the fetches an entry decision could have
+    seen (SCHEDULE_WINDOWS: collection 04:00-05:00, entries 05:00-08:00).
+    Anchored on the local day's start, so a DST station is right in both
+    halves of the year for the same reason local_day_bounds_utc is.
+
+    `enabled` defaults to ERROR_SAMPLE_FETCH_WINDOW_ENABLED; passing it
+    explicitly is how wave2_falsifier.py measures both windows from one
+    set of rows without flipping the production flag.
+    """
+    start, end = local_day_bounds_utc(station, target_date)
+    if enabled is None:
+        enabled = ERROR_SAMPLE_FETCH_WINDOW_ENABLED
+    if not enabled:
+        return start, end
+    lo_h, hi_h = ERROR_SAMPLE_FETCH_WINDOW_LOCAL
+    return start + timedelta(hours=lo_h), start + timedelta(hours=hi_h)
+
+
 # --- Observation source ranking -------------------------------------------
 # Most markets settle on Wunderground's station history, which is the
 # airport METAR record ("metar_daily_max", ingested by clients/metar_client
@@ -4996,3 +5034,23 @@ class _MaturityMapping(dict):
 
 
 STATION_MATURITY = _MaturityMapping()
+
+
+# ===========================================================================
+# WAVE 2 (2026-09-21) -- CORRECT THE INPUTS, ONE DAY.
+# docs/superpowers/specs/2026-09-17-evidence-first-remediation-design.md
+#
+# Every flag here defaults ON and is read at exactly one site, named beside
+# it. A revert is a flip here, never a code change, so the revert lands on
+# one day too. The stop condition (wave2_falsifier.py, read iii) flips
+# ERROR_SAMPLE_FETCH_WINDOW_ENABLED and SPREAD_FLOOR_MEASURED_TIERS_EXEMPT
+# off TOGETHER -- never one alone, because the pre-registered reads cannot
+# attribute a P&L move to one of the two.
+# ===========================================================================
+
+# 2a. WHICH FETCHES ENTER THE ERROR SAMPLE. Local hours of the target day,
+# half-open. Read by error_sample_fetch_bounds_utc(); applied in
+# storage.forecast_rows_in_error_sample(). See the helper's docstring for
+# the measurement and for why (4, 8) and not the local day.
+ERROR_SAMPLE_FETCH_WINDOW_LOCAL = (4, 8)
+ERROR_SAMPLE_FETCH_WINDOW_ENABLED = True
