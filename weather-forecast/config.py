@@ -5101,3 +5101,12 @@ MEASURED_SPREAD_MIN_C = 0.30
 # map's hard zero under ~0.096 turns a +0.04 raw edge into -0.05), where
 # Kelly then refused it under the wrong rule_id. False restores abs().
 SIGNED_ADMISSION_EDGE = True
+
+# 2d. A FAILED CALIBRATION FIT IS NOT CACHED. Read by
+# probability_calibration.calibration_for. The map cache is keyed per
+# station-day so a success is fitted once; a FAILURE (any exception in the
+# cohort read or the fit) used to be cached the same way, leaving every
+# station uncalibrated -- raw sizing, raw admission -- until the next day
+# after one transient storage error. Now logged and returned uncached, so
+# the next cycle retries. False restores the all-day cache of the failure.
+RETRY_FAILED_CALIBRATION_FITS = True
