@@ -133,10 +133,12 @@ class TestStationReport:
         """
         The measured tier's row must be what that tier would REALLY have
         produced: its own leave-one-out width, put through the same
-        _clamp_spread the live path applies -- WAVE 2 (2b) made that
-        measured=True (floored at MEASURED_SPREAD_MIN_C, not
-        SPREAD_FLOOR_C). An unclamped, or wrongly-clamped, row would score
-        a width production can never emit.
+        _clamp_spread the live path applies. This row is the naive
+        measured_error tier (not corrected_error_rmse), which ruling 2
+        keeps on SPREAD_FLOOR_C -- see config.py's SPREAD_FLOOR_C note --
+        so the reclamp here is unmeasured too. An unclamped, or
+        wrongly-clamped, row would score a width production can never
+        emit.
         """
         import calibration
 
@@ -151,7 +153,7 @@ class TestStationReport:
         assert report["measured"]["n"] > 0
         for width in report["measured"]["widths"].values():
             if width is not None:
-                assert width == calibration._clamp_spread(width, STATION, measured=True)
+                assert width == calibration._clamp_spread(width, STATION)
 
     def test_grid_optimum_is_reported_alongside_the_tier_rows(self, db):
         _seed_run(6)
