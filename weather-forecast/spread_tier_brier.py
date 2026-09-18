@@ -53,7 +53,11 @@ HONESTY CONSTRAINTS
 3. UNCLAMPED GRID, CLAMPED TIERS. The grid sweeps raw widths so the floor
    and ceiling are visible as choices rather than baked in. The tier rows
    apply calibration._clamp_spread exactly as production would, so a tier's
-   row is what that tier would really have produced.
+   row is what that tier would really have produced -- including
+   measured=True on the "measured" row since WAVE 2 (2b) (calibration.
+   MEASURED_SPREAD_SOURCES), which floors it at MEASURED_SPREAD_MIN_C
+   (0.30) instead of SPREAD_FLOOR_C (0.70). The ensemble, constant and
+   floor rows stay measured=False.
 
 WHAT IT CANNOT ANSWER YET
 -------------------------
@@ -322,8 +326,10 @@ def station_report(
 
     Tier rows:
       measured  -- leave-one-out stdev of that station's own forecast
-                   errors, clamped as production clamps it. This is the
-                   tier the ensemble currently pre-empts.
+                   errors, clamped as production clamps it (measured=True,
+                   floored at MEASURED_SPREAD_MIN_C rather than
+                   SPREAD_FLOOR_C -- see calibration.MEASURED_SPREAD_SOURCES).
+                   This is the tier the ensemble currently pre-empts.
       ensemble  -- the recorded ensemble dispersion for that day, if
                    pipeline.ensemble_spread_for() has stored one. No
                    history exists before 2026-08-29, so ensemble_proxy
@@ -363,7 +369,7 @@ def station_report(
     report["best_grid"] = best_width(days, grid)
 
     loo_widths = {
-        d: (calibration._clamp_spread(w, station_icao) if w is not None else None)
+        d: (calibration._clamp_spread(w, station_icao, measured=True) if w is not None else None)
         for d, w in leave_one_out_spread(
             _errors_by_date(station_icao), config.MIN_SPREAD_PAIRS
         ).items()

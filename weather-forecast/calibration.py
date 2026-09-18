@@ -247,10 +247,15 @@ def blend_central_estimate(
     return round(long_term_normal_c, 1)
 
 
-# The two tiers that are THIS STATION'S OWN error record. Everything else
-# estimate_std_dev can return is a property of a model, of the book, or of
-# nothing (a constant), and keeps the confidence floor.
-MEASURED_SPREAD_SOURCES = frozenset({"corrected_error", "measured_error"})
+# The tier(s) exempt from SPREAD_FLOOR_C's confidence floor -- see
+# _clamp_spread(measured=...). NOT both of this station's own error-record
+# tiers: measured_error_spread() (the naive tier, as few as MIN_SPREAD_PAIRS
+# = 5 pairs) has no upper guard of its own -- MAX_ERROR_RMSE_PER_BUCKET is
+# built on corrected_error_rmse, which entry_manager.collection_only_reason()
+# treats as "no gate" (fails open) whenever it is None, i.e. below
+# MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE (15) residuals. Only corrected_error is
+# both measured AND gate-visible, so only it is listed here.
+MEASURED_SPREAD_SOURCES = frozenset({"corrected_error"})
 
 
 def _clamp_spread(value: float, station_icao: str = None, measured: bool = False) -> float:
@@ -260,14 +265,23 @@ def _clamp_spread(value: float, station_icao: str = None, measured: bool = False
 
     WAVE 2 (2b): the floor depends on WHAT THE VALUE IS. An unmeasured
     tier (measured=False) keeps SPREAD_FLOOR_C: a too-narrow guess is the
-    dangerous direction. A measured tier (measured=True: this station's
-    own corrected RMSE or error sd) is floored only at
-    config.MEASURED_SPREAD_MIN_C, the settlement-rounding sd -- raising a
-    genuinely sharp station to 0.70 manufactures NO-side edges on the
+    dangerous direction. A measured tier (measured=True) is floored only
+    at config.MEASURED_SPREAD_MIN_C, the settlement-rounding sd -- raising
+    a genuinely sharp station to 0.70 manufactures NO-side edges on the
     bucket most likely to win (EDDM, 2026-09-09). Its upper bound is the
     MAX_ERROR_RMSE_PER_BUCKET gate in entry_manager, which stops the
-    station outright rather than clamping. SPREAD_FLOOR_MEASURED_TIERS_
-    EXEMPT=False restores the unconditional floor.
+    station outright rather than clamping.
+    config.SPREAD_FLOOR_MEASURED_TIERS_EXEMPT=False restores the
+    unconditional floor.
+
+    ONLY corrected_error_rmse() passes measured=True. measured_error_spread()
+    (the naive tier) does NOT, even though it is also this station's own
+    error record: the upper gate is built on corrected_error_rmse, which is
+    None below MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE (15) residuals, and
+    entry_manager.collection_only_reason() treats None as no gate at all
+    (fails open). A station with 5-14 pairs would then be exempt from the
+    floor with NO upper guard -- see MEASURED_SPREAD_SOURCES, which lists
+    only "corrected_error" for exactly this reason.
 
     The ceiling is regional, and a region whose ceiling is None is not
     clamped at all. station_icao defaults to None for station-agnostic
@@ -588,15 +602,22 @@ def estimate_std_dev(
         # replay the correction" as "no measurement for this station" would
         # drop them onto a tier config.LOW_CONFIDENCE_SPREAD_SOURCES makes
         # clear a DOUBLED edge bar.
-        # WAVE 2 (2b): measured=True -- this station's own record is floored
-        # at the rounding sd, not at the confidence floor. See _clamp_spread.
+        # WAVE 2 (2b): measured=True -- floored at the rounding sd, not the
+        # confidence floor. ONLY here: corrected_error_rmse is None below
+        # MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE (15), so it and
+        # MAX_ERROR_RMSE_PER_BUCKET (which fails open on None) see the same
+        # n. See _clamp_spread and MEASURED_SPREAD_SOURCES.
         corrected, _ = corrected_error_rmse(station_icao)
         if corrected is not None:
             return _clamp_spread(corrected, station_icao, measured=True), "corrected_error"
 
+        # NOT measured=True. This tier can fire on as few as MIN_SPREAD_PAIRS
+        # (5) pairs, below the gate's own visibility -- exempting it from
+        # the floor would leave a 5-14-pair station both under-priced and
+        # ungated. Keeps SPREAD_FLOOR_C.
         measured, _ = measured_error_spread(station_icao)
         if measured is not None:
-            return _clamp_spread(measured, station_icao, measured=True), "measured_error"
+            return _clamp_spread(measured, station_icao), "measured_error"
 
     if ensemble_members and len(ensemble_members) > 1:
         # A real ensemble spread is the one honest physical spread available

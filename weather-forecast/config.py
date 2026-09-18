@@ -4245,10 +4245,12 @@ MIN_SPREAD_PAIRS = 5
 # missed opportunity.
 #
 # FIXED IN WAVE 2 (2026-09-21), see SPREAD_FLOOR_MEASURED_TIERS_EXEMPT at
-# the end of this file: this floor now binds only on the UNMEASURED tiers
-# (ensemble, pooled_error, fallback_default). A station's own measured
-# error prices as-is between MEASURED_SPREAD_MIN_C and the
-# MAX_ERROR_RMSE_PER_BUCKET gate. The replay still cannot see either:
+# the end of this file: this floor now binds on every tier EXCEPT
+# corrected_error (ensemble, pooled_error, fallback_default, AND the naive
+# measured_error tier all still floor here -- measured_error is NOT exempt,
+# because it has no upper gate visible below 15 pairs; see the flag's own
+# comment). corrected_error prices as-is between MEASURED_SPREAD_MIN_C and
+# the MAX_ERROR_RMSE_PER_BUCKET gate. The replay still cannot see either:
 # backtest/engine.py passes allow_measured_spread=False unconditionally,
 # so the evidence is wave2_falsifier.py's read (ii), not a sweep.
 SPREAD_FLOOR_C = 0.7
@@ -5054,12 +5056,25 @@ STATION_MATURITY = _MaturityMapping()
 ERROR_SAMPLE_FETCH_WINDOW_LOCAL = (4, 8)
 ERROR_SAMPLE_FETCH_WINDOW_ENABLED = True
 
-# 2b. THE SPREAD FLOOR APPLIES ONLY TO UNMEASURED TIERS. Read by
-# calibration._clamp_spread(measured=...). A tier that is this station's
-# own error record (corrected_error, measured_error) prices its own value
-# between MEASURED_SPREAD_MIN_C below and, above, the existing upper gate
-# MAX_ERROR_RMSE_PER_BUCKET (entry_manager.collection_only_reason) plus the
-# regional ceiling. Ensemble, pooled and fallback tiers keep SPREAD_FLOOR_C.
+# 2b. THE SPREAD FLOOR IS EXEMPT FOR EXACTLY ONE TIER: corrected_error.
+# Read by calibration._clamp_spread(measured=...); the exempt tier(s) are
+# calibration.MEASURED_SPREAD_SOURCES. corrected_error_rmse() prices its
+# own value between MEASURED_SPREAD_MIN_C below and, above, the existing
+# upper gate MAX_ERROR_RMSE_PER_BUCKET (entry_manager.collection_only_reason)
+# plus the regional ceiling.
+#
+# THE NAIVE measured_error TIER IS DELIBERATELY NOT EXEMPT, even though it
+# is also this station's own error record. MAX_ERROR_RMSE_PER_BUCKET is
+# built on corrected_error_rmse, which returns None below
+# MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE (15) residuals -- and
+# entry_manager.collection_only_reason() treats that None as "no gate",
+# i.e. it FAILS OPEN. measured_error_spread() can fire on as few as
+# MIN_SPREAD_PAIRS (5) pairs, a station-day range corrected_error cannot
+# see at all. Exempting it too would leave a 5-14-pair station both
+# under-priced AND ungated -- worse after Task 1 narrowed the fetch
+# window, which only LOWERS n. Ensemble, pooled and fallback tiers also
+# keep SPREAD_FLOOR_C, for the ordinary reason that they are not this
+# station's own measurement at all.
 #
 # MEASURED_SPREAD_MIN_C is NUMERICAL SANITY, not confidence. Settlement is
 # a whole-degree bucket, so every error in the sample is measured against
