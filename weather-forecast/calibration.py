@@ -247,17 +247,36 @@ def blend_central_estimate(
     return round(long_term_normal_c, 1)
 
 
-def _clamp_spread(value: float, station_icao: str = None) -> float:
+# The two tiers that are THIS STATION'S OWN error record. Everything else
+# estimate_std_dev can return is a property of a model, of the book, or of
+# nothing (a constant), and keeps the confidence floor.
+MEASURED_SPREAD_SOURCES = frozenset({"corrected_error", "measured_error"})
+
+
+def _clamp_spread(value: float, station_icao: str = None, measured: bool = False) -> float:
     """
     Hold a spread inside its REGION's band -- see SPREAD_FLOOR_C and
     config.REGION_SPREAD_CEILING_C.
 
-    The floor is global: a spread below it is the dangerous direction
-    everywhere. The ceiling is regional, and a region whose ceiling is None
-    is not clamped at all. station_icao defaults to None for
-    station-agnostic callers, which keeps the legacy global ceiling.
+    WAVE 2 (2b): the floor depends on WHAT THE VALUE IS. An unmeasured
+    tier (measured=False) keeps SPREAD_FLOOR_C: a too-narrow guess is the
+    dangerous direction. A measured tier (measured=True: this station's
+    own corrected RMSE or error sd) is floored only at
+    config.MEASURED_SPREAD_MIN_C, the settlement-rounding sd -- raising a
+    genuinely sharp station to 0.70 manufactures NO-side edges on the
+    bucket most likely to win (EDDM, 2026-09-09). Its upper bound is the
+    MAX_ERROR_RMSE_PER_BUCKET gate in entry_manager, which stops the
+    station outright rather than clamping. SPREAD_FLOOR_MEASURED_TIERS_
+    EXEMPT=False restores the unconditional floor.
+
+    The ceiling is regional, and a region whose ceiling is None is not
+    clamped at all. station_icao defaults to None for station-agnostic
+    callers, which keeps the legacy global ceiling.
     """
-    floored = max(value, config.SPREAD_FLOOR_C)
+    if measured and config.SPREAD_FLOOR_MEASURED_TIERS_EXEMPT:
+        floored = max(value, config.MEASURED_SPREAD_MIN_C)
+    else:
+        floored = max(value, config.SPREAD_FLOOR_C)
     if station_icao is None:
         return round(min(floored, config.SPREAD_CEILING_C), 2)
     ceiling = config.region_spread_ceiling_c(station_icao)
@@ -266,18 +285,25 @@ def _clamp_spread(value: float, station_icao: str = None) -> float:
     return round(min(floored, ceiling), 2)
 
 
+def priced_measured_spread(value: float, station_icao: str) -> float:
+    """The spread a MEASURED tier prices for `value` -- _clamp_spread with
+    measured=True, public so wave2_falsifier.py reports the number the next
+    cycle will actually use."""
+    return _clamp_spread(value, station_icao, measured=True)
+
+
 def measured_error_spread(station_icao: str) -> tuple:
     """
     (std_dev_c, n_pairs) of this station's own forecast errors, or
     (None, n) when there are too few pairs to estimate it.
 
     Uses exactly the pairs the bias correction already measures --
-    storage.forecast_error_samples(), which is lookahead-guarded (only
-    forecasts fetched on or before the target date count) and measured
-    against the station's own settlement source. The bias correction takes
-    the MEAN of that distribution; this takes its standard deviation, which
-    is precisely the width the probability step needs and which nothing was
-    using.
+    storage.forecast_error_samples(), which admits only forecasts fetched
+    inside the error-sample window (config.error_sample_fetch_bounds_utc)
+    and measured against the station's own settlement source. The bias
+    correction takes the MEAN of that distribution; this takes its
+    standard deviation, which is precisely the width the probability step
+    needs and which nothing was using.
     """
     import storage  # local: keeps calibration importable without a db
 
@@ -288,6 +314,12 @@ def measured_error_spread(station_icao: str) -> tuple:
         print(f"[calibration] could not measure error spread for {station_icao}: {exc}")
         return None, 0
 
+    return measured_error_spread_from_errors(errors)
+
+
+def measured_error_spread_from_errors(errors: List[float]) -> tuple:
+    """measured_error_spread()'s arithmetic over an error list already in
+    hand -- pure, so wave2_falsifier.py can run it on rows it read itself."""
     if len(errors) < max(2, config.MIN_SPREAD_PAIRS):
         return None, len(errors)
     return statistics.stdev(errors), len(errors)
@@ -342,7 +374,13 @@ def corrected_error_rmse(station_icao: str) -> tuple:
     "Unknown" and "fine" are different answers, and the caller must not be
     able to confuse a new station with a resolvable one.
     """
-    dated = _dated_error_samples(station_icao)
+    return corrected_error_rmse_from_dated(_dated_error_samples(station_icao))
+
+
+def corrected_error_rmse_from_dated(dated) -> tuple:
+    """corrected_error_rmse()'s arithmetic over [(target_date, error_c)]
+    sorted oldest first -- pure, so wave2_falsifier.py can run it on rows
+    it read through a read-only connection."""
     warmup = max(1, config.MIN_BIAS_PAIRS_BEFORE_ENTRY)
 
     residuals = []
@@ -550,13 +588,15 @@ def estimate_std_dev(
         # replay the correction" as "no measurement for this station" would
         # drop them onto a tier config.LOW_CONFIDENCE_SPREAD_SOURCES makes
         # clear a DOUBLED edge bar.
+        # WAVE 2 (2b): measured=True -- this station's own record is floored
+        # at the rounding sd, not at the confidence floor. See _clamp_spread.
         corrected, _ = corrected_error_rmse(station_icao)
         if corrected is not None:
-            return _clamp_spread(corrected, station_icao), "corrected_error"
+            return _clamp_spread(corrected, station_icao, measured=True), "corrected_error"
 
         measured, _ = measured_error_spread(station_icao)
         if measured is not None:
-            return _clamp_spread(measured, station_icao), "measured_error"
+            return _clamp_spread(measured, station_icao, measured=True), "measured_error"
 
     if ensemble_members and len(ensemble_members) > 1:
         # A real ensemble spread is the one honest physical spread available

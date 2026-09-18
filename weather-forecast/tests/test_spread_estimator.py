@@ -144,18 +144,17 @@ def test_observed_history_variance_no_longer_drives_the_spread():
 # The clamp
 # --------------------------------------------------------------------------
 
-def test_a_tiny_measured_spread_is_raised_to_the_floor():
+def test_a_tiny_measured_spread_is_raised_to_the_rounding_sd():
     """
-    The safety-critical direction. A too-narrow spread makes the model look
-    certain, which inflates the model-vs-market gap, which is an edge the
-    sizing code will happily act on. WSSS's real measured spread (~0.56C)
-    sits below the floor.
+    A measured sd of 0.009C against whole-degree truth is a sample artefact.
+    WAVE 2 (2b): measured tiers are floored at MEASURED_SPREAD_MIN_C (the
+    settlement-rounding sd), no longer at SPREAD_FLOOR_C.
     """
     seed_pairs("WSSS", [0.01, 0.0, -0.01, 0.0, 0.01, -0.01])
     sd, src = calibration.estimate_std_dev([_fc(32.0)], [_obs(32.0)], station_icao="WSSS")
 
     assert src == "measured_error"
-    assert sd == pytest.approx(config.SPREAD_FLOOR_C)
+    assert sd == pytest.approx(config.MEASURED_SPREAD_MIN_C)
 
 
 def test_a_huge_measured_spread_is_capped():

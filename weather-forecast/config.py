@@ -4244,14 +4244,13 @@ MIN_SPREAD_PAIRS = 5
 # Raising a genuinely sharp station to 0.70 is an active harm, not a
 # missed opportunity.
 #
-# THIS IS DOCUMENTED, NOT FIXED. The floor is still unconditional and still
-# binds on every station measuring under 0.70. Standing it down for a
-# well-measured station is a real change to what the book buys and is
-# deliberately NOT made here -- see
-# docs/superpowers/plans/2026-09-09-spread-width-remediation.md Task 3,
-# and note that its planned replay gate does not exist:
-# backtest/engine.py passes allow_measured_spread=False unconditionally, so
-# no replay can see a spread change at all.
+# FIXED IN WAVE 2 (2026-09-21), see SPREAD_FLOOR_MEASURED_TIERS_EXEMPT at
+# the end of this file: this floor now binds only on the UNMEASURED tiers
+# (ensemble, pooled_error, fallback_default). A station's own measured
+# error prices as-is between MEASURED_SPREAD_MIN_C and the
+# MAX_ERROR_RMSE_PER_BUCKET gate. The replay still cannot see either:
+# backtest/engine.py passes allow_measured_spread=False unconditionally,
+# so the evidence is wave2_falsifier.py's read (ii), not a sweep.
 SPREAD_FLOOR_C = 0.7
 SPREAD_CEILING_C = 2.0
 
@@ -5054,3 +5053,27 @@ STATION_MATURITY = _MaturityMapping()
 # the measurement and for why (4, 8) and not the local day.
 ERROR_SAMPLE_FETCH_WINDOW_LOCAL = (4, 8)
 ERROR_SAMPLE_FETCH_WINDOW_ENABLED = True
+
+# 2b. THE SPREAD FLOOR APPLIES ONLY TO UNMEASURED TIERS. Read by
+# calibration._clamp_spread(measured=...). A tier that is this station's
+# own error record (corrected_error, measured_error) prices its own value
+# between MEASURED_SPREAD_MIN_C below and, above, the existing upper gate
+# MAX_ERROR_RMSE_PER_BUCKET (entry_manager.collection_only_reason) plus the
+# regional ceiling. Ensemble, pooled and fallback tiers keep SPREAD_FLOOR_C.
+#
+# MEASURED_SPREAD_MIN_C is NUMERICAL SANITY, not confidence. Settlement is
+# a whole-degree bucket, so every error in the sample is measured against
+# a truth carrying uniform rounding noise of width one bucket: sd =
+# sqrt(1/12) = 0.289C (0.32C on a 2F bucket). An error sd below that is a
+# sample artefact -- a handful of pairs whose rounded errors coincide --
+# and not a sharper forecast. 0.30 is that bound on the 0.01 grid. This
+# constant is an ADDITION beyond the spec's 2b row, not a tuning knob: it
+# is the sd of the settlement rounding the bucket integral already models,
+# not a value ever meant to move.
+#
+# THE REPLAY CANNOT SEE THIS: backtest/engine.py passes
+# allow_measured_spread=False unconditionally, so every replay prices on
+# "replay_constant". The safety argument is wave2_falsifier.py read (ii)
+# and the stop condition, not a backtest.
+SPREAD_FLOOR_MEASURED_TIERS_EXEMPT = True
+MEASURED_SPREAD_MIN_C = 0.30
