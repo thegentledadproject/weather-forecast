@@ -5110,3 +5110,13 @@ SIGNED_ADMISSION_EDGE = True
 # after one transient storage error. Now logged and returned uncached, so
 # the next cycle retries. False restores the all-day cache of the failure.
 RETRY_FAILED_CALIBRATION_FITS = True
+
+# 2e. A TOTAL FORECAST OUTAGE REFUSES. Read by entry_manager.today_source_
+# mix_for. An empty forecast source list -- every fetch failed, the
+# estimate fell through to observed/normal -- used to be folded to None
+# ("mix unknown"), which the mix guard skips, so the station traded a
+# central estimate with no forecast term. [] now reaches the guard as
+# frozenset() and is refused (rule_id collection_gate) with every fitted
+# source reported missing. None keeps meaning "not taught to pass a mix".
+# False folds [] back to None.
+REFUSE_ON_TOTAL_FORECAST_OUTAGE = True
