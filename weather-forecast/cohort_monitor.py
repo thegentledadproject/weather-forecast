@@ -89,6 +89,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import config
 import ev_engine
+import regimes
 import storage
 from backtest import resolution
 from models import Position
@@ -737,6 +738,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--reproduce", action="store_true",
                         help=f"score the published window {PUBLISHED_WINDOW[0]}..{PUBLISHED_WINDOW[1]} "
                              "and check it against the published totals")
+    parser.add_argument("--no-regime-split", action="store_true",
+                        help="one pooled all-time block instead of one block per side of "
+                             "config.REGIME_BOUNDARIES (the trailing windows are always pooled)")
     args = parser.parse_args(argv)
 
     since = date.fromisoformat(args.since) if args.since else None
@@ -780,7 +784,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0 if report["matches"] else 1
 
     window_summaries = windows(rows, as_of=as_of)
-    _print_summary("all time", window_summaries["all_time"])
+    # WAVE 2: a wave lands on one day, and the all-time figure must not pool
+    # across it. The trailing windows and the kill criterion below stay
+    # pooled: they are time-bounded already, and the kill criterion is a
+    # pre-committed rule whose window is not redefined mid-flight.
+    bounds = () if args.no_regime_split else regimes.boundaries()
+    if not bounds:
+        _print_summary("all time", window_summaries["all_time"])
+    else:
+        for label, segment in regimes.regime_segments(rows, bounds=bounds):
+            _print_summary(f"regime {label}", summarize(segment))
+        print("\n(trailing windows and the kill criterion are POOLED across regimes; "
+              "--no-regime-split prints the pooled all-time block)")
     for days in WINDOW_DAYS:
         _print_summary(f"trailing {days} days", window_summaries[f"trailing_{days}d"])
 

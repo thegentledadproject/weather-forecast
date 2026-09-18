@@ -123,6 +123,7 @@ from typing import Dict, List, Optional, Tuple
 
 import config
 import paper_trading_report
+import regimes
 import storage
 from backtest import resolution
 from models import Position
@@ -451,12 +452,10 @@ def _print_book(station_icao: str) -> None:
               f"{station_icao} --mode simulation`.")
 
 
-def _print_calibration(station_icao: str, since, until) -> None:
-    _rule("BEATS_MARKET -- measured on the live book, not the backtest")
-
-    entries, skipped = scorable_entries(station_icao, since=since, until=until)
-    stats = live_calibration(entries)
-
+def _print_calibration_stats(stats: Optional[dict]) -> None:
+    """One BEATS_MARKET block for one set of scored entries -- the body
+    _print_calibration used to inline, lifted out so it can run once per
+    regime (WAVE 2)."""
     if stats is None:
         print("  nothing scorable.")
     else:
@@ -493,6 +492,24 @@ def _print_calibration(station_icao: str, since, until) -> None:
         print("  The GATE reads the latest backtest summary, not this. This is a "
               "second,\n  independent read of the same question; see the module "
               "docstring for why\n  they are not expected to agree.")
+
+
+def _print_calibration(station_icao: str, since, until, regime_split: bool = True) -> None:
+    entries, skipped = scorable_entries(station_icao, since=since, until=until)
+
+    # WAVE 2: one block per side of config.REGIME_BOUNDARIES by default. The
+    # Brier gap is exactly the kind of number that must not be pooled across
+    # a deploy that changed what the model prices on.
+    regime_bounds = regimes.boundaries() if regime_split else ()
+    if regime_bounds:
+        for label, segment in regimes.regime_segments(
+            entries, key=lambda e: e["position"].target_date, bounds=regime_bounds,
+        ):
+            _rule(f"BEATS_MARKET -- regime {label}")
+            _print_calibration_stats(live_calibration(segment))
+    else:
+        _rule("BEATS_MARKET -- measured on the live book, not the backtest")
+        _print_calibration_stats(live_calibration(entries))
 
     if skipped:
         print("\n  not scored:")
@@ -558,7 +575,7 @@ def _print_what_promotion_buys(station_icao: str) -> None:
           "  allowlist is the only thing scoping real money to particular stations.")
 
 
-def print_dossier(station_icao: str, since=None, until=None) -> None:
+def print_dossier(station_icao: str, since=None, until=None, regime_split: bool = True) -> None:
     """The whole assembly for one station."""
     try:
         station = config.get_station(station_icao)
@@ -573,7 +590,7 @@ def print_dossier(station_icao: str, since=None, until=None) -> None:
     _print_standing(station_icao)
     _print_gate(station_icao)
     _print_book(station_icao)
-    _print_calibration(station_icao, since, until)
+    _print_calibration(station_icao, since, until, regime_split=regime_split)
     _print_what_promotion_buys(station_icao)
 
     print("\nThis tool recommends nothing -- see the module docstring.\n")
@@ -595,6 +612,10 @@ if __name__ == "__main__":
                              "entry_price means.")
     parser.add_argument("--until", default=None,
                         help="Ignore target dates after this (YYYY-MM-DD).")
+    parser.add_argument("--no-regime-split", action="store_true",
+                        help="One pooled BEATS_MARKET block instead of one per side of "
+                             "config.REGIME_BOUNDARIES.")
     args = parser.parse_args()
 
-    print_dossier(args.station, _parse_date(args.since), _parse_date(args.until))
+    print_dossier(args.station, _parse_date(args.since), _parse_date(args.until),
+                  regime_split=not args.no_regime_split)

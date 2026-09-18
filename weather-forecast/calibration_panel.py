@@ -65,6 +65,7 @@ import cohort_monitor
 import config
 import entry_manager
 import promotion_dossier
+import regimes
 
 # Days in the "recent" column. Long enough that a station with a normal
 # entry rate has more than a couple of independent days in it, short enough
@@ -522,11 +523,60 @@ def render_cohort_html(window_summaries: dict, kill_status: dict) -> str:
     return "".join(parts)
 
 
-def cohort_card(as_of=None, stations=None) -> str:
+def render_regime_split_html(rows) -> str:
+    """
+    One small table per side of config.REGIME_BOUNDARIES: n, station-days,
+    staked, held and as-traded return with the held CI. Empty string when
+    there are no boundaries, so a page without a wave renders as before.
+    An empty regime prints "no rows", never a number (reporting rule 1).
+    """
+    bounds = regimes.boundaries()
+    if not bounds:
+        return ""
+    parts = ["<div class='sub'>Per regime (config.REGIME_BOUNDARIES) &mdash; "
+             "the boundary day belongs to the new regime.</div>",
+             "<table><thead><tr><th>Regime</th><th>Rows</th><th>Days</th>"
+             "<th>Staked</th><th>Held</th><th>As traded</th><th>Held CI</th>"
+             "</tr></thead><tbody>"]
+    for label, segment in regimes.regime_segments(rows, bounds=bounds):
+        summary = cohort_monitor.summarize(segment)
+        if summary is None:
+            parts.append(
+                f"<tr><td class='mono'>{html.escape(label)}</td>"
+                f"<td colspan='6' class='sub'>no rows</td></tr>"
+            )
+            continue
+        held = summary["scenarios"]["held"]["return_pct"]
+        traded = summary["scenarios"]["as_traded"]["return_pct"]
+        ci = summary["ci"]["held_return_pct"]
+        ci_text = _EM_DASH if not ci else f"[{ci[0] * 100:+.1f}%, {ci[1] * 100:+.1f}%]"
+        parts.append(
+            "<tr>"
+            f"<td class='mono'>{html.escape(label)}</td>"
+            f"<td class='mono num'>{summary['n']}</td>"
+            f"<td class='mono num'>{summary['n_days']}</td>"
+            f"<td class='mono num'>{summary['staked_usd']:,.2f}</td>"
+            f"<td class='mono num'>{_EM_DASH if held is None else f'{held * 100:+.1f}%'}</td>"
+            f"<td class='mono num'>{_EM_DASH if traded is None else f'{traded * 100:+.1f}%'}</td>"
+            f"<td class='mono num'>{ci_text}</td>"
+            "</tr>"
+        )
+    parts.append("</tbody></table>")
+    return "".join(parts)
+
+
+def cohort_card(as_of=None, stations=None, regime_split: bool = True) -> str:
     """
     render_cohort_html() against the stored book -- the I/O half, so a
     generator needs one call and no knowledge of cohort_monitor's shape.
+
+    WAVE 2: prefixed with render_regime_split_html() by default, so the
+    dashboards show each side of a wave's deploy date; regime_split=False
+    is the pooled card alone.
     """
     rows, _ = cohort_monitor.load_cohort(stations=stations)
     window_summaries = cohort_monitor.windows(rows, as_of=as_of)
-    return render_cohort_html(window_summaries, cohort_monitor.kill_criterion(window_summaries))
+    card = render_cohort_html(window_summaries, cohort_monitor.kill_criterion(window_summaries))
+    if regime_split:
+        card = render_regime_split_html(rows) + card
+    return card

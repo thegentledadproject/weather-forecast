@@ -5120,3 +5120,14 @@ RETRY_FAILED_CALIBRATION_FITS = True
 # source reported missing. None keeps meaning "not taught to pass a mix".
 # False folds [] back to None.
 REFUSE_ON_TOTAL_FORECAST_OUTAGE = True
+
+# REGIME BOUNDARIES. ISO dates, strictly increasing. Each is the day a wave
+# first ran on the box, and every cohort report (cohort_monitor,
+# calibration_panel's cohort card, promotion_dossier's BEATS_MARKET block)
+# prints each side of every boundary separately by default -- pass
+# --no-regime-split / regime_split=False for the pooled figure. The
+# boundary day belongs to the NEW regime. See regimes.py.
+#
+# () on the branch; the Wave 2 deploy date is stamped here in the final
+# commit before merge, and moved by a follow-up commit if the deploy slips.
+REGIME_BOUNDARIES: tuple = ()
