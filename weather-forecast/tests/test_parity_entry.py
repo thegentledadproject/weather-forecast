@@ -58,7 +58,10 @@ CASES = [
     ("gate4c_opposite_side_open",   make_ev(0.55, 0.35), 0,    1,    0,    1000.0, 0.01, 0.15),
     ("gate5_unreadable_history",    make_ev(0.55, 0.35), 0,    0,    None, 1000.0, 0.01, 0.15),
     ("gate6_stop_out_cooldown",     make_ev(0.55, 0.35), 0,    0,    1,    1000.0, 0.01, 0.15),
-    ("gate7_kelly_le_zero",         make_ev(0.20, 0.35), 0,    0,    0,    1000.0, 0.01, 0.15),
+    # WAVE 2 (2c): a -0.15 raw edge now misses the SIGNED 0a2 bar in both
+    # implementations; kelly_nonpositive is reachable only with
+    # config.SIGNED_ADMISSION_EDGE=False (tests/test_wave2_signed_admission_edge.py).
+    ("gate2b_negative_edge_signed_bar", make_ev(0.20, 0.35), 0, 0,    0,    1000.0, 0.01, 0.15),
     ("gate8_depth_unknown",         make_ev(0.55, 0.35), 0,    0,    0,    None,   0.01, 0.15),
     ("gate9_depth_too_thin",        make_ev(0.55, 0.35), 0,    0,    0,    2.0,    0.01, 0.15),
     ("gate10_slippage_gate",        make_ev(0.55, 0.35), 0,    0,    0,    1000.0, 0.40, 0.15),

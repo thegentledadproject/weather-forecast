@@ -5092,3 +5092,12 @@ ERROR_SAMPLE_FETCH_WINDOW_ENABLED = True
 # and the stop condition, not a backtest.
 SPREAD_FLOOR_MEASURED_TIERS_EXEMPT = True
 MEASURED_SPREAD_MIN_C = 0.30
+
+# 2c. VETO 0a2 IS A SIGNED COMPARE. Read by entry_manager.edge_misses_bar
+# (shared with backtest/entry_sim.py). gate_edge is side-adjusted on both
+# bases -- P(this side wins) minus this side's ask -- so a negative value
+# is an OVERPRICED side, not a disagreement in our favour, and abs() was
+# admitting it. Live it only ever mattered on the calibrated basis (the
+# map's hard zero under ~0.096 turns a +0.04 raw edge into -0.05), where
+# Kelly then refused it under the wrong rule_id. False restores abs().
+SIGNED_ADMISSION_EDGE = True

@@ -109,6 +109,7 @@ import probability_calibration
 from entry_manager import (
     _calibration_note,
     admission_edge,
+    edge_misses_bar,
     compute_kelly_fraction,
     deciding_numbers,
     preclamp_size_usd,
@@ -281,7 +282,7 @@ def evaluate_entry_sim(
     # tests/test_calibrated_admission.py, which pins it so nobody reads a sweep
     # as evidence about a rule it never ran.
     gate_edge = deciding["admission_edge"]
-    if gate_edge is not None and abs(gate_edge) < min_abs_edge:
+    if gate_edge is not None and edge_misses_bar(gate_edge, min_abs_edge):
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         basis_note = (
             f" [bar applied to the calibrated edge: {_calibration_note(ev)}]"

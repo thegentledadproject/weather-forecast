@@ -420,6 +420,22 @@ def preclamp_size_usd(size_usd: float, depth_usd: Optional[float]) -> float:
     return round(size_usd, 2)
 
 
+def edge_misses_bar(gate_edge: float, min_abs_edge: float) -> bool:
+    """
+    Veto 0a2's comparison, shared with backtest/entry_sim.py.
+
+    WAVE 2 (2c): SIGNED. gate_edge is already side-adjusted (see
+    admission_edge and ev_engine.compute_ev_table's side_model_prob), so a
+    negative value is this side being OVERPRICED and must miss the bar.
+    abs() let a -0.05 calibrated edge through to Kelly, which refused it
+    under kelly_nonpositive; the decision was right and the rule_id was
+    wrong. config.SIGNED_ADMISSION_EDGE=False restores abs().
+    """
+    if config.SIGNED_ADMISSION_EDGE:
+        return gate_edge < min_abs_edge
+    return abs(gate_edge) < min_abs_edge
+
+
 def count_open_positions_for_bucket(
     station_icao: str,
     target_date: date,
@@ -1033,7 +1049,7 @@ def evaluate_entry(
     # to the noise. Ranking is NOT moved with it; that was measured separately
     # and was worse.
     gate_edge = deciding["admission_edge"]
-    if gate_edge is not None and abs(gate_edge) < min_abs_edge:
+    if gate_edge is not None and edge_misses_bar(gate_edge, min_abs_edge):
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         # Name the number that refused, for the same reason
         # config.entry_bar_label() exists: these lines are read off the journal
