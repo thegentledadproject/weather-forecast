@@ -135,9 +135,11 @@ class TestViewDefinitionStaysCurrent:
 
     def test_repeated_connections_do_not_churn_the_schema(self, db):
         """
-        This runs on every connection, and storage opens one per call. A
-        rebuild each time would take a write lock and bump the schema
-        cookie for a view holding no data.
+        WAVE 3 (3a): this runs from every migrate(), not from every
+        connection -- a rebuild each time would take a write lock and bump
+        the schema cookie for a view holding no data. Comparing the stored
+        SQL first (_ensure_position_economics_view) is what keeps a repeated
+        migrate() a single read instead of a DROP + CREATE.
         """
         storage.open_position(_pos("p", "paper", size_usd=1.0, entry_price=0.10))
 
@@ -150,9 +152,9 @@ class TestViewDefinitionStaysCurrent:
 
         before = cookie()
         for _ in range(5):
-            storage.load_open_positions()
+            storage.migrate()
 
-        assert cookie() == before, "the view is being dropped and recreated on every connection"
+        assert cookie() == before, "the view is being dropped and recreated on every migrate"
 
     def test_the_rebuild_tolerates_a_peer_winning_the_race(self, db):
         """

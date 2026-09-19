@@ -36,10 +36,8 @@ from models import ObservedReading, PointForecast, Position
 
 
 @pytest.fixture
-def temp_db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
-    storage.migrate()
-    return str(tmp_path / "trading.sqlite3")
+def temp_db(tmp_db):
+    return tmp_db
 
 
 @pytest.fixture

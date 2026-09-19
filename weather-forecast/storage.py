@@ -35,7 +35,7 @@ class StorageReadOnlyError(RuntimeError):
     """
 
 
-# WAVE 3 (3a). READ-ONLY BY DEFAULT. Until 2026-09-25 every process that
+# WAVE 3 (3a). READ-ONLY BY DEFAULT. At the Wave 3 deploy every process that
 # imported this module -- the daemon, the root dashboard timer, cohort_monitor,
 # the sweeps, a pytest run -- opened the file read-write AND issued the whole
 # schema (CREATE TABLE / ALTER TABLE / the entry-fee UPDATE) on every single
@@ -45,9 +45,11 @@ class StorageReadOnlyError(RuntimeError):
 # applied by migrate(), which scheduler._boot_storage() runs once at daemon
 # boot and deploy/deploy_daemon.sh runs once with the daemon stopped.
 #
-# Who flips this: scheduler.run_forever (the writer), manual_trigger.py,
-# bucket_bias.py --ingest and main.py (operator writes). Nothing else may --
-# tests/test_wave3_writers_and_readers.py pins the call sites by AST. The
+# Who will flip this, once wired: scheduler.run_forever (the writer),
+# manual_trigger.py, bucket_bias.py --ingest and main.py (operator writes).
+# NOT YET WIRED (Wave 3 Task 2): nothing calls set_writable()/migrate() at
+# this commit; do not deploy it alone. That next commit also adds
+# tests/test_wave3_writers_and_readers.py to pin the call sites by AST. The
 # test suite sets it in conftest because tests own their throwaway files.
 _WRITABLE = False
 
@@ -225,8 +227,8 @@ def _ensure_position_economics_view(conn: sqlite3.Connection) -> None:
     _POSITION_ECONOMICS_VIEW_SQL because sqlite_master stores the CREATE
     text with those words STRIPPED. Putting them in the constant would make
     the comparison above never match, and the view would then be dropped and
-    rebuilt on every single connection -- precisely the schema-write storm
-    the comparison exists to avoid.
+    rebuilt on every migrate -- precisely the schema-write storm the
+    comparison exists to avoid.
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'position_economics'"
@@ -304,7 +306,7 @@ def schema_summary() -> str:
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
     """
-    The DDL, moved VERBATIM out of _connect() on 2026-09-2x (Wave 3, 3a).
+    The DDL, moved VERBATIM out of _connect() at the Wave 3 deploy (3a).
     Every statement is idempotent (IF NOT EXISTS, PRAGMA-guarded ALTER,
     WHERE ... IS NULL) because a deploy and a daemon boot both run it.
     tests/test_no_fd_leak.py asserts every table is declared here and that
