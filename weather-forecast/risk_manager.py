@@ -64,10 +64,13 @@ hurting and a threshold move needs its own evidence.
 The code path below is intact and reads the constant at call time, so
 re-enabling is a one-value change rather than a revert of a revert.
 
-Both tighten after the edge-decay hour (config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL,
-10:00 local) -- consistent with the edge-decay analysis: once the morning's
-edge window closes, there's no new information coming to justify riding out
-volatility, so gains and losses should both be locked in faster.
+Only the TAKE-PROFIT tightens after the edge-decay hour
+(config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL, 10:00 local): TIGHTENED_PROFIT_TAKE_PCT
+0.25 against 0.50. The stop stopped tightening on 2026-08-18
+(TIGHTENED_STOP_LOSS_PCT is defined AS STOP_LOSS_PCT; stop_loss_audit.py
+scored the tightened stop at +21.49 USD for nothing measurable). The
+edge-decay reasoning survives on the take side only: once the morning's edge
+window closes, no new information justifies riding out a winner.
 
 THAT HOUR IS NO LONGER THE HOUR ENTRIES STOP. Entries closed at 10:00 when
 this was written; since 2026-08-17 they close at 08:00 (config.SCHEDULE_WINDOWS),
@@ -446,7 +449,10 @@ def evaluate_exit(
     stop_from, stop_basis = stop_basis_price(position)
 
     # Lottery-priced entries (see LOTTERY_PRICE_THRESHOLD in config.py)
-    # skip BOTH price-noise exits. Below that entry price the threshold
+    # skip the STOP-LOSS -- the one price-noise exit left since the trailing
+    # stop was removed 2026-08-17; the take below is NOT skipped, and
+    # memory's wsss-2026-08-19-trade note is what that asymmetry cost.
+    # Below that entry price the threshold
     # distances are sub-tick, so any book wobble "triggers" them, and they
     # convert "win p% of the time" into "win only if the price never dips
     # two cents first" -- forfeiting the exact tail scenarios that justify

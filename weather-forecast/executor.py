@@ -1153,7 +1153,7 @@ def close_position(
     Polymarket's taker fee on this leg -- not the raw quote. The raw quote
     overstates every exit by the fee, and since the fee is
     0.05 x (1 - price) x price per share it is worth several times a
-    typical trailing-stop gain: booking exits gross is how a strategy shows
+    typical take-profit gain: booking exits gross is how a strategy shows
     a positive record while losing money. The gross quote and the fee are
     both preserved in the exit_reason text so nothing is lost.
 

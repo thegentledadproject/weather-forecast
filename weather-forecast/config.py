@@ -1443,10 +1443,10 @@ DB_PATH = DATA_DIR / "polyweather.sqlite3"
 PROFIT_TAKE_PCT = 0.50      # take profit once gain reaches +50% of the risk unit
 STOP_LOSS_PCT = 0.30        # cut once loss reaches -30% of the risk unit
 
-# After this local hour, tighten both thresholds (see risk_manager.py) --
-# reflects the edge-decay curve: be quicker to lock in gains and quicker to
-# cut losses, since there's no more new edge coming to justify holding
-# through volatility.
+# After this local hour, tighten the take-profit target (see risk_manager.py;
+# the stop has NOT tightened since 2026-08-18, TIGHTENED_STOP_LOSS_PCT below)
+# -- reflects the edge-decay curve: be quicker to lock in gains, since
+# there's no more new edge coming to justify holding through volatility.
 #
 # THIS USED TO SAY "once the primary trading window closes", and that phrasing
 # was true only while entries also stopped at 10:00. They stop at 08:00 as of
@@ -2535,9 +2535,11 @@ SCHEDULE_WINDOWS = [
     # is 42 -> 72 ticks/day/station with fd count flat at 5 and RSS 72 MB
     # after 1d19h, so there is nothing to buy back by reverting.
     #
-    # ONE MEASUREMENT TRAP, since it will otherwise be rediscovered. At
-    # 10:00 the stop tightens from 30% to 15% of the risk unit, which
-    # RAISES the trigger price, so positions already sitting between the
+    # ONE MEASUREMENT TRAP, since it will otherwise be rediscovered.
+    # UNTIL 2026-08-18 the stop tightened at 10:00 from 30% to 15% of the
+    # risk unit (rows before that date only; TIGHTENED_STOP_LOSS_PCT is now
+    # the loose distance), which RAISED the trigger price, so positions
+    # already sitting between the
     # two levels are captured on the first tick after 10:00. That is the
     # edge-decay policy firing as designed, not a missed fill, and it
     # accounted for 5 of 12 and then 8 of 16 of what was first counted as

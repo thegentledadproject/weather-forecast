@@ -1357,7 +1357,7 @@ def update_high_water_mark(position_id: str, new_high_water_mark: float) -> None
 
 def close_position(position_id: str, exit_price: float, exit_time: str, status: str,
                    reason: str, trigger_price: Optional[float] = None) -> None:
-    """Mark a position closed -- status should be one of 'closed_take_profit', 'closed_stop_loss', 'closed_trailing_stop', 'closed_resolution' (see models.Position.status)."""
+    """Mark a position closed -- status should be one of 'closed_take_profit', 'closed_stop_loss', 'closed_resolution', or 'closed_trailing_stop' (historical rows only; see models.Position.status)."""
     with _db() as conn:
         conn.execute(
             # trigger_price uses COALESCE so a caller that does not know it
