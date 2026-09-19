@@ -49,7 +49,8 @@ def seed(icao="WSSS", pairs=10, errors=None, sims=0, start=date(2026, 7, 1)):
         storage.save_forecast(PointForecast(
             station_icao=icao, source="open_meteo_ecmwf", target_date=target,
             max_temp_c=32.0 + errors[i % len(errors)],
-            fetched_at=f"{target.isoformat()}T00:00:00+00:00",
+            fetched_at=(config.local_day_bounds_utc(icao, target)[0]
+                        + timedelta(hours=5)).isoformat(),
         ))
     for i in range(sims):
         storage.open_position(Position(
@@ -127,7 +128,9 @@ def test_a_drifting_bias_blocks_even_when_precise():
         target = date(2026, 7, 1) + timedelta(days=i)
         storage.save_forecast(PointForecast(
             station_icao="WSSS", source="open_meteo_ecmwf", target_date=target,
-            max_temp_c=32.0 + err, fetched_at=f"{target.isoformat()}T00:00:00+00:00",
+            max_temp_c=32.0 + err,
+            fetched_at=(config.local_day_bounds_utc("WSSS", target)[0]
+                        + timedelta(hours=5)).isoformat(),
         ))
     config._maturity_cache.clear()
     stable, detail = config.maturity_report("WSSS")["criteria"]["bias_stability"]

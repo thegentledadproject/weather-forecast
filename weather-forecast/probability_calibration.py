@@ -309,7 +309,15 @@ def calibration_for(station_icao: str, target_day: date):
             f"[probability_calibration] could not fit a map for {station_icao} "
             f"on {target_day} ({exc}) -- sizing on the raw model_prob with the "
             f"double buffer, which is the previous behaviour."
+            + (" Not cached; the next cycle retries."
+               if config.RETRY_FAILED_CALIBRATION_FITS else "")
         )
+        # WAVE 2 (2d): a failure is this CYCLE's answer, not the day's. Cached,
+        # one transient storage error uncalibrated every station until
+        # midnight (review 2026-09-15). Returned uncached, the next cycle
+        # re-reads; a success below is still cached per station-day.
+        if config.RETRY_FAILED_CALIBRATION_FITS:
+            return (None, NO_TIER, 0)
         result = (None, NO_TIER, 0)
 
     _CACHE[key] = result

@@ -159,6 +159,44 @@ def local_day_bounds_utc(
     return start, start + timedelta(days=1)
 
 
+def error_sample_fetch_bounds_utc(
+    station: Union[str, StationConfig], target_date: date, enabled: Optional[bool] = None
+) -> tuple:
+    """
+    (start, end) of the fetch window a forecast row must fall in to enter
+    the error sample -- the bias, the corrected RMSE, the measured spread,
+    the pooled spread and the source mix are ALL fitted on this set
+    (storage.forecast_rows_in_error_sample). Half-open: start <= t < end.
+
+    WAVE 2 (2a). local_day_bounds_utc() above cuts hindsight at the END of
+    the local day, which stops a 23:00 row that has seen the maximum from
+    entering. It does not stop a 14:00 row, which at most stations has seen
+    it too: the daily maximum lands early-to-mid afternoon, and the
+    scheduler keeps fetching all day (scheduler._run_collection_cycle rides
+    along on every monitor_only tick). Measured on the production record
+    2026-09-15, the morning-only error sd is +6.5% wider than the all-day
+    one -- the all-day sample was making the model look sharper than the
+    05:00 decision actually is.
+
+    The window is ERROR_SAMPLE_FETCH_WINDOW_LOCAL in LOCAL hours of the
+    target day: (4, 8) is exactly the fetches an entry decision could have
+    seen (SCHEDULE_WINDOWS: collection 04:00-05:00, entries 05:00-08:00).
+    Anchored on the local day's start, so a DST station is right in both
+    halves of the year for the same reason local_day_bounds_utc is.
+
+    `enabled` defaults to ERROR_SAMPLE_FETCH_WINDOW_ENABLED; passing it
+    explicitly is how wave2_falsifier.py measures both windows from one
+    set of rows without flipping the production flag.
+    """
+    start, end = local_day_bounds_utc(station, target_date)
+    if enabled is None:
+        enabled = ERROR_SAMPLE_FETCH_WINDOW_ENABLED
+    if not enabled:
+        return start, end
+    lo_h, hi_h = ERROR_SAMPLE_FETCH_WINDOW_LOCAL
+    return start + timedelta(hours=lo_h), start + timedelta(hours=hi_h)
+
+
 # --- Observation source ranking -------------------------------------------
 # Most markets settle on Wunderground's station history, which is the
 # airport METAR record ("metar_daily_max", ingested by clients/metar_client
@@ -4206,14 +4244,15 @@ MIN_SPREAD_PAIRS = 5
 # Raising a genuinely sharp station to 0.70 is an active harm, not a
 # missed opportunity.
 #
-# THIS IS DOCUMENTED, NOT FIXED. The floor is still unconditional and still
-# binds on every station measuring under 0.70. Standing it down for a
-# well-measured station is a real change to what the book buys and is
-# deliberately NOT made here -- see
-# docs/superpowers/plans/2026-09-09-spread-width-remediation.md Task 3,
-# and note that its planned replay gate does not exist:
-# backtest/engine.py passes allow_measured_spread=False unconditionally, so
-# no replay can see a spread change at all.
+# FIXED IN WAVE 2 (deployed 2026-09-19 15:00-19:00Z; regime boundary 2026-09-20, the first target date every station decides on the new code), see SPREAD_FLOOR_MEASURED_TIERS_EXEMPT at
+# the end of this file: this floor now binds on every tier EXCEPT
+# corrected_error (ensemble, pooled_error, fallback_default, AND the naive
+# measured_error tier all still floor here -- measured_error is NOT exempt,
+# because it has no upper gate visible below 15 pairs; see the flag's own
+# comment). corrected_error prices as-is between MEASURED_SPREAD_MIN_C and
+# the MAX_ERROR_RMSE_PER_BUCKET gate. The replay still cannot see either:
+# backtest/engine.py passes allow_measured_spread=False unconditionally,
+# so the evidence is wave2_falsifier.py's read (ii), not a sweep.
 SPREAD_FLOOR_C = 0.7
 SPREAD_CEILING_C = 2.0
 
@@ -4996,3 +5035,99 @@ class _MaturityMapping(dict):
 
 
 STATION_MATURITY = _MaturityMapping()
+
+
+# ===========================================================================
+# WAVE 2 (deployed 2026-09-19 15:00-19:00Z; regime boundary 2026-09-20, the first target date every station decides on the new code) -- CORRECT THE INPUTS, ONE DAY.
+# docs/superpowers/specs/2026-09-17-evidence-first-remediation-design.md
+#
+# Every flag here defaults ON and is read at exactly one site, named beside
+# it. A revert is a flip here, never a code change, so the revert lands on
+# one day too. The stop condition (wave2_falsifier.py, read iii) flips
+# ERROR_SAMPLE_FETCH_WINDOW_ENABLED and SPREAD_FLOOR_MEASURED_TIERS_EXEMPT
+# off TOGETHER -- never one alone, because the pre-registered reads cannot
+# attribute a P&L move to one of the two.
+# ===========================================================================
+
+# 2a. WHICH FETCHES ENTER THE ERROR SAMPLE. Local hours of the target day,
+# half-open. Read by error_sample_fetch_bounds_utc(); applied in
+# storage.forecast_rows_in_error_sample(). See the helper's docstring for
+# the measurement and for why (4, 8) and not the local day.
+ERROR_SAMPLE_FETCH_WINDOW_LOCAL = (4, 8)
+ERROR_SAMPLE_FETCH_WINDOW_ENABLED = True
+
+# 2b. THE SPREAD FLOOR IS EXEMPT FOR EXACTLY ONE TIER: corrected_error.
+# Read by calibration._clamp_spread(measured=...); the exempt tier(s) are
+# calibration.MEASURED_SPREAD_SOURCES. corrected_error_rmse() prices its
+# own value between MEASURED_SPREAD_MIN_C below and, above, the existing
+# upper gate MAX_ERROR_RMSE_PER_BUCKET (entry_manager.collection_only_reason)
+# plus the regional ceiling.
+#
+# THE NAIVE measured_error TIER IS DELIBERATELY NOT EXEMPT, even though it
+# is also this station's own error record. MAX_ERROR_RMSE_PER_BUCKET is
+# built on corrected_error_rmse, which returns None below
+# MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE (15) residuals -- and
+# entry_manager.collection_only_reason() treats that None as "no gate",
+# i.e. it FAILS OPEN. measured_error_spread() can fire on as few as
+# MIN_SPREAD_PAIRS (5) pairs, a station-day range corrected_error cannot
+# see at all. Exempting it too would leave a 5-14-pair station both
+# under-priced AND ungated -- worse after Task 1 narrowed the fetch
+# window, which only LOWERS n. Ensemble, pooled and fallback tiers also
+# keep SPREAD_FLOOR_C, for the ordinary reason that they are not this
+# station's own measurement at all.
+#
+# MEASURED_SPREAD_MIN_C is NUMERICAL SANITY, not confidence. Settlement is
+# a whole-degree bucket, so every error in the sample is measured against
+# a truth carrying uniform rounding noise of width one bucket: sd =
+# sqrt(1/12) = 0.289C (0.32C on a 2F bucket). An error sd below that is a
+# sample artefact -- a handful of pairs whose rounded errors coincide --
+# and not a sharper forecast. 0.30 is that bound on the 0.01 grid. This
+# constant is an ADDITION beyond the spec's 2b row, not a tuning knob: it
+# is the sd of the settlement rounding the bucket integral already models,
+# not a value ever meant to move.
+#
+# THE REPLAY CANNOT SEE THIS: backtest/engine.py passes
+# allow_measured_spread=False unconditionally, so every replay prices on
+# "replay_constant". The safety argument is wave2_falsifier.py read (ii)
+# and the stop condition, not a backtest.
+SPREAD_FLOOR_MEASURED_TIERS_EXEMPT = True
+MEASURED_SPREAD_MIN_C = 0.30
+
+# 2c. VETO 0a2 IS A SIGNED COMPARE. Read by entry_manager.edge_misses_bar
+# (shared with backtest/entry_sim.py). gate_edge is side-adjusted on both
+# bases -- P(this side wins) minus this side's ask -- so a negative value
+# is an OVERPRICED side, not a disagreement in our favour, and abs() was
+# admitting it. Live it only ever mattered on the calibrated basis (the
+# map's hard zero under ~0.096 turns a +0.04 raw edge into -0.05), where
+# Kelly then refused it under the wrong rule_id. False restores abs().
+SIGNED_ADMISSION_EDGE = True
+
+# 2d. A FAILED CALIBRATION FIT IS NOT CACHED. Read by
+# probability_calibration.calibration_for. The map cache is keyed per
+# station-day so a success is fitted once; a FAILURE (any exception in the
+# cohort read or the fit) used to be cached the same way, leaving every
+# station uncalibrated -- raw sizing, raw admission -- until the next day
+# after one transient storage error. Now logged and returned uncached, so
+# the next cycle retries. False restores the all-day cache of the failure.
+RETRY_FAILED_CALIBRATION_FITS = True
+
+# 2e. A TOTAL FORECAST OUTAGE REFUSES. Read by entry_manager.today_source_
+# mix_for. An empty forecast source list -- every fetch failed, the
+# estimate fell through to observed/normal -- used to be folded to None
+# ("mix unknown"), which the mix guard skips, so the station traded a
+# central estimate with no forecast term. [] now reaches the guard as
+# frozenset() and is refused (rule_id collection_gate) with every fitted
+# source reported missing. None keeps meaning "not taught to pass a mix".
+# False folds [] back to None.
+REFUSE_ON_TOTAL_FORECAST_OUTAGE = True
+
+# REGIME BOUNDARIES. ISO dates, strictly increasing. Each is the day a wave
+# first ran on the box, and every cohort report (cohort_monitor,
+# calibration_panel's cohort card, promotion_dossier's BEATS_MARKET block)
+# prints each side of every boundary separately by default -- pass
+# --no-regime-split / regime_split=False for the pooled figure. The
+# boundary day belongs to the NEW regime. See regimes.py.
+#
+# () on the branch; the Wave 2 deploy date is stamped here in the final
+# commit before merge, and moved by a follow-up commit if the deploy slips.
+REGIME_BOUNDARIES: tuple = ("2026-09-20",)

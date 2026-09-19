@@ -250,12 +250,12 @@ def test_forecast_error_samples_query(tmp_path, monkeypatch):
     # Aug 1: settled 32.0; forecasts 30.0 + 31.0 -> mean 30.5 -> error -1.5
     conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-01',32.0,'metar_daily_max')")
     conn.execute("INSERT INTO forecasts VALUES ('WSSS','a','2026-08-01',30.0,'2026-07-31T22:00:00+00:00','')")
-    conn.execute("INSERT INTO forecasts VALUES ('WSSS','b','2026-08-01',31.0,'2026-08-01T05:00:00+00:00','')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','b','2026-08-01',31.0,'2026-07-31T23:00:00+00:00','')")
     # Fetched two days LATE -- it has seen the day it "forecasts". Excluded.
     conn.execute("INSERT INTO forecasts VALUES ('WSSS','c','2026-08-01',32.0,'2026-08-03T00:00:00+00:00','')")
     # Aug 2: settled 30.0; forecast 30.0 -> error 0.0
     conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-02',30.0,'metar_daily_max')")
-    conn.execute("INSERT INTO forecasts VALUES ('WSSS','a','2026-08-02',30.0,'2026-08-02T00:00:00+00:00','')")
+    conn.execute("INSERT INTO forecasts VALUES ('WSSS','a','2026-08-02',30.0,'2026-08-01T21:00:00+00:00','')")
     # Aug 3's observation is from the wrong source -- not settlement truth.
     conn.execute("INSERT INTO observations VALUES ('WSSS','2026-08-03',25.0,'open_meteo')")
     conn.execute("INSERT INTO forecasts VALUES ('WSSS','a','2026-08-03',31.0,'2026-08-03T05:00:00+00:00','')")

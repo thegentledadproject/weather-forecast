@@ -29,14 +29,14 @@ from backtest import entry_sim
 
 
 def make_ev(model_prob, price, station="WSSS", bucket=32, side="YES", fee=0.0,
-            spread_source="ensemble"):
+            spread_source="ensemble", exit_fee=0.0):
     raw_edge = None if price is None else model_prob - price
     return EVResult(
         station_icao=station, target_date=date(2026, 8, 10), bucket_c=bucket, side=side,
         model_prob=model_prob, market_price=price, raw_edge=raw_edge,
         estimated_slippage_pct=0.01, fee_rate_pct=fee,
-        net_ev_per_dollar=None if price in (None, 0) else raw_edge / price - 0.01 - fee,
-        spread_source=spread_source,
+        net_ev_per_dollar=None if price in (None, 0) else raw_edge / price - 0.01 - fee - exit_fee,
+        spread_source=spread_source, expected_exit_fee_pct=exit_fee,
     )
 
 
@@ -58,13 +58,18 @@ CASES = [
     ("gate4c_opposite_side_open",   make_ev(0.55, 0.35), 0,    1,    0,    1000.0, 0.01, 0.15),
     ("gate5_unreadable_history",    make_ev(0.55, 0.35), 0,    0,    None, 1000.0, 0.01, 0.15),
     ("gate6_stop_out_cooldown",     make_ev(0.55, 0.35), 0,    0,    1,    1000.0, 0.01, 0.15),
-    ("gate7_kelly_le_zero",         make_ev(0.20, 0.35), 0,    0,    0,    1000.0, 0.01, 0.15),
+    # WAVE 2 (2c): a -0.15 raw edge now misses the SIGNED 0a2 bar in both
+    # implementations; kelly_nonpositive is reachable only with
+    # config.SIGNED_ADMISSION_EDGE=False (tests/test_wave2_signed_admission_edge.py).
+    ("gate2b_negative_edge_signed_bar", make_ev(0.20, 0.35), 0, 0,    0,    1000.0, 0.01, 0.15),
     ("gate8_depth_unknown",         make_ev(0.55, 0.35), 0,    0,    0,    None,   0.01, 0.15),
     ("gate9_depth_too_thin",        make_ev(0.55, 0.35), 0,    0,    0,    2.0,    0.01, 0.15),
     ("gate10_slippage_gate",        make_ev(0.55, 0.35), 0,    0,    0,    1000.0, 0.40, 0.15),
     ("gate11_net_ev_at_size",       make_ev(0.55, 0.35), 0,    0,    0,    1000.0, 0.01, 0.90),
     ("gate12_approved",             make_ev(0.55, 0.35), 0,    0,    0,    1000.0, 0.01, 0.15),
     ("gate12_approved_exploratory", make_ev(0.55, 0.35, station="WMKK"), 0, 0, 0, 1000.0, 0.01, 0.15),
+    # WAVE 2 (2f): the exit-fee term live subtracts from net_ev_at_size.
+    ("gate12_approved_with_exit_fee", make_ev(0.55, 0.35, exit_fee=0.04), 0, 0, 0, 1000.0, 0.01, 0.15),
 ]
 
 

@@ -53,7 +53,13 @@ HONESTY CONSTRAINTS
 3. UNCLAMPED GRID, CLAMPED TIERS. The grid sweeps raw widths so the floor
    and ceiling are visible as choices rather than baked in. The tier rows
    apply calibration._clamp_spread exactly as production would, so a tier's
-   row is what that tier would really have produced.
+   row is what that tier would really have produced. Since WAVE 2 (2b) that
+   means passing measured= correctly per row: this module's "measured" row
+   is the naive leave-one-out stdev, i.e. production's measured_error tier,
+   which ruling 2 keeps on SPREAD_FLOOR_C (see config.py's SPREAD_FLOOR_C
+   note) -- so it stays measured=False (the default), same as the
+   ensemble, constant and floor rows. No row here calls measured=True: this
+   module has no equivalent of corrected_error_rmse's bias-lag replay.
 
 WHAT IT CANNOT ANSWER YET
 -------------------------
@@ -322,8 +328,13 @@ def station_report(
 
     Tier rows:
       measured  -- leave-one-out stdev of that station's own forecast
-                   errors, clamped as production clamps it. This is the
-                   tier the ensemble currently pre-empts.
+                   errors, clamped as production clamps it. This IS the
+                   naive measured_error tier (not corrected_error_rmse --
+                   this module never replays the bias-lag correction), so
+                   it stays measured=False and floors at SPREAD_FLOOR_C,
+                   per ruling 2 (see config.py's SPREAD_FLOOR_C note and
+                   calibration.MEASURED_SPREAD_SOURCES). This is the tier
+                   the ensemble currently pre-empts.
       ensemble  -- the recorded ensemble dispersion for that day, if
                    pipeline.ensemble_spread_for() has stored one. No
                    history exists before 2026-08-29, so ensemble_proxy
@@ -362,6 +373,11 @@ def station_report(
 
     report["best_grid"] = best_width(days, grid)
 
+    # NOT measured=True. This row is the naive leave-one-out stdev, i.e.
+    # production's measured_error tier -- ruling 2 keeps that on
+    # SPREAD_FLOOR_C (see config.py's SPREAD_FLOOR_C note), so "clamped as
+    # production clamps it" (see this module's honesty constraint 3) means
+    # the unmeasured floor here too.
     loo_widths = {
         d: (calibration._clamp_spread(w, station_icao) if w is not None else None)
         for d, w in leave_one_out_spread(

@@ -156,19 +156,19 @@ in `settled_buckets`; no Position row is needed because paper holds.
 
 ## Wave 2 — correct the inputs, one day
 
-Target: ~2026-09-21. All items ship in one merge. Each has an on/off
+Target: ~2026-09-21; DEPLOYED 2026-09-19 (in the 15:00-19:00Z gap when no region's entry window is open); regime boundary 2026-09-20. All items ship in one merge. Each has an on/off
 constant defaulting to on, so a revert is a config flip.
 
 | id | change | can only refuse? |
 |---|---|---|
 | 2a | Bias / RMSE / spread error sample restricted to forecast rows fetched inside `ERROR_SAMPLE_FETCH_WINDOW_LOCAL = (4, 8)`; `storage.py` comment at the day filter corrected | no |
-| 2b | `SPREAD_FLOOR_C` applies only to *unmeasured* tiers; measured `corrected_error_rmse` prices as-is under the existing `MAX_ERROR_RMSE_PER_BUCKET` upper gate | no |
+| 2b | `SPREAD_FLOOR_C` applies only to the `corrected_error` tier (n>=15, visible to the `MAX_ERROR_RMSE_PER_BUCKET` upper gate), with a numerical-sanity minimum `MEASURED_SPREAD_MIN_C = 0.30`; the naive `measured_error` tier (5-14 pairs) keeps the floor because the gate fails open below 15 residuals | no |
 | 2c | Veto 0a2 signed compare on the calibrated basis (`gate_edge < min_abs_edge`); mirrored in `entry_sim.py` | yes |
-| 2d | `probability_calibration` does not cache a failed fit; retries next cycle | yes |
+| 2d | `probability_calibration` does not cache a failed fit; retries next cycle | no — a retry restores the calibrated path mid-day (stricter admission, but the gap haircut retires on calibrated books, so sizing can grow); this is the already-shipped P3-6 design, not a new loosening |
 | 2e | Total forecast outage sets `today_source_mix = frozenset()` so the mix guard refuses | yes |
 | 2f | `entry_sim.py` haircut and exit-fee parity with live (`_book_has_stop` threaded through) | backtest only |
 
-`config.REGIME_BOUNDARIES = ("2026-09-21",)` (the actual deploy date);
+`config.REGIME_BOUNDARIES = ("2026-09-20",)` (the first target date every station decides on the new code — Asia's 09-19 window ran 20:00-00:00Z before the deploy; the boundary day belongs to the new regime);
 `cohort_monitor`, `calibration_panel` and `promotion_dossier` report
 each side of a boundary separately by default.
 

@@ -33,7 +33,10 @@ def _seed_forecast(target_date, value, fetched_at=None):
     storage.save_forecast(PointForecast(
         station_icao=STATION, source=SOURCE, target_date=target_date,
         max_temp_c=value,
-        fetched_at=fetched_at or f"{target_date.isoformat()}T02:00:00+00:00",
+        # 05:00 local: inside the WAVE 2 error-sample window (2a).
+        fetched_at=fetched_at or (
+            config.local_day_bounds_utc(STATION, target_date)[0] + timedelta(hours=5)
+        ).isoformat(),
     ))
 
 
@@ -130,8 +133,12 @@ class TestStationReport:
         """
         The measured tier's row must be what that tier would REALLY have
         produced: its own leave-one-out width, put through the same
-        _clamp_spread the live path applies. An unclamped row would score a
-        width production can never emit.
+        _clamp_spread the live path applies. This row is the naive
+        measured_error tier (not corrected_error_rmse), which ruling 2
+        keeps on SPREAD_FLOOR_C -- see config.py's SPREAD_FLOOR_C note --
+        so the reclamp here is unmeasured too. An unclamped, or
+        wrongly-clamped, row would score a width production can never
+        emit.
         """
         import calibration
 

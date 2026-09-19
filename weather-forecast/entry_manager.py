@@ -420,6 +420,40 @@ def preclamp_size_usd(size_usd: float, depth_usd: Optional[float]) -> float:
     return round(size_usd, 2)
 
 
+def edge_misses_bar(gate_edge: float, min_abs_edge: float) -> bool:
+    """
+    Veto 0a2's comparison, shared with backtest/entry_sim.py.
+
+    WAVE 2 (2c): SIGNED. gate_edge is already side-adjusted (see
+    admission_edge and ev_engine.compute_ev_table's side_model_prob), so a
+    negative value is this side being OVERPRICED and must miss the bar.
+    abs() let a -0.05 calibrated edge through to Kelly, which refused it
+    under kelly_nonpositive; the decision was right and the rule_id was
+    wrong. config.SIGNED_ADMISSION_EDGE=False restores abs().
+    """
+    if config.SIGNED_ADMISSION_EDGE:
+        return gate_edge < min_abs_edge
+    return abs(gate_edge) < min_abs_edge
+
+
+def today_source_mix_for(forecast_sources) -> Optional[frozenset]:
+    """
+    The mix decide_portfolio_entries hands the guard, from the blend's
+    source list this cycle.
+
+    None -> None: the caller was not taught to pass a mix, and the guard
+    does not run (backtest/entry_sim.py, operator scripts). [] -> frozenset()
+    (WAVE 2, 2e): every source failed this cycle, which is a mix the fitted
+    bias was NOT measured on, and the guard must refuse it rather than skip.
+    config.REFUSE_ON_TOTAL_FORECAST_OUTAGE=False folds [] back to None.
+    """
+    if forecast_sources is None:
+        return None
+    if not forecast_sources and not config.REFUSE_ON_TOTAL_FORECAST_OUTAGE:
+        return None
+    return frozenset(forecast_sources)
+
+
 def count_open_positions_for_bucket(
     station_icao: str,
     target_date: date,
@@ -824,9 +858,9 @@ def collection_only_reason(
 
     # THE BIAS IS ONE SCALAR FITTED ON ONE FORECAST MIX.
     #
-    # storage.forecast_error_samples() fits it on "the per-date forecast
-    # mean [that] mirrors blend_central_estimate's own forecast term", so it
-    # is exactly right while the mix is stable -- and it is: measured over
+    # storage.forecast_error_samples() fits it on the per-date MORNING
+    # forecast mean (the 04:00-08:00 fetch window, WAVE 2 2a), so it is
+    # exactly right while the mix is stable -- and it is: measured over
     # the live database, 17 of 19 stations ran a single mix on 100% of their
     # scored days, WSSS 28/29, WMKK 26/28.
     #
@@ -843,7 +877,18 @@ def collection_only_reason(
     # for callers that have not been taught to pass it (backtest/entry_sim.py,
     # operator scripts), and failing closed would silently stop them trading
     # on a check they never opted into.
-    if bias_source_mix and today_source_mix and bias_source_mix != today_source_mix:
+    #
+    # An EMPTY mix is not unknown: decide_portfolio_entries passes
+    # frozenset() for a cycle with no forecast source at all (2e), and that
+    # is refused below with every fitted source reported missing.
+    #
+    # `is not None`, not truthiness (WAVE 2, 2e): an EMPTY today's mix is a
+    # known mix -- no source at all -- and must be compared, not skipped.
+    if (
+        bias_source_mix is not None
+        and today_source_mix is not None
+        and bias_source_mix != today_source_mix
+    ):
         missing = sorted(bias_source_mix - today_source_mix)
         extra = sorted(today_source_mix - bias_source_mix)
         parts = []
@@ -1033,7 +1078,7 @@ def evaluate_entry(
     # to the noise. Ranking is NOT moved with it; that was measured separately
     # and was worse.
     gate_edge = deciding["admission_edge"]
-    if gate_edge is not None and abs(gate_edge) < min_abs_edge:
+    if gate_edge is not None and edge_misses_bar(gate_edge, min_abs_edge):
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         # Name the number that refused, for the same reason
         # config.entry_bar_label() exists: these lines are read off the journal
@@ -1688,8 +1733,9 @@ def decide_portfolio_entries(
         enforce_bias_quality=True,
         bias_source_mix=forecast_bias_source_mix(station_icao),
         # None when the caller has not been taught to pass it -- the guard
-        # then does not run. See collection_only_reason().
-        today_source_mix=frozenset(forecast_sources) if forecast_sources else None,
+        # then does not run; frozenset() for a total outage, which it refuses.
+        # See today_source_mix_for() and collection_only_reason().
+        today_source_mix=today_source_mix_for(forecast_sources),
         # Measured HERE rather than inside the gate so the gate stays pure
         # and backtest/entry_sim.py can keep sharing it verbatim. Its own
         # failure is None, which reads as "not measured" and leaves the

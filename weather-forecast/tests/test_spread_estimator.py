@@ -44,7 +44,10 @@ def seed_pairs(icao, errors, start=date(2026, 7, 1)):
         ))
         storage.save_forecast(PointForecast(
             station_icao=icao, source="open_meteo_ecmwf", target_date=target,
-            max_temp_c=truth + err, fetched_at=f"{target.isoformat()}T00:00:00+00:00",
+            max_temp_c=truth + err,
+            # 05:00 local, inside the WAVE 2 error-sample window for any offset.
+            fetched_at=(config.local_day_bounds_utc(icao, target)[0]
+                        + timedelta(hours=5)).isoformat(),
         ))
 
 
@@ -147,6 +150,13 @@ def test_a_tiny_measured_spread_is_raised_to_the_floor():
     certain, which inflates the model-vs-market gap, which is an edge the
     sizing code will happily act on. WSSS's real measured spread (~0.56C)
     sits below the floor.
+
+    Only 6 pairs are seeded here, below MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE
+    (15), so this scores on the NAIVE measured_error tier, not
+    corrected_error. WAVE 2 (2b) exempted corrected_error from
+    SPREAD_FLOOR_C but deliberately NOT measured_error -- see
+    tests/test_wave2_spread_floor_exemption.py -- so this still floors at
+    0.70.
     """
     seed_pairs("WSSS", [0.01, 0.0, -0.01, 0.0, 0.01, -0.01])
     sd, src = calibration.estimate_std_dev([_fc(32.0)], [_obs(32.0)], station_icao="WSSS")

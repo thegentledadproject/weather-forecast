@@ -107,8 +107,10 @@ from models import EVResult, EntryDecision
 # reimplements -- and so a rename upstream breaks the import loudly.
 import probability_calibration
 from entry_manager import (
+    _book_has_stop,
     _calibration_note,
     admission_edge,
+    edge_misses_bar,
     compute_kelly_fraction,
     deciding_numbers,
     preclamp_size_usd,
@@ -139,6 +141,16 @@ GATE_COUNT = 17  # 12 until 2026-08-09 (Veto 00, MAX_ENTRY_PRICE);
                  # 17 from 2026-09-09 (Veto 00c, NO_SIDE_MIN_MODEL_PROB)
 
 
+# WAVE 2 (2f). The book the replay emulates. backtest/engine.py builds every
+# replayed Position with is_paper=True and the Position default
+# execution_mode 'paper', so the replica sizes and prices as the PAPER book
+# does: entry_manager._book_has_stop("paper") is False under
+# config.HOLD_TO_SETTLEMENT_MODES, and the paper EV table carries no exit
+# fee. Threaded through the SAME helper live reads rather than restated, so
+# the two cannot disagree about which books have a stop.
+REPLAY_BOOK_MODE = "paper"
+
+
 def _maturity_for(station_icao: str, station_maturity: Optional[str]) -> str:
     """
     Live derivation: config.STATION_MATURITY.get(icao, "exploratory") --
@@ -164,6 +176,7 @@ def evaluate_entry_sim(
     min_net_ev: float,
     sizing_bankroll: float,
     station_maturity: Optional[str] = None,
+    execution_mode: str = REPLAY_BOOK_MODE,
 ) -> EntryDecision:
     """
     Pure replica of entry_manager.evaluate_entry().
@@ -192,6 +205,11 @@ def evaluate_entry_sim(
       sizing_bankroll        <- config.BANKROLL_USD. Injected so a
                                 compounding-bankroll run can vary it;
                                 pass config.BANKROLL_USD for live parity.
+      execution_mode         <- executor.EXECUTION_MODE[station]. The book
+                                being replayed; REPLAY_BOOK_MODE ("paper")
+                                is what the engine's positions are. Feeds
+                                entry_manager._book_has_stop exactly as
+                                live's evaluate_entry does (WAVE 2, 2f).
     """
     station_icao = ev.station_icao
     maturity = _maturity_for(station_icao, station_maturity)
@@ -281,7 +299,7 @@ def evaluate_entry_sim(
     # tests/test_calibrated_admission.py, which pins it so nobody reads a sweep
     # as evidence about a rule it never ran.
     gate_edge = deciding["admission_edge"]
-    if gate_edge is not None and abs(gate_edge) < min_abs_edge:
+    if gate_edge is not None and edge_misses_bar(gate_edge, min_abs_edge):
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
         basis_note = (
             f" [bar applied to the calibrated edge: {_calibration_note(ev)}]"
@@ -379,15 +397,22 @@ def evaluate_entry_sim(
     # here today -- replayed EVResults carry no calibration, and an
     # uncalibrated row keeps the haircut by design -- but stating the rule is
     # what stops the replica silently diverging the first time the backtest is
-    # given a calibrated book. has_stop=True matches this function's existing
-    # call, which has never passed the flag.
+    # given a calibrated book.
+    #
+    # WAVE 2 (2f): has_stop comes from the SAME helper live reads, for the
+    # book the replay emulates (REPLAY_BOOK_MODE). It used to be hard-coded
+    # True, which agreed with live only while
+    # config.SIZE_STOPLESS_BOOKS_ON_PURE_KELLY stayed False.
+    _has_stop = _book_has_stop(station_icao, execution_mode)
     if probability_calibration.haircut_applies(
-        has_stop=True,
+        has_stop=_has_stop,
         calibration_source=getattr(
             ev, "calibration_source", probability_calibration.NO_TIER
         ),
     ):
-        size_usd *= gap_risk_haircut(ev.market_price, station_icao, ev.market_bid)
+        size_usd *= gap_risk_haircut(
+            ev.market_price, station_icao, ev.market_bid, has_stop=_has_stop,
+        )
 
     # WAVE 1: the paper-equivalent stake, captured BEFORE any live clamp --
     # the replica has no live/paper distinction, so this is just size_usd
@@ -440,9 +465,16 @@ def evaluate_entry_sim(
         )
 
     # Re-check slippage and net EV at the ACTUAL recommended size, not the
-    # flat screening size ev_engine used -- identical arithmetic to live.
+    # flat screening size ev_engine used -- identical arithmetic to live,
+    # INCLUDING the exit-leg fee live subtracts (WAVE 2, 2f; 0.0 on the
+    # paper rows the engine builds, so no replay number moves today).
     slippage_at_size = slippage_fn(depth_capped_usd)
-    net_ev_at_size = (ev.raw_edge / ev.market_price) - slippage_at_size - ev.fee_rate_pct
+    net_ev_at_size = (
+        (ev.raw_edge / ev.market_price)
+        - slippage_at_size
+        - ev.fee_rate_pct
+        - getattr(ev, "expected_exit_fee_pct", 0.0)
+    )
 
     # --- Gate 10: hard slippage bar ---------------------------------------
     if slippage_at_size > config.MAX_ACCEPTABLE_SLIPPAGE_PCT:

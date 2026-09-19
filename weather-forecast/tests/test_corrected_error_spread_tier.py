@@ -25,10 +25,10 @@ two-sided bucket market: it underprices the market's favourite bucket,
 which the entry path reads as a NO-side edge on the bucket most likely to
 win. See config.SPREAD_FLOOR_C and the EDDM/MMMX finding of 2026-09-09.
 
-WHAT THIS CHANGE DELIBERATELY DOES NOT DO. It does not touch
-SPREAD_FLOOR_C, so a station measuring under 0.70 is still floored to
-0.70 -- only the number the floor is applied TO changes. Standing the
-floor down is a separate, larger change.
+The floor was stood down in WAVE 2 (2b) for corrected_error ONLY --
+measured_error keeps SPREAD_FLOOR_C because it is reachable below the
+gate's own 15-pair visibility threshold; see
+tests/test_wave2_spread_floor_exemption.py.
 """
 
 import config
@@ -78,8 +78,9 @@ def test_it_falls_back_to_the_naive_sd_below_the_pair_floor(monkeypatch):
         [], [], station_icao=EUROPE, allow_measured=True)
 
     assert source == "measured_error"
-    # SPREAD_FLOOR_C still binds on the fallback. Standing it down is a
-    # separate change; this test pins that it did NOT happen here.
+    # WAVE 2 (2b) stood the floor down for corrected_error ONLY. measured_error
+    # (this branch) is reachable below the 15-pair gate visibility threshold,
+    # so it keeps SPREAD_FLOOR_C -- see tests/test_wave2_spread_floor_exemption.py.
     assert sd == config.SPREAD_FLOOR_C
 
 
