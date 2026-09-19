@@ -198,6 +198,17 @@ echo "== stop =="
 sudo systemctl stop polyweather-dashboard.timer 2>/dev/null || true
 sudo systemctl stop $SERVICE
 
+# WAVE 3 (3a) review fix. `set -euo pipefail` means a failure in the backup
+# heredoc or the migrate line below exits the script immediately -- with the
+# daemon AND the dashboard timer already stopped -- printing nothing but a
+# traceback. That leaves the box down with no obvious next step. Trap ERR
+# here, print one unmistakable last line, and do NOT auto-restart: the same
+# failing migrate would just fail again on a re-run, and restarting the OLD
+# code onto a HALF-migrated database is worse than staying down. Cleared
+# right after the restart succeeds, below, so a later failure (e.g. starting
+# the dashboard) does not falsely claim the daemon is stopped.
+trap 'echo "!! DEPLOY ABORTED: $SERVICE and polyweather-dashboard.timer are STOPPED; backup at $HOME/polyweather-pre-deploy-*.sqlite3; fix and re-run"' ERR
+
 echo "== backup =="
 # sqlite's online backup API, never cp: a copy of a file with a hot journal is
 # not a database. Keeps the three most recent; older ones are pruned.
@@ -206,7 +217,10 @@ if [ -f "$DB" ]; then
     STAMP=$(date -u +%Y%m%dT%H%M%SZ)
     "$VENV/bin/python" - "$DB" "$HOME/polyweather-pre-deploy-$STAMP.sqlite3" <<'PYBACKUP'
 import sqlite3, sys
-src = sqlite3.connect(sys.argv[1])
+# Read-only by construction, not just by convention: a backup step that
+# opens its SOURCE read-write could itself become a second writer racing
+# the file it is supposed to be protecting.
+src = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
 dst = sqlite3.connect(sys.argv[2])
 try:
     src.backup(dst)
@@ -228,12 +242,13 @@ cd "$PKG_DIR"
 # restart, not `enable --now`: --now is a no-op on an already-running service,
 # which left every redeploy onto a live box running the OLD code (bit us 2026-08-07).
 sudo systemctl restart $SERVICE
+trap - ERR
 
 echo "== dashboard =="
-# AFTER the daemon, never before it. The generators run as ubuntu (WAVE 3, 3b,
-# setup_dashboard.sh) and open the database read-only; starting them before
-# the restart used to race a root-owned render against the migration. Skip
-# silently if the dashboard was never set up on this box.
+# AFTER the daemon, never before it. The generators will run as ubuntu once
+# setup_dashboard.sh (WAVE 3, 3b) is re-run, and open the database read-only;
+# starting them before the restart used to race a root-owned render against
+# the migration. Skip silently if the dashboard was never set up on this box.
 if [ -f /etc/systemd/system/polyweather-dashboard.service ]; then
     sudo systemctl start polyweather-dashboard.timer 2>/dev/null || true
     sudo systemctl start polyweather-dashboard.service 2>/dev/null || true
