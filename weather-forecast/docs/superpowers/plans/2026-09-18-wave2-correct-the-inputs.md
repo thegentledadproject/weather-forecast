@@ -4,6 +4,8 @@
 
 **Status:** DRAFT 2026-09-18 — not started. Target merge + deploy ~2026-09-21.
 
+**Status:** COMPLETE — merged f6f8aac, deployed 2026-09-19 08:45 UTC, boundary 2026-09-20, 1851 tests.
+
 **Goal:** Correct, on one day, the five statistics the entry path is computed from — the forecast-error sample's fetch window (2a), the unconditional spread floor on measured tiers (2b), the unsigned admission-edge compare (2c), the cached calibration failure (2d), the total-forecast-outage hole in the mix guard (2e) — bring the replay's haircut and exit-fee arithmetic level with live (2f), stamp the deploy date in `config.REGIME_BOUNDARIES` so every cohort report splits at it, and ship the read-only script that answers the pre-registered reads and the stop condition.
 **Architecture:** Every behaviour change (2a–2e) is one on/off constant in a single `WAVE 2` block at the end of `config.py`, defaulting on, consumed at exactly one site each: `config.error_sample_fetch_bounds_utc` narrows the window `storage.forecast_rows_in_error_sample` (new pure function, the single implementation behind bias, RMSE, spread and source-mix) admits rows through; `calibration._clamp_spread(measured=True)` floors measured tiers at `MEASURED_SPREAD_MIN_C` instead of `SPREAD_FLOOR_C`; `entry_manager.edge_misses_bar` (shared with `backtest/entry_sim.py`) makes veto 0a2 a signed compare; `probability_calibration.calibration_for` returns a failed fit without caching it; `entry_manager.today_source_mix_for` passes an empty source list through as `frozenset()` and the mix guard tests `is not None` instead of truthiness. 2f threads the replay book's mode (`"paper"`) through `entry_sim.evaluate_entry_sim` into the same `_book_has_stop` helper live uses and adds the exit-fee term to `net_ev_at_size`. A new `regimes.py` splits any row list at the boundaries; `cohort_monitor`, `calibration_panel` and `promotion_dossier` print per-segment totals by default with `--no-regime-split` / `regime_split=False` for the pooled number. `wave2_falsifier.py` opens the DB `mode=ro` and composes the pure storage/calibration/cohort helpers over rows it fetched itself.
 **Tech Stack:** Python 3.12, sqlite3, pytest; no numpy/scipy (not on the box)
@@ -66,7 +68,7 @@
 **Files:** Modify `config.py` (helper after `local_day_bounds_utc`, line 159; new `WAVE 2` block after `STATION_MATURITY = _MaturityMapping()`, line 4998), `storage.py` (`_forecast_rows_in_local_day` 727-756 and its two callers at 723 and 909; docstrings at 776-777, 783-786, 826-829, 859-860), `tests/test_forecast_bias.py` (253, 258), `tests/test_spread_estimator.py` (47), `tests/test_spread_tier_brier_days.py` (36), `tests/test_station_maturity.py` (52, 130) / Test `tests/test_wave2_error_sample_window.py`
 **Interfaces:** Consumes: `config.local_day_bounds_utc` / Produces: `config.ERROR_SAMPLE_FETCH_WINDOW_LOCAL: tuple = (4, 8)`, `config.ERROR_SAMPLE_FETCH_WINDOW_ENABLED: bool = True`, `config.error_sample_fetch_bounds_utc(station, target_date, enabled: Optional[bool] = None) -> tuple[datetime, datetime]`, `storage.forecast_rows_in_error_sample(station_icao, rows, window_enabled: Optional[bool] = None) -> Dict[date, List[Tuple[str, float]]]` (pure; `rows` in the shape `forecast_rows_with_fetch_time` returns), `storage._forecast_rows_in_sample_window(station_icao)` (the I/O wrapper the four consumers call)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave2_error_sample_window.py
@@ -205,9 +207,9 @@ def test_the_stale_lookahead_comments_are_corrected():
     assert "ERROR_SAMPLE_FETCH_WINDOW_LOCAL" in storage.forecast_error_samples.__doc__
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_error_sample_window.py -v` / Expected: FAIL with `AttributeError: module 'config' has no attribute 'error_sample_fetch_bounds_utc'` (and `assert [0.0] == [-2.0]` once the helper exists)
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_error_sample_window.py -v` / Expected: FAIL with `AttributeError: module 'config' has no attribute 'error_sample_fetch_bounds_utc'` (and `assert [0.0] == [-2.0]` once the helper exists)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 config.py, directly after `local_day_bounds_utc` returns (line 159, `return start, start + timedelta(days=1)`):
 
@@ -581,9 +583,9 @@ new:
         ))
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_error_sample_window.py tests/test_forecast_bias.py tests/test_spread_estimator.py tests/test_spread_tier_brier_days.py tests/test_station_maturity.py tests/test_forecast_lead_window.py -v` / Expected: PASS (10 new + every pre-existing test in those files)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1767
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_error_sample_window.py tests/test_forecast_bias.py tests/test_spread_estimator.py tests/test_spread_tier_brier_days.py tests/test_station_maturity.py tests/test_forecast_lead_window.py -v` / Expected: PASS (10 new + every pre-existing test in those files)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1767
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -613,7 +615,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Why 0.30.** Settlement rounds the daily maximum to a whole degree (1C buckets on Asia/Europe; 2F = 1.11C on 11 US cities). A forecast error sample is therefore measured against a truth that carries uniform rounding noise of width one bucket, whose sd is `sqrt(1/12) = 0.289C` (0.32C at 1.11C). No honest error sd can sit below that: a measured value under it is a sample artefact (few pairs, identical rounded errors), not a sharper forecast. `MEASURED_SPREAD_MIN_C = 0.30` is that bound, rounded to the grid — a NUMERICAL-SANITY floor, not a confidence floor. The confidence floor was `SPREAD_FLOOR_C = 0.70`, and the 2026-09-09 EDDM/MMMX finding is that it is wrong in both directions on a two-sided bucket market (config.py:4180-4207).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave2_spread_floor_exemption.py
@@ -772,9 +774,9 @@ def test_the_replay_path_is_blind_to_this_change_and_says_so():
     assert "allow_measured_spread=False" in inspect.getsource(engine)
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_spread_floor_exemption.py -v` / Expected: FAIL with `assert 0.7 == 0.45` on the first test and `AttributeError: module 'calibration' has no attribute 'MEASURED_SPREAD_SOURCES'` / `'priced_measured_spread'` / `'corrected_error_rmse_from_dated'`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_spread_floor_exemption.py -v` / Expected: FAIL with `assert 0.7 == 0.45` on the first test and `AttributeError: module 'calibration' has no attribute 'MEASURED_SPREAD_SOURCES'` / `'priced_measured_spread'` / `'corrected_error_rmse_from_dated'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 config.py `WAVE 2` block, appended after `ERROR_SAMPLE_FETCH_WINDOW_ENABLED = True`:
 
@@ -1027,9 +1029,9 @@ def test_a_tiny_measured_spread_is_raised_to_the_rounding_sd():
     assert sd == pytest.approx(config.MEASURED_SPREAD_MIN_C)
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_spread_floor_exemption.py tests/test_corrected_error_spread_tier.py tests/test_spread_estimator.py tests/test_error_width_gate.py tests/test_low_confidence_spread_gate.py -v` / Expected: PASS (14 new + all pre-existing)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1782
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_spread_floor_exemption.py tests/test_corrected_error_spread_tier.py tests/test_spread_estimator.py tests/test_error_width_gate.py tests/test_low_confidence_spread_gate.py -v` / Expected: PASS (14 new + all pre-existing)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1782
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1058,7 +1060,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 #### 3a — 2c: veto 0a2 is a signed compare
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave2_signed_admission_edge.py
@@ -1174,9 +1176,9 @@ def test_the_helper_is_the_one_both_sides_call():
     assert entry_manager.edge_misses_bar(0.02, 0.03) is True
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_signed_admission_edge.py -v` / Expected: FAIL with `assert 'kelly_nonpositive' == '0a2'` and `AttributeError: module 'entry_manager' has no attribute 'edge_misses_bar'`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_signed_admission_edge.py -v` / Expected: FAIL with `assert 'kelly_nonpositive' == '0a2'` and `AttributeError: module 'entry_manager' has no attribute 'edge_misses_bar'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 config.py `WAVE 2` block, appended:
 ```python
@@ -1259,8 +1261,8 @@ new:
     ("gate2b_negative_edge_signed_bar", make_ev(0.20, 0.35), 0, 0,    0,    1000.0, 0.01, 0.15),
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_signed_admission_edge.py tests/test_parity_entry.py tests/test_calibrated_admission.py tests/test_gate_census.py tests/test_reason_funnel.py -v` / Expected: PASS (7 new + all pre-existing; the gate census still counts 17 sites)
-- [ ] **Step 5: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_signed_admission_edge.py tests/test_parity_entry.py tests/test_calibrated_admission.py tests/test_gate_census.py tests/test_reason_funnel.py -v` / Expected: PASS (7 new + all pre-existing; the gate census still counts 17 sites)
+- [x] **Step 5: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1279,7 +1281,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 #### 3b — 2d: a failed calibration fit is not cached
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave2_calibration_retry.py
@@ -1363,9 +1365,9 @@ def test_flag_off_caches_the_failure_as_before(monkeypatch):
     assert calls["n"] == 1
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_calibration_retry.py -v` / Expected: FAIL on `test_a_failed_fit_is_retried_on_the_next_call` with `assert 'uncalibrated' == 'station_isotonic'` and `assert 1 == 2`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_calibration_retry.py -v` / Expected: FAIL on `test_a_failed_fit_is_retried_on_the_next_call` with `assert 'uncalibrated' == 'station_isotonic'` and `assert 1 == 2`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 config.py `WAVE 2` block, appended:
 ```python
@@ -1425,8 +1427,8 @@ new:
     return result
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_calibration_retry.py tests/test_calibrated_sizing.py -v` / Expected: PASS (4 new + all pre-existing; `test_an_unreadable_cohort_falls_back_to_uncalibrated_rather_than_raising` still passes because the return value is unchanged)
-- [ ] **Step 5: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_calibration_retry.py tests/test_calibrated_sizing.py -v` / Expected: PASS (4 new + all pre-existing; `test_an_unreadable_cohort_falls_back_to_uncalibrated_rather_than_raising` still passes because the return value is unchanged)
+- [x] **Step 5: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1444,7 +1446,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 #### 3c — 2e: a total forecast outage refuses through the mix guard
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave2_forecast_outage_refuses.py
@@ -1563,9 +1565,9 @@ def test_the_fitted_mix_still_passes(graduated_wsss):
     assert decisions[0].rule_id != "collection_gate"
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_forecast_outage_refuses.py -v` / Expected: FAIL with `assert None is not None` (the guard) and `AttributeError: module 'entry_manager' has no attribute 'today_source_mix_for'`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_forecast_outage_refuses.py -v` / Expected: FAIL with `assert None is not None` (the guard) and `AttributeError: module 'entry_manager' has no attribute 'today_source_mix_for'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 config.py `WAVE 2` block, appended:
 ```python
@@ -1650,9 +1652,9 @@ new:
         today_source_mix=today_source_mix_for(forecast_sources),
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_forecast_outage_refuses.py tests/test_bias_mix_guard.py tests/test_wave1_entry_decisions_recorded.py tests/test_wave1_shadow_pass.py -v` / Expected: PASS (7 new + all pre-existing; `test_unknown_mixes_do_not_block_trading` still passes because both `None` checks are preserved)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1800
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_forecast_outage_refuses.py tests/test_bias_mix_guard.py tests/test_wave1_entry_decisions_recorded.py tests/test_wave1_shadow_pass.py -v` / Expected: PASS (7 new + all pre-existing; `test_unknown_mixes_do_not_block_trading` still passes because both `None` checks are preserved)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1800
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1678,7 +1680,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **What is wrong today, measured on HEAD.** With every station pinned to `paper` (as the parity test does) live computes `_has_stop = _book_has_stop(icao, mode)` → `False` (`"paper"` is in `HOLD_TO_SETTLEMENT_MODES`) and passes it to `gap_risk_haircut(..., has_stop=False)`; entry_sim passes `has_stop=True` and omits the kwarg (entry_sim.py:366-380). Both currently produce the same number only because `config.SIZE_STOPLESS_BOOKS_ON_PURE_KELLY` is `False`; flip it and live sizes 76.92 where the sim sizes 55.70 on the parity fixture. Live also subtracts `expected_exit_fee_pct` from `net_ev_at_size` (entry_manager.py:1266-1271); the sim does not (entry_sim.py:446), so an EV row carrying 0.04 of exit fee prices 0.5014 live and 0.5414 in the replay. The engine's own rows carry `expected_exit_fee_pct=0.0` (`Position(is_paper=True)`, mode `paper`, no exit fee — engine.py:1030-1075 never sets it), so no replay NUMBER changes today; what changes is that the replica can no longer drift from live on either term.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave2_entry_sim_parity.py
@@ -1821,9 +1823,9 @@ and `CASES` gains, after the `gate12_approved_exploratory` line:
     ("gate12_approved_with_exit_fee", make_ev(0.55, 0.35, exit_fee=0.04), 0, 0, 0, 1000.0, 0.01, 0.15),
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_entry_sim_parity.py tests/test_parity_entry.py -v` / Expected: FAIL with `AttributeError: module 'backtest.entry_sim' has no attribute 'REPLAY_BOOK_MODE'`, `EntryDecision field mismatch: {'net_ev_at_size': (0.5014..., 0.5414...), 'reason': (...)}` on the new parity case, and `assert not {'recommended_size_usd': (76.92, 55.7), ...}` on the pure-Kelly test
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_entry_sim_parity.py tests/test_parity_entry.py -v` / Expected: FAIL with `AttributeError: module 'backtest.entry_sim' has no attribute 'REPLAY_BOOK_MODE'`, `EntryDecision field mismatch: {'net_ev_at_size': (0.5014..., 0.5414...), 'reason': (...)}` on the new parity case, and `assert not {'recommended_size_usd': (76.92, 55.7), ...}` on the pure-Kelly test
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 backtest/entry_sim.py imports (line 109-121) — old:
 ```python
@@ -1967,9 +1969,9 @@ new:
     )
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_entry_sim_parity.py tests/test_parity_entry.py tests/test_haircut_on_a_stopless_book.py tests/test_gap_risk_sizing.py tests/test_backtest_stack.py tests/test_determinism.py -v` / Expected: PASS (5 new + 17 parity cases + all pre-existing; the determinism/stack replays are unchanged because engine rows carry `expected_exit_fee_pct=0.0` and `SIZE_STOPLESS_BOOKS_ON_PURE_KELLY` is False)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1806
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_entry_sim_parity.py tests/test_parity_entry.py tests/test_haircut_on_a_stopless_book.py tests/test_gap_risk_sizing.py tests/test_backtest_stack.py tests/test_determinism.py -v` / Expected: PASS (5 new + 17 parity cases + all pre-existing; the determinism/stack replays are unchanged because engine rows carry `expected_exit_fee_pct=0.0` and `SIZE_STOPLESS_BOOKS_ON_PURE_KELLY` is False)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1806
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1995,7 +1997,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Insertion points, chosen for the smallest diff.** Each report already has one place where "the rows" become "the totals": `cohort_monitor.main` prints `windows(rows)["all_time"]` (795); `calibration_panel.cohort_card` renders `windows(rows)` (525-532); `promotion_dossier._print_calibration` prints `live_calibration(entries)` (454-459). The split wraps exactly that call with `regimes.regime_segments(...)`. With `REGIME_BOUNDARIES = ()` every report's output is byte-identical to today (one segment labelled `all` is rendered through the pre-existing pooled path), which is what keeps every existing report test green until Task 7 stamps the date. The cohort monitor's trailing windows and kill criterion stay POOLED and say so: they are time-bounded already, and the kill criterion is a pre-committed rule whose window must not be redefined mid-flight.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 # tests/test_wave2_regimes.py
@@ -2196,9 +2198,9 @@ def test_the_dossier_is_unchanged_with_no_boundaries(two_regimes, monkeypatch, c
     assert "regime" not in out
 ```
 
-- [ ] **Step 2: Run tests to verify they fail** — Run: `pytest tests/test_wave2_regimes.py tests/test_wave2_regime_reports.py -v` / Expected: FAIL with `ModuleNotFoundError: No module named 'regimes'` and `AttributeError: module 'config' has no attribute 'REGIME_BOUNDARIES'`
+- [x] **Step 2: Run tests to verify they fail** — Run: `pytest tests/test_wave2_regimes.py tests/test_wave2_regime_reports.py -v` / Expected: FAIL with `ModuleNotFoundError: No module named 'regimes'` and `AttributeError: module 'config' has no attribute 'REGIME_BOUNDARIES'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 config.py `WAVE 2` block, appended:
 ```python
@@ -2527,9 +2529,9 @@ new:
                   regime_split=not args.no_regime_split)
 ```
 
-- [ ] **Step 4: Run tests to verify they pass** — Run: `pytest tests/test_wave2_regimes.py tests/test_wave2_regime_reports.py tests/test_cohort_monitor.py tests/test_calibration_panel.py tests/test_promotion_dossier.py -v` / Expected: PASS (6 + 10 new + all pre-existing; with `REGIME_BOUNDARIES = ()` every existing report test sees the pre-Wave-2 output)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1822
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run tests to verify they pass** — Run: `pytest tests/test_wave2_regimes.py tests/test_wave2_regime_reports.py tests/test_cohort_monitor.py tests/test_calibration_panel.py tests/test_promotion_dossier.py -v` / Expected: PASS (6 + 10 new + all pre-existing; with `REGIME_BOUNDARIES = ()` every existing report test sees the pre-Wave-2 output)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1822
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -2559,7 +2561,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **The stop condition, precisely.** Spec: "if the 14-day held-to-settlement return on post-boundary paper rows is worse than the pre-boundary 14 days by more than the day-clustered CI, flip 2a and 2b off together." Read as: `after − before` on `_return_pct(rows, "held")`, station-day-clustered bootstrap CI of that difference; **STOP** when the CI's upper bound is below zero; **holding** otherwise; **NO VERDICT** when either side has no stake. "Paper rows" = `is_paper = 1 AND execution_mode = 'paper'` (simulation and manual_review rows are paper-booked but not the paper strategy). The before window is `[boundary − 14d, boundary − 1d]` and the after window `[boundary, boundary + 13d]` by `target_date`, through `cohort_rows(since=, until=)` (both inclusive).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave2_falsifier.py
@@ -2735,9 +2737,9 @@ def test_main_prints_the_verdict(worse_after, capsys):
     assert "WSSS" in out
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_falsifier.py -v` / Expected: FAIL with `ModuleNotFoundError: No module named 'wave2_falsifier'`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave2_falsifier.py -v` / Expected: FAIL with `ModuleNotFoundError: No module named 'wave2_falsifier'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 ```python
 # wave2_falsifier.py
@@ -3049,9 +3051,9 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_falsifier.py -v` / Expected: PASS (11 passed)
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1833
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave2_falsifier.py -v` / Expected: PASS (11 passed)
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1833
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -3079,7 +3081,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Mechanics.** The branch carries `REGIME_BOUNDARIES: tuple = ()` through Tasks 1–6, so every report and every existing test sees pooled output until the stamp. On deploy day, BEFORE merging, the tuple is edited to the actual date, the stamp test below is run (it refuses a future date and a malformed one), the edit is committed as the branch's last commit, and the branch is merged with `--no-ff`. The deploy then happens the same day. If it cannot (a failed deploy, a slip past midnight UTC), a one-line follow-up commit moves the date — the boundary is the first day the box ran the new code, nothing else.
 
-- [ ] **Step 1: Write the test (passes vacuously on `()`, fails on a bad stamp)**
+- [x] **Step 1: Write the test (passes vacuously on `()`, fails on a bad stamp)**
 
 ```python
 # tests/test_wave2_regime_boundary_stamp.py
@@ -3115,8 +3117,8 @@ def test_the_tuple_is_a_tuple_of_strings():
     assert all(isinstance(b, str) for b in config.REGIME_BOUNDARIES)
 ```
 
-- [ ] **Step 2: Run the test on the branch** — Run: `pytest tests/test_wave2_regime_boundary_stamp.py -v` / Expected: PASS (3 passed, vacuously on `()`)
-- [ ] **Step 3: Commit the test**
+- [x] **Step 2: Run the test on the branch** — Run: `pytest tests/test_wave2_regime_boundary_stamp.py -v` / Expected: PASS (3 passed, vacuously on `()`)
+- [x] **Step 3: Commit the test**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -3126,7 +3128,7 @@ git commit -m "Wave 2: pin REGIME_BOUNDARIES to canonical, past, strictly increa
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 4: ON DEPLOY DAY, stamp the date** — config.py `WAVE 2` block — old:
+- [x] **Step 4: ON DEPLOY DAY, stamp the date** — config.py `WAVE 2` block — old:
 ```python
 REGIME_BOUNDARIES: tuple = ()
 ```
@@ -3136,7 +3138,7 @@ REGIME_BOUNDARIES: tuple = ("2026-09-21",)
 ```
 Then run: `pytest tests/test_wave2_regime_boundary_stamp.py tests/test_wave2_regime_reports.py tests/test_wave2_regimes.py -v` / Expected: PASS. Then the full suite: `pytest -q` / Expected: all pass, count >= 1836 (the report tests monkeypatch the tuple, so nothing else moves).
 
-- [ ] **Step 5: Final commit on the branch**
+- [x] **Step 5: Final commit on the branch**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -3150,7 +3152,7 @@ box ran the Wave 2 code.
 Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 6: Merge and push**
+- [x] **Step 6: Merge and push**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast"
@@ -3162,9 +3164,9 @@ cd weather-forecast && pytest -q && cd ..
 git push origin main
 ```
 
-- [ ] **Step 7: Deploy (outside 05:00–08:00 SGT; no schema change, so the plain path)** — per `docs/superpowers/plans/...ec2...` / memory `ec2-deployment.md`: `~/deploy.sh` on the box (the `deploy_daemon.sh` path, no backup-and-stop), then `git log -1` on the box == `main`'s merge commit. Record the UTC time. If the box's first entry cycle on the new code lands on a different UTC date than the stamp, commit the correction (Step 5's message with the new date) and redeploy.
+- [x] **Step 7: Deploy (outside 05:00–08:00 SGT; no schema change, so the plain path)** — per `docs/superpowers/plans/...ec2...` / memory `ec2-deployment.md`: `~/deploy.sh` on the box (the `deploy_daemon.sh` path, no backup-and-stop), then `git log -1` on the box == `main`'s merge commit. Record the UTC time. If the box's first entry cycle on the new code lands on a different UTC date than the stamp, commit the correction (Step 5's message with the new date) and redeploy.
 
-- [ ] **Step 8: Same-day falsifier and memory note** — on the box, read-only: `python wave2_falsifier.py --boundary 2026-09-21` (defaults `--db` to the production path; opens `mode=ro`). Expected on day 0: (i) morning and all-day sd both printed per station, differing; (ii) EDDM / RKPK / WSSS `priced` not equal to `0.700` and no `PINNED TO THE FLOOR` on a station with `corrected_error`; (iii) `held_after n=0` and `NO VERDICT`; (iv) `0a2 after` growing from the first cycle, `kelly_nonpositive after` = 0. Re-run at boundary + 14 days (~2026-10-05) for the stop condition and the convergence read. Append both runs to a memory note `wave2-correct-the-inputs.md` and update the spec's status line the way Wave 1's was.
+- [x] **Step 8: Same-day falsifier and memory note** — on the box, read-only: `python wave2_falsifier.py --boundary 2026-09-21` (defaults `--db` to the production path; opens `mode=ro`). Expected on day 0: (i) morning and all-day sd both printed per station, differing; (ii) EDDM / RKPK / WSSS `priced` not equal to `0.700` and no `PINNED TO THE FLOOR` on a station with `corrected_error`; (iii) `held_after n=0` and `NO VERDICT`; (iv) `0a2 after` growing from the first cycle, `kelly_nonpositive after` = 0. Re-run at boundary + 14 days (~2026-10-05) for the stop condition and the convergence read. Append both runs to a memory note `wave2-correct-the-inputs.md` and update the spec's status line the way Wave 1's was.
 
 ---
 
