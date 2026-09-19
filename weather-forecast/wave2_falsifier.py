@@ -125,7 +125,19 @@ def error_sd_by_window(con, icao: str) -> dict:
 
 def priced_spread(con, icao: str) -> dict:
     """What the measured tier would price for this station NOW, under the
-    production flag, and whether it sits on SPREAD_FLOOR_C exactly."""
+    production flag, and whether it sits on SPREAD_FLOOR_C exactly.
+
+    MUST MATCH calibration.estimate_std_dev's own routing (~:610-620):
+    only the corrected_error tier is exempt from SPREAD_FLOOR_C (WAVE 2,
+    2b) -- it is priced with priced_measured_spread (_clamp_spread with
+    measured=True). The naive measured_error tier can fire on as few as
+    MIN_SPREAD_PAIRS (5) pairs, below the width gate's own visibility
+    (MIN_PAIRS_BEFORE_ERROR_WIDTH_GATE=15), so it keeps the unconditional
+    SPREAD_FLOOR_C floor -- calibration._clamp_spread(value, icao) with
+    measured=False (the default). Calling priced_measured_spread for BOTH
+    tiers would silently exempt exactly the 5-14-pair, gate-blind stations
+    this read exists to expose from the floor they are supposed to keep.
+    """
     dated = _dated_errors(icao, _forecast_rows(con, icao), _truth(con, icao), None)
     value, n = calibration.corrected_error_rmse_from_dated(dated)
     source = "corrected_error"
@@ -134,7 +146,10 @@ def priced_spread(con, icao: str) -> dict:
         source = "measured_error"
     if value is None:
         return {"source": None, "measured": None, "priced": None, "n": n, "pinned_to_floor": None}
-    priced = calibration.priced_measured_spread(value, icao)
+    if source == "corrected_error":
+        priced = calibration.priced_measured_spread(value, icao)
+    else:
+        priced = calibration._clamp_spread(value, icao)
     return {"source": source, "measured": value, "priced": priced, "n": n,
             "pinned_to_floor": priced == config.SPREAD_FLOOR_C}
 

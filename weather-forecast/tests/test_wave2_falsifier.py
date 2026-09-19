@@ -4,6 +4,7 @@ from datetime import date, timedelta
 
 import pytest
 
+import calibration
 import config
 import storage
 import wave2_falsifier
@@ -108,6 +109,35 @@ def test_read_ii_reports_unmeasured_stations_as_none(db):
     assert out["priced_spread_by_station"]["EDDM"]["pinned_to_floor"] is None
 
 
+def test_read_ii_naive_tier_keeps_the_confidence_floor(db, monkeypatch):
+    """Only corrected_error is exempt from SPREAD_FLOOR_C (2b). The naive
+    measured_error tier -- as few as 5 pairs, below the width gate's own
+    visibility -- must still price at the 0.70 floor when its raw sd is
+    under it. This is exactly the gate-blind case read (ii) exists to
+    expose."""
+    monkeypatch.setattr(calibration, "corrected_error_rmse_from_dated", lambda dated: (None, 0))
+    monkeypatch.setattr(calibration, "measured_error_spread_from_errors", lambda errors: (0.45, 6))
+    out = wave2_falsifier.run(db, BOUNDARY)
+    ps = out["priced_spread_by_station"]["WSSS"]
+    assert ps["source"] == "measured_error"
+    assert ps["measured"] == 0.45
+    assert ps["priced"] == 0.70
+    assert ps["pinned_to_floor"] is True
+
+
+def test_read_ii_corrected_tier_is_exempt_from_the_floor(db, monkeypatch):
+    """corrected_error prices as-is between MEASURED_SPREAD_MIN_C and the
+    regional ceiling -- NOT floored to SPREAD_FLOOR_C, unlike the naive
+    tier above at the same raw value."""
+    monkeypatch.setattr(calibration, "corrected_error_rmse_from_dated", lambda dated: (0.45, 20))
+    out = wave2_falsifier.run(db, BOUNDARY)
+    ps = out["priced_spread_by_station"]["WSSS"]
+    assert ps["source"] == "corrected_error"
+    assert ps["measured"] == 0.45
+    assert ps["priced"] == 0.45
+    assert ps["pinned_to_floor"] is False
+
+
 def test_read_iii_stop_fires_when_after_is_worse_beyond_the_ci(worse_after):
     out = wave2_falsifier.run(worse_after, BOUNDARY)
     assert out["held_before"]["n"] == 3 and out["held_after"]["n"] == 3
@@ -138,6 +168,17 @@ def test_read_iv_counts_negative_edge_refusals_by_rule(db):
     assert out["refusals"]["kelly_negative_before"] == 1
 
 
+def test_read_iv_excludes_paper_shadow_book(db):
+    """The shadow book's refusals are not real trades and must not inflate
+    the count -- same exclusion rule as wave1_falsifier's approval rate."""
+    storage.record_entry_decisions(
+        [_decision("0a2", -0.09)],
+        book="paper_shadow", cycle_ts="2026-09-22T05:00:10+00:00", config_sha="s",
+    )
+    out = wave2_falsifier.run(db, BOUNDARY)
+    assert out["refusals"]["0a2_negative_after"] == 1  # unchanged by the shadow row above
+
+
 def test_the_connection_is_read_only(db, monkeypatch):
     calls = []
     real = sqlite3.connect
@@ -151,6 +192,15 @@ def test_the_connection_is_read_only(db, monkeypatch):
     assert calls, "expected at least one sqlite3.connect call"
     for a, kw in calls:
         assert kw.get("uri") is True and "mode=ro" in a[0]
+
+
+def test_write_attempt_raises_on_the_ro_connection(db):
+    con = wave2_falsifier._ro_connect(db)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            con.execute("INSERT INTO entry_decisions (cycle_ts) VALUES ('x')")
+    finally:
+        con.close()
 
 
 def test_a_pre_wave1_schema_is_refused_with_one_line(tmp_path, capsys):
