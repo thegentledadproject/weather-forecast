@@ -99,7 +99,7 @@ def test_read_ii_priced_spread_and_the_floor_pin(db):
     ps = out["priced_spread_by_station"]["WSSS"]
     assert ps["source"] == "measured_error"          # 6 pairs: under the 15-residual RMSE floor
     assert ps["measured"] == pytest.approx(0.8944, abs=1e-3)
-    assert ps["priced"] == 0.89                      # measured tier: no 0.70 floor (2b)
+    assert ps["priced"] == 0.89                      # naive tier: 0.89 exceeds the 0.70 floor it keeps (2b ruling), so unclamped either way
     assert ps["pinned_to_floor"] is False
 
 

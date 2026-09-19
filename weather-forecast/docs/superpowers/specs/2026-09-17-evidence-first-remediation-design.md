@@ -156,7 +156,7 @@ in `settled_buckets`; no Position row is needed because paper holds.
 
 ## Wave 2 — correct the inputs, one day
 
-Target: ~2026-09-21; DEPLOYED 2026-09-19. All items ship in one merge. Each has an on/off
+Target: ~2026-09-21; DEPLOYED 2026-09-19 (in the 15:00-19:00Z gap when no region's entry window is open); regime boundary 2026-09-20. All items ship in one merge. Each has an on/off
 constant defaulting to on, so a revert is a config flip.
 
 | id | change | can only refuse? |
@@ -168,7 +168,7 @@ constant defaulting to on, so a revert is a config flip.
 | 2e | Total forecast outage sets `today_source_mix = frozenset()` so the mix guard refuses | yes |
 | 2f | `entry_sim.py` haircut and exit-fee parity with live (`_book_has_stop` threaded through) | backtest only |
 
-`config.REGIME_BOUNDARIES = ("2026-09-19",)` (the actual deploy date; the boundary day belongs to the new regime);
+`config.REGIME_BOUNDARIES = ("2026-09-20",)` (the first target date every station decides on the new code — Asia's 09-19 window ran 20:00-00:00Z before the deploy; the boundary day belongs to the new regime);
 `cohort_monitor`, `calibration_panel` and `promotion_dossier` report
 each side of a boundary separately by default.
 

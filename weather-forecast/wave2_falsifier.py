@@ -3,7 +3,7 @@ wave2_falsifier.py -- the Wave 2 pre-registered reads and the stop condition
 (spec: "Wave 2 -- correct the inputs, one day"), run read-only at the
 boundary and again at boundary + 14 days, appended to memory.
 
-    python wave2_falsifier.py --boundary 2026-09-21
+    python wave2_falsifier.py --boundary 2026-09-20
 
 Opens the database READ-ONLY (mode=ro), never through storage._connect()
 (which issues DDL). Every statistic is a PURE function the production path
@@ -307,9 +307,15 @@ def _print(out: dict) -> None:
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--boundary", required=True, help="the Wave 2 deploy date, YYYY-MM-DD (config.REGIME_BOUNDARIES[-1])")
+    parser.add_argument(
+        "--boundary",
+        default=(config.REGIME_BOUNDARIES[-1] if config.REGIME_BOUNDARIES else None),
+        help="regime boundary, YYYY-MM-DD; defaults to config.REGIME_BOUNDARIES[-1] so a typo cannot produce a silently wrong read",
+    )
     parser.add_argument("--db", default=str(config.DB_PATH), help="database path (opened read-only)")
     args = parser.parse_args(argv)
+    if args.boundary is None:
+        parser.error("config.REGIME_BOUNDARIES is empty; pass --boundary explicitly")
     try:
         out = run(args.db, args.boundary)
     except SchemaTooOldError as exc:

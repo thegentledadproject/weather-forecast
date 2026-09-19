@@ -1,21 +1,24 @@
 """
 config.REGIME_BOUNDARIES is the list of days a wave first ran on the box.
-Every entry must be an ISO date that has already happened (a boundary in
-the future would split every report at a day with no rows on one side),
-and the list must be strictly increasing. Vacuous while the tuple is
+Every entry must be an ISO date no later than tomorrow (UTC): the boundary
+is the first TARGET DATE every station decides on the new code, which is
+legitimately tomorrow when the deploy lands in the evening gap after the
+last region's window closes; anything further out is a typo and would
+split every report at a day with no rows on one side. The list must be
+strictly increasing. Vacuous while the tuple is
 empty on the branch; load-bearing from the deploy-day stamp on.
 """
-from datetime import date
+from datetime import date, timedelta
 
 import config
 import regimes
 
 
-def test_every_boundary_is_an_iso_date_not_in_the_future():
-    today = config._now_utc().date()
+def test_every_boundary_is_an_iso_date_no_later_than_tomorrow():
+    latest_allowed = config._now_utc().date() + timedelta(days=1)
     for raw in config.REGIME_BOUNDARIES:
         parsed = date.fromisoformat(raw)      # raises on a malformed stamp
-        assert parsed <= today, f"boundary {raw} is in the future"
+        assert parsed <= latest_allowed, f"boundary {raw} is more than a day ahead"
         assert raw == parsed.isoformat(), f"boundary {raw} is not canonical ISO"
 
 

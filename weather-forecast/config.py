@@ -4244,7 +4244,7 @@ MIN_SPREAD_PAIRS = 5
 # Raising a genuinely sharp station to 0.70 is an active harm, not a
 # missed opportunity.
 #
-# FIXED IN WAVE 2 (deployed 2026-09-19), see SPREAD_FLOOR_MEASURED_TIERS_EXEMPT at
+# FIXED IN WAVE 2 (deployed 2026-09-19 15:00-19:00Z; regime boundary 2026-09-20, the first target date every station decides on the new code), see SPREAD_FLOOR_MEASURED_TIERS_EXEMPT at
 # the end of this file: this floor now binds on every tier EXCEPT
 # corrected_error (ensemble, pooled_error, fallback_default, AND the naive
 # measured_error tier all still floor here -- measured_error is NOT exempt,
@@ -5038,7 +5038,7 @@ STATION_MATURITY = _MaturityMapping()
 
 
 # ===========================================================================
-# WAVE 2 (deployed 2026-09-19) -- CORRECT THE INPUTS, ONE DAY.
+# WAVE 2 (deployed 2026-09-19 15:00-19:00Z; regime boundary 2026-09-20, the first target date every station decides on the new code) -- CORRECT THE INPUTS, ONE DAY.
 # docs/superpowers/specs/2026-09-17-evidence-first-remediation-design.md
 #
 # Every flag here defaults ON and is read at exactly one site, named beside
@@ -5130,4 +5130,4 @@ REFUSE_ON_TOTAL_FORECAST_OUTAGE = True
 #
 # () on the branch; the Wave 2 deploy date is stamped here in the final
 # commit before merge, and moved by a follow-up commit if the deploy slips.
-REGIME_BOUNDARIES: tuple = ("2026-09-19",)
+REGIME_BOUNDARIES: tuple = ("2026-09-20",)

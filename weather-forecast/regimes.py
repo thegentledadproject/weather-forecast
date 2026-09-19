@@ -7,7 +7,7 @@ boundary", which a pooled total cannot show. ONE implementation here so
 cohort_monitor, calibration_panel and promotion_dossier segment the same
 way; each keeps its own arithmetic and only changes WHICH rows it feeds it.
 
-Segments are labelled by their edges -- "pre-2026-09-21", "2026-09-21..
+Segments are labelled by their edges -- "pre-2026-09-20", "2026-09-20..
 2026-10-04", "from-2026-10-05" -- and the boundary day belongs to the NEW
 regime, because the deploy runs before that day's entry window. Every
 segment is returned, empty ones included, so a report shows the layout
