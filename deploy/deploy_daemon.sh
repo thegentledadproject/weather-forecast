@@ -75,7 +75,8 @@ if [ -f /usr/local/bin/generate_dashboard.py ]; then
     # hand-edit the unit here.
     grep -q generate_realmoney_dashboard.py /etc/systemd/system/polyweather-dashboard.service \
       || echo "!! dashboard unit ExecStart does not invoke generate_realmoney_dashboard.py -- realmoney.html will not render; hand-edit the unit"
-    sudo systemctl start polyweather-dashboard.service 2>/dev/null || true
+    # NOT started here any more (WAVE 3, 3a): the dashboard renders AFTER
+    # the daemon restart, at the end of this script -- see "== dashboard ==".
 fi
 
 echo "== execution mode (persisted OUTSIDE this script) =="
@@ -184,9 +185,59 @@ UNIT
 
 sudo systemctl daemon-reload
 sudo systemctl enable $SERVICE
+
+echo "== stop =="
+# WAVE 3 (3a). storage._connect() no longer issues DDL; the schema is applied
+# by migrate() below, which the daemon also runs at boot. Running it HERE,
+# as ubuntu, with the daemon stopped, is what makes a schema-changing deploy
+# an ordinary deploy: the backup is taken first, the ALTERs run with no other
+# writer holding the file, and the daemon comes up on a migrated database.
+# The dashboard timer is paused so no render lands mid-migration. This sits
+# AFTER the demotion guard above on purpose: a refused deploy must leave the
+# daemon running, not stopped.
+sudo systemctl stop polyweather-dashboard.timer 2>/dev/null || true
+sudo systemctl stop $SERVICE
+
+echo "== backup =="
+# sqlite's online backup API, never cp: a copy of a file with a hot journal is
+# not a database. Keeps the three most recent; older ones are pruned.
+DB="$PKG_DIR/data/polyweather.sqlite3"
+if [ -f "$DB" ]; then
+    STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+    "$VENV/bin/python" - "$DB" "$HOME/polyweather-pre-deploy-$STAMP.sqlite3" <<'PYBACKUP'
+import sqlite3, sys
+src = sqlite3.connect(sys.argv[1])
+dst = sqlite3.connect(sys.argv[2])
+try:
+    src.backup(dst)
+finally:
+    dst.close()
+    src.close()
+print(f"backup written: {sys.argv[2]}")
+PYBACKUP
+    ls -1t "$HOME"/polyweather-pre-deploy-*.sqlite3 2>/dev/null | tail -n +4 | xargs -r rm -f
+fi
+
+echo "== migrate =="
+# As ubuntu -- this script runs as ubuntu; do NOT sudo this line. A root-owned
+# -journal or -wal file beside the database is exactly the corruption 3a/3b
+# close. The one-line summary is the deploy log's proof of what was applied.
+cd "$PKG_DIR"
+"$VENV/bin/python" -c "import storage; storage.migrate(); print('migrate: ok --', storage.schema_summary())"
+
 # restart, not `enable --now`: --now is a no-op on an already-running service,
 # which left every redeploy onto a live box running the OLD code (bit us 2026-08-07).
 sudo systemctl restart $SERVICE
+
+echo "== dashboard =="
+# AFTER the daemon, never before it. The generators run as ubuntu (WAVE 3, 3b,
+# setup_dashboard.sh) and open the database read-only; starting them before
+# the restart used to race a root-owned render against the migration. Skip
+# silently if the dashboard was never set up on this box.
+if [ -f /etc/systemd/system/polyweather-dashboard.service ]; then
+    sudo systemctl start polyweather-dashboard.timer 2>/dev/null || true
+    sudo systemctl start polyweather-dashboard.service 2>/dev/null || true
+fi
 
 sleep 5
 echo "== Service status =="

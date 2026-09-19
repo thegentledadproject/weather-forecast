@@ -112,6 +112,28 @@ def _config_sha() -> Optional[str]:
     return _config_sha_cache["sha"]
 
 
+def _boot_storage() -> None:
+    """
+    WAVE 3 (3a). The daemon is THE writer. Apply the schema once, then open
+    every later connection writable; every other process on the box opens
+    storage read-only (storage._WRITABLE defaults False) and cannot corrupt
+    the file the daemon is writing. deploy_daemon.sh runs the same
+    migrate() with the daemon stopped, so on a normal boot this is a no-op
+    pass over IF NOT EXISTS statements.
+
+    Also primes _config_sha() here, off the entry path: config._current_
+    git_sha() shells out to git, and the first entry cycle after a boot
+    used to pay for that subprocess (Wave 1 minor).
+    """
+    storage.migrate()
+    storage.set_writable(True)
+    sha = _config_sha()
+    print(
+        f"[scheduler] boot: storage migrated at {config.DB_PATH} "
+        f"({storage.schema_summary()}); writable; config sha {sha or 'unknown'}."
+    )
+
+
 def _record_entry_decisions(decisions, station_icao: str, book: str, cycle_ts: str) -> None:
     """
     Persist a cycle's EntryDecisions as entry_decisions rows. BEST-EFFORT:
@@ -747,6 +769,8 @@ def run_forever(station_icaos: Optional[list] = None) -> None:
     would mean dispatching groups concurrently, which is a separate design
     decision with its own risks and is deliberately not made here.
     """
+    _boot_storage()
+
     groups = stations_by_utc_offset(station_icaos)
     if not groups:
         print("[scheduler] no registered stations to run -- nothing to do.")

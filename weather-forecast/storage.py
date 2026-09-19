@@ -45,12 +45,15 @@ class StorageReadOnlyError(RuntimeError):
 # applied by migrate(), which scheduler._boot_storage() runs once at daemon
 # boot and deploy/deploy_daemon.sh runs once with the daemon stopped.
 #
-# Who will flip this, once wired: scheduler.run_forever (the writer),
-# manual_trigger.py, bucket_bias.py --ingest and main.py (operator writes).
-# NOT YET WIRED (Wave 3 Task 2): nothing calls set_writable()/migrate() at
-# this commit; do not deploy it alone. That next commit also adds
-# tests/test_wave3_writers_and_readers.py to pin the call sites by AST. The
-# test suite sets it in conftest because tests own their throwaway files.
+# Wired (Wave 3 Task 2): scheduler._boot_storage(), called at the top of
+# run_forever, is the daemon's own set_writable(True) + migrate(). The three
+# operator scripts declare themselves writers at their own entry points --
+# manual_trigger.py:main(), bucket_bias.py's `--ingest` branch, and
+# main.py:main() -- right before the write their run makes (opening a
+# position, ingesting a settlement, or storing a forecast/spread).
+# tests/test_wave3_writers_and_readers.py pins the call sites by AST so no
+# fifth module can add itself to this list unnoticed. The test suite sets
+# it in conftest because tests own their throwaway files.
 _WRITABLE = False
 
 

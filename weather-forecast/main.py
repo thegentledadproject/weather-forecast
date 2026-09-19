@@ -24,10 +24,17 @@ import argparse
 from datetime import date
 
 import config
+import storage
 from pipeline import run, print_summary
 
 
 def main():
+    # WAVE 3 (3a): pipeline.run() stores every forecast and ensemble spread
+    # it fetches, exactly as the daemon's cycle does, so a one-off run is an
+    # operator WRITE and says so. The rows it leaves are the same rows the
+    # daemon would have written.
+    storage.set_writable(True)
+
     parser = argparse.ArgumentParser(
         description="Multi-station Polymarket weather forecast MVP"
     )

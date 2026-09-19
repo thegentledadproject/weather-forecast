@@ -161,6 +161,12 @@ def _parse_args():
 def main():
     args = _parse_args()
 
+    # WAVE 3 (3a): this script OPENS A POSITION, so it is one of the three
+    # operator writers (with bucket_bias.py --ingest and main.py). Declared
+    # up front, before any storage read, because the reads and the write
+    # share one connection mode for the life of the process.
+    storage.set_writable(True)
+
     if args.station not in config.STATIONS:
         print(f"ERROR: unknown station '{args.station}'. Registered: "
               f"{', '.join(config.STATIONS)}")
