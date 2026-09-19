@@ -26,8 +26,8 @@ from clients import openmeteo_client
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+def db(tmp_db):
+    return tmp_db
 
 
 def test_fetched_members_are_returned_and_recorded(db, monkeypatch):

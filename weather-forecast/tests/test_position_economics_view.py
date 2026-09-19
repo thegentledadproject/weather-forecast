@@ -26,10 +26,9 @@ from models import Position
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
+def db(tmp_db):
     """A real, migrated database at a throwaway path."""
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
-    return config.DB_PATH
+    return tmp_db
 
 
 def _pos(pid, mode, size_usd, entry_price, size_shares=None, **kw) -> Position:
@@ -128,8 +127,8 @@ class TestViewDefinitionStaysCurrent:
         conn.commit()
         conn.close()
 
-        # Any connection through storage should notice and repair it.
-        storage.load_open_positions()
+        # WAVE 3 (3a): the repair runs from migrate(), not from any connection.
+        storage.migrate()
 
         row = _rows(db, "SELECT * FROM position_economics WHERE position_id = ?", ("p",))[0]
         assert "notional_shares" in row, "the stale one-column view was not rebuilt"

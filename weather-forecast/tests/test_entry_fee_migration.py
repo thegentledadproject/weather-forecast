@@ -42,9 +42,8 @@ from models import Position
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
-    return str(tmp_path / "t.sqlite3")
+def db(tmp_db):
+    return tmp_db
 
 
 def _position(entry_price=0.30, size_usd=9.0, size_shares=30.0, pid="p1") -> Position:
@@ -94,9 +93,10 @@ def test_the_column_exists_on_a_fresh_database(db):
 
 def test_the_migration_is_idempotent(db):
     """
-    _connect() runs the migration on EVERY connection, so "runs twice" is the
-    normal case, not an edge case.
+    migrate() runs at every daemon boot AND on every deploy, so "runs twice"
+    is the normal case, not an edge case.
     """
+    storage.migrate()
     storage.open_position(_position())
     first = _raw(db)["entry_fee_per_share"]
     storage.load_position_history("WSSS")
@@ -116,7 +116,7 @@ def test_a_row_written_before_the_column_existed_is_backfilled(db):
     conn.commit()
     conn.close()
 
-    storage.load_position_history("WSSS")  # any connection runs the migration
+    storage.migrate()  # the backfill runs from migrate(), not from a read
 
     expected = risk_manager.taker_fee_per_share(0.30)
     assert _raw(db)["entry_fee_per_share"] == pytest.approx(expected)
@@ -135,7 +135,7 @@ def test_the_backfill_leaves_the_size_identity_intact(db):
     conn.commit()
     conn.close()
 
-    storage.load_position_history("WSSS")
+    storage.migrate()
     after = _raw(db)
 
     assert after["entry_price"] == before["entry_price"]
@@ -156,7 +156,7 @@ def test_the_backfill_does_not_overwrite_a_stored_value(db):
     conn.commit()
     conn.close()
 
-    storage.load_position_history("WSSS")
+    storage.migrate()
 
     assert _raw(db)["entry_fee_per_share"] == 0.99
 

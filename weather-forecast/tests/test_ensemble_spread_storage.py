@@ -16,8 +16,7 @@ import storage
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+def db(tmp_db, tmp_path):
     return tmp_path
 
 

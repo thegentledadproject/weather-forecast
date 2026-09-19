@@ -29,7 +29,7 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
     import storage
 
-    storage.load_open_positions()
+    storage.migrate()
     return storage
 
 

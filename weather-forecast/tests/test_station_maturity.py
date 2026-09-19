@@ -33,7 +33,7 @@ def measured_db(tmp_path, monkeypatch):
     # ones about this criterion patch it back and exercise it for real.
     monkeypatch.setattr(config, "calibration_vs_market",
                         lambda icao: (True, "stubbed for this test"))
-    storage._connect().close()
+    storage.migrate()
 
 
 def seed(icao="WSSS", pairs=10, errors=None, sims=0, start=date(2026, 7, 1)):
@@ -122,7 +122,7 @@ def test_a_drifting_bias_blocks_even_when_precise():
     """
     drifting = [0.0] * 6 + [3.0] * 6          # tight in each half, 3C apart
     seed(pairs=12, errors=None, sims=3)
-    storage._connect().close()
+    storage.migrate()
     # re-seed with the drifting series
     for i, err in enumerate(drifting):
         target = date(2026, 7, 1) + timedelta(days=i)

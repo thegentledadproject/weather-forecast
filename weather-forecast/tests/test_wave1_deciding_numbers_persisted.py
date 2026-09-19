@@ -17,7 +17,7 @@ from models import EntryDecision, Position
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
 
 
 def _position(**overrides) -> Position:

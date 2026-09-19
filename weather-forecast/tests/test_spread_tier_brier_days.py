@@ -25,8 +25,8 @@ SOURCE = "open_meteo_ecmwf"
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+def db(tmp_db):
+    return tmp_db
 
 
 def _seed_forecast(target_date, value, fetched_at=None):

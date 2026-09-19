@@ -27,7 +27,7 @@ TARGET = date(2026, 9, 17)
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
     return config.DB_PATH
 
 

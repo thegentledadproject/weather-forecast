@@ -15,13 +15,55 @@ sqlite3 (standard library)
 config.py, models.py (local)
 """
 
+import os
 import sqlite3
+import sys
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import config
 from models import PointForecast, ObservedReading, Position, SettledToken
+
+
+class StorageReadOnlyError(RuntimeError):
+    """
+    A process that never called set_writable(True) tried to write, or tried
+    to open a database file that does not exist. WAVE 3 (3a): the daemon and
+    three named operator scripts write; everything else reads mode=ro.
+    """
+
+
+# WAVE 3 (3a). READ-ONLY BY DEFAULT. Until 2026-09-25 every process that
+# imported this module -- the daemon, the root dashboard timer, cohort_monitor,
+# the sweeps, a pytest run -- opened the file read-write AND issued the whole
+# schema (CREATE TABLE / ALTER TABLE / the entry-fee UPDATE) on every single
+# connection. Five processes racing DDL on one file, one of them root, is how
+# a database corrupts itself with nobody deciding to. Now: _connect() opens a
+# `mode=ro` URI unless THIS process called set_writable(True); the schema is
+# applied by migrate(), which scheduler._boot_storage() runs once at daemon
+# boot and deploy/deploy_daemon.sh runs once with the daemon stopped.
+#
+# Who flips this: scheduler.run_forever (the writer), manual_trigger.py,
+# bucket_bias.py --ingest and main.py (operator writes). Nothing else may --
+# tests/test_wave3_writers_and_readers.py pins the call sites by AST. The
+# test suite sets it in conftest because tests own their throwaway files.
+_WRITABLE = False
+
+
+def set_writable(flag: bool = True) -> None:
+    """Declare THIS process a writer (or not). See _WRITABLE."""
+    global _WRITABLE
+    _WRITABLE = bool(flag)
+
+
+def is_writable() -> bool:
+    return _WRITABLE
+
+
+def _process_name() -> str:
+    return os.path.basename(sys.argv[0] or "") or "python"
 
 
 @contextmanager
@@ -29,6 +71,12 @@ def _db():
     """
     Transaction scope AND connection lifetime in one context manager.
     EVERY function in this module must use _db(); never `with _connect()`.
+
+    WAVE 3 (3a): also the one place a read-only process's write becomes a
+    StorageReadOnlyError. sqlite reports "attempt to write a readonly
+    database" as an OperationalError, which reads like a lock or a disk
+    problem; naming the process and the fix is what turns a mystery into a
+    one-line journal entry.
 
     THIS IS THE SAME BUG 4f72dd4 FIXED IN price_store.py, AND IT WAS LEFT
     HERE. sqlite3's own `with conn:` delimits a TRANSACTION -- it commits or
@@ -57,6 +105,15 @@ def _db():
     try:
         with conn:
             yield conn
+    except sqlite3.OperationalError as exc:
+        if not _WRITABLE and "readonly" in str(exc).lower():
+            raise StorageReadOnlyError(
+                f"{_process_name()} opened {config.DB_PATH} read-only (storage._WRITABLE is "
+                f"False) and tried to write: {exc}. Only the daemon (scheduler.run_forever) "
+                f"and the operator writers named in storage.py call storage.set_writable(True); "
+                f"if this process is meant to write, call it at boot."
+            ) from exc
+        raise
     finally:
         conn.close()
 
@@ -150,24 +207,19 @@ def _ensure_position_economics_view(conn: sqlite3.Connection) -> None:
     nothing on any database that already ran an earlier version -- the same
     trap the `positions` column migration below exists to avoid.
 
-    NOT an unconditional DROP + CREATE either. This runs on EVERY connection
-    (storage opens one per call site), and a schema write on each would take
-    a write lock and bump the schema cookie, invalidating prepared statements
-    across the daemon for a view that holds no data. Comparing the stored SQL
-    first makes the common case a single read.
+    NOT an unconditional DROP + CREATE either. Since WAVE 3 (3a) this runs
+    only from migrate() -- daemon boot and the deploy script -- but a schema
+    write on every migrate would still take a write lock and bump the schema
+    cookie for a view that holds no data. Comparing the stored SQL first
+    makes the common case a single read.
 
     THE REBUILD IS NOT ATOMIC, so the CREATE tolerates a peer having won the
-    race. Each execute() here is its own transaction in autocommit, and more
-    than one process reaches this code: the daemon and the dashboard
-    generator both open connections, the latter on a 5-minute timer. Two of
-    them interleaving as DROP, DROP, CREATE, CREATE would leave the second
-    CREATE raising "view position_economics already exists" out of
-    _connect(), i.e. out of the one function every storage call goes
-    through. IF NOT EXISTS makes that loser a no-op, which is correct: the
-    peer just wrote the definition this process was about to write. The
-    window is only open until someone has stored the current definition, so
-    in practice this is the first moments after a deploy or an edit to the
-    SQL above.
+    race. Before Wave 3 every connection ran this and the daemon raced the
+    root dashboard timer; now only a daemon booting while a deploy's
+    migrate() is still running could interleave DROP, DROP, CREATE, CREATE,
+    and deploy_daemon.sh stops the daemon first. IF NOT EXISTS is kept so the
+    loser of any such race is a no-op rather than a raise out of migrate():
+    the peer just wrote the definition this process was about to write.
 
     IF NOT EXISTS is injected HERE rather than kept in
     _POSITION_ECONOMICS_VIEW_SQL because sqlite_master stores the CREATE
@@ -203,7 +255,61 @@ ENTRY_DECISION_COLUMNS = (
 
 
 def _connect() -> sqlite3.Connection:
+    """
+    OPEN ONLY. No DDL, no backfill, no PRAGMA -- WAVE 3 (3a). Writable
+    processes get a plain connection; every other process gets a `mode=ro`
+    URI, which sqlite refuses to create, so a reader can never leave an
+    empty root-owned file where the daemon's database should be.
+    """
+    if _WRITABLE:
+        return sqlite3.connect(config.DB_PATH)
+    path = Path(config.DB_PATH).resolve()
+    if not path.exists():
+        raise StorageReadOnlyError(
+            f"{_process_name()} opened {path} read-only and it does not exist. The daemon "
+            f"creates it at boot (scheduler._boot_storage -> storage.migrate()); run that, "
+            f"or `python -c \"import storage; storage.migrate()\"` as the daemon's user."
+        )
+    return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+
+
+def migrate() -> None:
+    """
+    Apply the whole schema -- every CREATE TABLE / INDEX, the idempotent
+    ALTER TABLE column list, the entry-fee backfill, the economics view --
+    and commit. Idempotent. THE ONLY DDL PATH (WAVE 3, 3a): run by
+    scheduler._boot_storage() at daemon boot and by deploy/deploy_daemon.sh
+    with the daemon stopped. Opens read-write regardless of _WRITABLE,
+    because applying the schema is the one write a deploy makes.
+    """
     conn = sqlite3.connect(config.DB_PATH)
+    try:
+        _apply_schema(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def schema_summary() -> str:
+    """'N tables: a, b, ...; M view(s)' -- one line for the deploy log."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'view') "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY type, name"
+        ).fetchall()
+    tables = [n for t, n in rows if t == "table"]
+    views = [n for t, n in rows if t == "view"]
+    return f"{len(tables)} tables: {', '.join(tables)}; {len(views)} view(s): {', '.join(views)}"
+
+
+def _apply_schema(conn: sqlite3.Connection) -> None:
+    """
+    The DDL, moved VERBATIM out of _connect() on 2026-09-2x (Wave 3, 3a).
+    Every statement is idempotent (IF NOT EXISTS, PRAGMA-guarded ALTER,
+    WHERE ... IS NULL) because a deploy and a daemon boot both run it.
+    tests/test_no_fd_leak.py asserts every table is declared here and that
+    _connect() executes nothing.
+    """
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS forecasts (
@@ -269,10 +375,10 @@ def _connect() -> sqlite3.Connection:
     # NOT add columns to an existing table. Without this migration, an
     # existing deployed database silently keeps the old schema and every read
     # of the new fields (size_shares, execution_mode, order_id) fails or, for
-    # SELECT *, just returns short rows. Run on every connection so every
-    # code path (backtest scripts, tests, the live executor) gets migrated,
-    # and check PRAGMA table_info first so this stays idempotent -- ALTER
-    # TABLE ADD COLUMN errors if the column is already there.
+    # SELECT *, just returns short rows. Run from migrate() -- daemon boot and
+    # the deploy script, since Wave 3 -- and check PRAGMA table_info first so
+    # this stays idempotent: ALTER TABLE ADD COLUMN errors if the column is
+    # already there.
     #
     # model_prob/raw_edge/net_ev_at_size are NULL on every row written before
     # them, and that is the honest value: those trades really do have no
@@ -363,12 +469,11 @@ def _connect() -> sqlite3.Connection:
     # POLYMARKET_WEATHER_TAKER_FEE_RATE and is duplicated here as a literal
     # ONLY for this one-time backfill of historical rows; every live write goes
     # through open_position() below, which calls the real function.
-    # GUARDED BY A READ, because this runs on every connection and the daemon
-    # opens one per storage call. An unconditional UPDATE would take a write
-    # lock every time -- on a table that needs it exactly once -- and a write
-    # lock on the connection path is how a read-heavy daemon starts contending
-    # with itself. The SELECT costs nothing after the first run and stops the
-    # UPDATE from ever being issued again.
+    # GUARDED BY A READ. Until Wave 3 this ran on every connection, and an
+    # unconditional UPDATE would have taken a write lock on every storage call
+    # for a table that needs it exactly once. It now runs only from migrate(),
+    # but the guard stays: a deploy's migrate and the daemon's boot migrate
+    # both run it, and neither should issue an UPDATE that changes nothing.
     #
     # Guarding on "did we just ALTER the column in?" would be cheaper still and
     # is deliberately NOT what this does: a row inserted with a NULL fee by
@@ -561,23 +666,11 @@ def _connect() -> sqlite3.Connection:
     # the migrated `positions` shape rather than a short one.
     _ensure_position_economics_view(conn)
 
-    # WAVE 1 (2026-09-17). The entry-fee backfill above is a DML statement
-    # (UPDATE), and under sqlite3's default (legacy) transaction control that
-    # opens an implicit transaction covering every statement after it --
-    # including every CREATE TABLE / CREATE INDEX / ALTER TABLE below it in
-    # this function. Every normal caller goes through _db(), whose `with
-    # conn:` commits on the way out, so this was invisible. But
-    # `storage._connect().close()` is ALSO an established idiom across this
-    # suite (test_no_fd_leak.py, test_station_maturity.py, and this file's
-    # own tests) for "just run the migration" -- and .close() on a
-    # connection with a pending transaction rolls it back, silently, with no
-    # exception. On a legacy database that still needs the entry-fee
-    # backfill, that discarded every table/index created after it, including
-    # this Wave's entry_decisions. Committing explicitly here makes
-    # `_connect()` durable on its own, matching what `_db()` already gave
-    # every other caller.
-    conn.commit()
-    return conn
+    # WAVE 1 (2026-09-17) found that the entry-fee backfill above is a DML
+    # statement (UPDATE) whose implicit transaction covered every CREATE /
+    # ALTER after it, and that closing without a commit rolled them all back
+    # silently. migrate() commits explicitly after this function returns;
+    # nothing else may call this.
 
 
 def save_forecast(forecast: PointForecast) -> None:

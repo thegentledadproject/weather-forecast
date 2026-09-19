@@ -116,7 +116,7 @@ def _ev(bucket=32, model_prob=0.55, price=0.35):
 @pytest.fixture
 def live_cycle(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
     opened = []
     monkeypatch.setattr(executor, "EXECUTION_MODE", {icao: ("live" if icao == STATION else "paper") for icao in config.STATIONS})
     monkeypatch.setattr(executor, "open_position", lambda d: opened.append(d))

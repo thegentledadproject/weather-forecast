@@ -24,8 +24,7 @@ from models import EVResult
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+def db(tmp_db, tmp_path):
     return tmp_path
 
 
@@ -143,6 +142,7 @@ def test_unpriced_bucket_is_still_recorded(db):
 def engine_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    storage.migrate()
     return tmp_path
 
 
@@ -161,11 +161,23 @@ def test_save_ev_snapshot_also_records_dated_rows(engine_db):
     assert [(r["bucket_c"], r["side"]) for r in rows] == [(31, "NO"), (31, "YES")]
 
 
-def test_json_handoff_still_holds_only_the_latest_cycle(engine_db):
+def test_json_handoff_still_holds_only_the_latest_cycle(engine_db, monkeypatch):
     """
     The file is the dashboard's handoff and a dashboard only wants the latest.
     Retention is additive: the file keeps overwriting, the table accumulates.
+
+    WAVE 3 (3a): with the per-connection schema check gone, _connect() no
+    longer inserts a few milliseconds of DDL work between these two calls,
+    so on a coarse-grained clock they can land on the identical
+    generated_at -- and ev_snapshots' PRIMARY KEY includes generated_at, so
+    an identical stamp makes the second call's INSERT OR REPLACE overwrite
+    the first row instead of adding a second one. Two distinct stamps are
+    forced here so the test pins the RETENTION behavior, not the host
+    clock's resolution.
     """
+    stamps = iter(["2026-09-19T05:00:00.000000+00:00", "2026-09-19T05:00:01.000000+00:00"])
+    monkeypatch.setattr(ev_engine, "_now_iso", lambda: next(stamps))
+
     ev_engine.save_ev_snapshot("WSSS", [_ev(31, "YES", model_prob=0.42, market_price=0.35)])
     ev_engine.save_ev_snapshot("WSSS", [_ev(31, "YES", model_prob=0.47, market_price=0.39)])
 

@@ -32,7 +32,7 @@ from models import EntryDecision, Position
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
 
 
 def _decision(**overrides) -> EntryDecision:
@@ -127,7 +127,7 @@ def test_migration_adds_the_columns_and_old_rows_read_none(tmp_path, monkeypatch
     con.close()
 
     monkeypatch.setattr(config, "DB_PATH", str(db))
-    storage._connect().close()
+    storage.migrate()
 
     (loaded,) = storage.load_open_positions("WSSS")
     assert loaded.position_id == "old-1"

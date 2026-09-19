@@ -184,7 +184,7 @@ def test_the_take_profit_still_measures_realizable_gain():
 
 def test_the_entry_bid_survives_a_storage_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
 
     storage.open_position(_position())
     (loaded,) = storage.load_open_positions("WMKK")
@@ -198,7 +198,7 @@ def test_a_position_opened_without_a_bid_reads_back_none(tmp_path, monkeypatch):
     0.0 -- a real bid of zero.
     """
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
 
     storage.open_position(_position(entry_bid=None))
     (loaded,) = storage.load_open_positions("WMKK")
@@ -208,7 +208,7 @@ def test_a_position_opened_without_a_bid_reads_back_none(tmp_path, monkeypatch):
 
 def test_the_executor_records_the_entry_bid_on_the_position(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
     monkeypatch.setitem(executor.EXECUTION_MODE, "WMKK", "paper")
 
     executor.open_position(EntryDecision(
