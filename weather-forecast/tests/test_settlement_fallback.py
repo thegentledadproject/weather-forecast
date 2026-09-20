@@ -244,11 +244,18 @@ class TestTheTriggerConditions:
         assert closed == []
 
     def test_it_waits_for_the_unmonitorable_threshold(self, monkeypatch):
-        """One failed read is a blip, not a resolution."""
+        """
+        One failed read is a blip, not a resolution -- for a market day that
+        hasn't passed. (WAVE 3, 3c: a PAST-dated position no longer waits
+        for this threshold at all; see test_wave3_exit_check_first.py's
+        first-failure Gamma tests for that path. This test uses a
+        still-running market day so it keeps testing the counter itself.)
+        """
+        still_running = _pos(target_date=date.today() + timedelta(days=1))
         _dead_book(monkeypatch)
-        _observations(monkeypatch, [_reading(31.0)])
+        _observations(monkeypatch, [_reading(31.0, target_date=still_running.target_date)])
         monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: None)
-        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [_pos()])
+        monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [still_running])
         closed = _capture_closes(monkeypatch)
 
         position_manager.check_and_exit_positions()

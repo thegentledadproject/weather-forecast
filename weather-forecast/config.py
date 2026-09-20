@@ -5133,3 +5133,41 @@ REFUSE_ON_TOTAL_FORECAST_OUTAGE = True
 # () on the branch; the Wave 2 deploy date is stamped here in the final
 # commit before merge, and moved by a follow-up commit if the deploy slips.
 REGIME_BOUNDARIES: tuple = ("2026-09-20",)
+
+
+# ===========================================================================
+# WAVE 3 (~2026-09-25) -- STOP THE DATA FROM CORRUPTING ITSELF.
+# docs/superpowers/specs/2026-09-17-evidence-first-remediation-design.md
+#
+# No statistic changes in this wave, so there is NO REGIME_BOUNDARIES stamp.
+# 3a (storage read-only by default, storage.migrate() the only DDL path) and
+# 3b (dashboard as ubuntu) are not flagged: they are the point. The flags
+# below default ON; False restores the pre-Wave-3 path at that site.
+# EXIT_CHECK_BEFORE_ENTRIES is read at two sites in scheduler._run_full_
+# cycle (the early call and the guard on the late call); the other two
+# flags are read at exactly one site each.
+# ===========================================================================
+
+# 3c. THE EXIT CHECK RUNS BEFORE THE ENTRY LEG. Read by scheduler._run_full_
+# cycle. Journal-confirmed 2026-09-02: five live positions at the asia
+# concurrent cap, one of them yesterday's and already resolved; every
+# 05:00-05:20 SGT tick took the count (5) BEFORE the exit check closed the
+# resolved row, and refused the entry. Exits first also means a pipeline.run
+# failure no longer skips the station's exit check for that cycle.
+EXIT_CHECK_BEFORE_ENTRIES = True
+
+# 3c. A PAST-DATED POSITION WITH NO PRICE ASKS GAMMA ON THE FIRST FAILURE.
+# Read by position_manager._check_one_position. Its market day is over, so
+# the second and third blind cycles UNMONITORABLE_CYCLES_WARN used to demand
+# could learn nothing a resolution lookup cannot answer now. Same-day
+# positions keep the three-failure counter: a live market with a broken
+# feed is a feed problem, not a resolution.
+PAST_DATED_GAMMA_ON_FIRST_FAILURE = True
+
+# 3d. THE EXIT PATH AND THE REPLAY USE THE DST-AWARE OFFSET. Read by
+# position_manager._local_hour_for, risk_manager._station_offset_now and
+# backtest/simclock.utc_offset_for (which engine.run threads per day). With
+# the static registry int, every European station's 10:00 edge-decay
+# tightening fired at 11:00 true local all summer (scheduler-timing review
+# 2026-09-15, production-confirmed), and the replay agreed with the error.
+DST_AWARE_LOCAL_HOUR = True

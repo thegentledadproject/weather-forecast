@@ -318,8 +318,16 @@ def _check_one_position(
         failures = _note_price_failure(position)
         # A market can resolve while its price feed is down, and a
         # position we can't price is one we'd otherwise never see
-        # resolve. Once blind for long enough, ask Gamma directly.
-        if failures >= UNMONITORABLE_CYCLES_WARN:
+        # resolve. Once blind for long enough, ask Gamma directly -- and,
+        # WAVE 3 (3c), at ONCE for a bucket whose market day is already
+        # over: a past-dated position is resolved by definition, so a
+        # second and third blind cycle buy nothing but two more cycles of
+        # a live slot held by a settled market (the 2026-09-02 journal).
+        past_dated = position.target_date < _local_today_for(position)
+        ask_gamma_now = failures >= UNMONITORABLE_CYCLES_WARN or (
+            config.PAST_DATED_GAMMA_ON_FIRST_FAILURE and past_dated
+        )
+        if ask_gamma_now:
             reported_closed = _market_reported_closed(position)
             if reported_closed is True:
                 return _close_resolved_without_price(position, token_id)
@@ -333,7 +341,7 @@ def _check_one_position(
             # market with a broken price feed is a feed problem, and
             # closing it on the weather would settle a position that can
             # still trade.
-            if reported_closed is None and position.target_date < _local_today_for(position):
+            if reported_closed is None and past_dated:
                 return _close_from_settlement_source(position, gamma_closed=None)
         return None
     _consecutive_price_failures.pop(position.position_id, None)
