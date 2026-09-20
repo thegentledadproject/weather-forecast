@@ -9,6 +9,8 @@ pinned by AST to never declare themselves writers.
 import ast
 import pathlib
 
+from test_wave3_writers_and_readers import _direct_writable_assignments
+
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SETUP = REPO / "deploy" / "setup_dashboard.sh"
 GENERATORS = sorted((REPO / "deploy").glob("generate_*.py"))
@@ -32,7 +34,7 @@ def test_the_dashboard_unit_runs_as_ubuntu():
 
 def test_the_web_root_is_handed_to_ubuntu_idempotently():
     script = SETUP.read_text(encoding="utf-8")
-    assert "chown -R ubuntu:ubuntu /var/www/html" in script
+    assert "chown -R ubuntu:ubuntu $WEB_ROOT" in script
     assert "usermod -aG systemd-journal ubuntu" in script
     # Re-runnable: the generators are copied from the repo, not mv'd from $HOME.
     assert "sudo mv /home/ubuntu/" not in script
@@ -53,4 +55,17 @@ def test_three_generators_exist_and_none_is_a_writer():
                     and isinstance(n.func.value, ast.Name) and n.func.value.id == "sqlite3")
             )
         ]
+        # A bare `storage._WRITABLE = True` flips the same flag without ever
+        # calling set_writable(), so the ast.Call walk above alone would miss
+        # it -- reuse the assignment scanner test_wave3_writers_and_readers.py
+        # already has rather than duplicating it here.
+        offenders += _direct_writable_assignments(gen)
         assert not offenders, f"{gen.name} touches storage beyond its public readers at lines {offenders}"
+
+
+def test_the_direct_writable_assignment_scanner_actually_catches_it(tmp_path):
+    """Negative control: prove _direct_writable_assignments is wired up and
+    would fail the test above, not silently pass because it's unreachable."""
+    decoy = tmp_path / "decoy_generator.py"
+    decoy.write_text("import storage\nstorage._WRITABLE = True\n", encoding="utf-8")
+    assert _direct_writable_assignments(decoy) == [2]

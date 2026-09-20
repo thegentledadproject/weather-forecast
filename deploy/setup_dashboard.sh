@@ -19,7 +19,7 @@ echo "== web root owned by ubuntu =="
 # this directory. The path stays /var/www/html -- nginx serves it and every
 # bookmark points at it -- and the recursive chown also takes the .html files
 # an earlier root-run timer left behind.
-sudo chown -R ubuntu:ubuntu /var/www/html
+sudo chown -R ubuntu:ubuntu $WEB_ROOT
 
 echo "== ubuntu may read the system journal =="
 # generate_dashboard.py tails `journalctl -u polyweather`; as root that was
