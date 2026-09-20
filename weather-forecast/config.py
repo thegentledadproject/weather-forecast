@@ -5142,10 +5142,13 @@ REGIME_BOUNDARIES: tuple = ("2026-09-20",)
 # No statistic changes in this wave, so there is NO REGIME_BOUNDARIES stamp.
 # 3a (storage read-only by default, storage.migrate() the only DDL path) and
 # 3b (dashboard as ubuntu) are not flagged: they are the point. The flags
-# below default ON; False restores the pre-Wave-3 path at that site.
-# EXIT_CHECK_BEFORE_ENTRIES is read at two sites in scheduler._run_full_
-# cycle (the early call and the guard on the late call); the other two
-# flags are read at exactly one site each.
+# below default ON; False restores the pre-Wave-3 path at every site named.
+# Read-site counts: EXIT_CHECK_BEFORE_ENTRIES x2 (scheduler._run_full_cycle's
+# early call and the guard on the late call), PAST_DATED_GAMMA_ON_FIRST_
+# FAILURE x1 (position_manager._check_one_position's Gamma-ask timing only
+# -- see its own comment for what it does NOT move), DST_AWARE_LOCAL_HOUR x3
+# (Task 5: position_manager._local_hour_for, risk_manager._station_offset_
+# now, backtest/simclock.utc_offset_for).
 # ===========================================================================
 
 # 3c. THE EXIT CHECK RUNS BEFORE THE ENTRY LEG. Read by scheduler._run_full_
@@ -5158,10 +5161,15 @@ EXIT_CHECK_BEFORE_ENTRIES = True
 
 # 3c. A PAST-DATED POSITION WITH NO PRICE ASKS GAMMA ON THE FIRST FAILURE.
 # Read by position_manager._check_one_position. Its market day is over, so
-# the second and third blind cycles UNMONITORABLE_CYCLES_WARN used to demand
-# could learn nothing a resolution lookup cannot answer now. Same-day
-# positions keep the three-failure counter: a live market with a broken
-# feed is a feed problem, not a resolution.
+# a DEFINITE Gamma answer -- True closes it, False leaves it open -- no
+# longer waits for the second and third blind cycles UNMONITORABLE_CYCLES_
+# WARN used to demand. This moves the ASK earlier ONLY: the OBSERVATION-
+# RECORD fallback (_close_from_settlement_source), for when Gamma itself is
+# UNREACHABLE (None), still waits for the full three-failure
+# UNMONITORABLE_CYCLES_WARN cushion, exactly as before -- an unreachable
+# Gamma on cycle one is a blip in the lookup, not evidence of anything.
+# Same-day positions keep the three-failure counter for the ASK itself too:
+# a live market with a broken feed is a feed problem, not a resolution.
 PAST_DATED_GAMMA_ON_FIRST_FAILURE = True
 
 # 3d. THE EXIT PATH AND THE REPLAY USE THE DST-AWARE OFFSET. Read by

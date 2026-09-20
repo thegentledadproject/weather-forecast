@@ -341,7 +341,15 @@ def _check_one_position(
             # market with a broken price feed is a feed problem, and
             # closing it on the weather would settle a position that can
             # still trade.
-            if reported_closed is None and past_dated:
+            #
+            # WAVE 3 (3c) only moved the ASK earlier, not this fallback: a
+            # past-dated position with Gamma UNREACHABLE (None) still waits
+            # for the same UNMONITORABLE_CYCLES_WARN cushion as before --
+            # only a DEFINITE Gamma answer (True, handled above) acts on
+            # the first failure. An unreachable Gamma on cycle one is most
+            # often a transient blip in the lookup itself, not evidence of
+            # anything; three of them in a row is.
+            if reported_closed is None and past_dated and failures >= UNMONITORABLE_CYCLES_WARN:
                 return _close_from_settlement_source(position, gamma_closed=None)
         return None
     _consecutive_price_failures.pop(position.position_id, None)

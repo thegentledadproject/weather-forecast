@@ -8,7 +8,7 @@ to skip it. (ii) A past-dated position whose price fetch fails asks Gamma on
 the FIRST failure, not the third: its market day is over, so there is
 nothing a second or third blind cycle can learn.
 """
-from datetime import date, datetime, timezone
+from datetime import date
 from types import SimpleNamespace
 
 import pytest
@@ -171,6 +171,47 @@ def test_a_past_dated_position_asks_gamma_on_the_first_failure(blind):
     pos = _live_position("p9", date(2026, 1, 1))
     decision = position_manager._check_one_position(pos)
     assert blind["gamma"] == 1
+    assert decision is not None and decision.reason == "resolution"
+
+
+@pytest.fixture
+def gamma_unreachable(monkeypatch):
+    """
+    Gamma itself can't say (lookup failed / None), as opposed to `blind`'s
+    definite True. The FIRST-FAILURE change only moves the ASK earlier; the
+    observation-record fallback for an unreachable Gamma still needs the
+    same three-failure UNMONITORABLE_CYCLES_WARN cushion it always did.
+    """
+    calls = {"gamma": 0, "settlement": 0}
+    monkeypatch.setattr(market_client, "get_current_price_for_side", lambda token_id, side: None)
+    monkeypatch.setattr(position_manager, "_market_reported_closed",
+                        lambda position: calls.__setitem__("gamma", calls["gamma"] + 1) or None)
+    monkeypatch.setattr(position_manager, "_close_from_settlement_source",
+                        lambda position, gamma_closed=None: calls.__setitem__("settlement", calls["settlement"] + 1) or
+                            ExitDecision(position_id=position.position_id, should_exit=True,
+                                        reason="resolution", current_price=0.0, pnl_pct=-100.0))
+    position_manager._consecutive_price_failures.clear()
+    return calls
+
+
+def test_a_past_dated_position_with_gamma_unreachable_still_waits_three_failures(gamma_unreachable):
+    """
+    The controller ruling: 3c moved the ASK earlier, not the fallback. On
+    the first failure Gamma is asked (past-dated) but comes back None, so
+    the position stays open one and two failures in; only the third failure
+    -- the same UNMONITORABLE_CYCLES_WARN cushion as before Wave 3 -- falls
+    back to the observation record.
+    """
+    pos = _live_position("p6", date(2026, 1, 1))
+    assert position_manager._check_one_position(pos) is None
+    assert gamma_unreachable["gamma"] == 1
+    assert gamma_unreachable["settlement"] == 0
+
+    assert position_manager._check_one_position(pos) is None
+    assert gamma_unreachable["settlement"] == 0
+
+    decision = position_manager._check_one_position(pos)
+    assert gamma_unreachable["settlement"] == 1
     assert decision is not None and decision.reason == "resolution"
 
 

@@ -246,21 +246,33 @@ class TestTheTriggerConditions:
     def test_it_waits_for_the_unmonitorable_threshold(self, monkeypatch):
         """
         One failed read is a blip, not a resolution -- for a market day that
-        hasn't passed. (WAVE 3, 3c: a PAST-dated position no longer waits
-        for this threshold at all; see test_wave3_exit_check_first.py's
-        first-failure Gamma tests for that path. This test uses a
-        still-running market day so it keeps testing the counter itself.)
+        hasn't passed. (WAVE 3, 3c only moved the ASK earlier for a
+        PAST-dated position; see test_wave3_exit_check_first.py's
+        first-failure Gamma tests for that path.) Gamma is mocked to answer
+        a DEFINITE True throughout, so a failure to close on cycle one, and
+        a close once the cycle count reaches UNMONITORABLE_CYCLES_WARN,
+        isolates the counter itself rather than the Gamma answer.
         """
         still_running = _pos(target_date=date.today() + timedelta(days=1))
+        # The failure counter is keyed by position_id in module-global state
+        # (not reset between tests), and this id -- same station/bucket/side
+        # as the neighboring "still running" test, both on "tomorrow" --
+        # would otherwise inherit a stale count from whichever test ran
+        # first. This test owns its own count from zero.
+        position_manager._consecutive_price_failures.pop(still_running.position_id, None)
         _dead_book(monkeypatch)
         _observations(monkeypatch, [_reading(31.0, target_date=still_running.target_date)])
-        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: None)
+        monkeypatch.setattr(position_manager, "_market_reported_closed", lambda p: True)
         monkeypatch.setattr(storage, "load_open_positions", lambda **kw: [still_running])
         closed = _capture_closes(monkeypatch)
 
         position_manager.check_and_exit_positions()
-
         assert closed == []
+
+        for _ in range(position_manager.UNMONITORABLE_CYCLES_WARN - 1):
+            position_manager.check_and_exit_positions()
+
+        assert closed != []
 
 
 class TestBucketEdgeMode:
