@@ -38,6 +38,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import List, Optional
 
+import config
 import scheduler
 
 from backtest import settings
@@ -59,6 +60,25 @@ def tz_for(utc_offset_hours: Optional[int] = None) -> timezone:
     if utc_offset_hours is None:
         return LOCAL_TZ
     return timezone(timedelta(hours=utc_offset_hours))
+
+
+def utc_offset_for(station, day: date) -> int:
+    """
+    The UTC offset to replay `station` at on LOCAL day `day`. WAVE 3 (3d):
+    DST-AWARE -- config.current_utc_offset_hours at UTC midnight of that
+    day, the same anchor config.local_day_bounds_utc uses, so a replay's
+    local hour on a summer EGLC day is the hour the live daemon saw (and a
+    run spanning the October transition keys each half on its own clock;
+    engine.run calls this per day and retunes the SimClock). A station
+    without an iana_timezone gets its static int, so Asia is unchanged.
+    DST_AWARE_LOCAL_HOUR=False restores the static registry int for every
+    station, which is what every run before Wave 3 used.
+    """
+    st = config.get_station(station) if isinstance(station, str) else station
+    if not config.DST_AWARE_LOCAL_HOUR:
+        return st.utc_offset_hours
+    anchor = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+    return config.current_utc_offset_hours(st, at=anchor)
 
 _MINUTES_PER_DAY = 24 * 60
 
@@ -109,6 +129,17 @@ class SimClock:
         self.utc_offset_hours = (
             settings.LOCAL_UTC_OFFSET_HOURS if utc_offset_hours is None else int(utc_offset_hours)
         )
+        self.tz = tz_for(self.utc_offset_hours)
+
+    def retune(self, utc_offset_hours: int) -> None:
+        """
+        Change the offset this clock reports LOCAL time at, without moving
+        the instant. A multi-day replay does this at each day boundary with
+        simclock.utc_offset_for(), so the half of a run after a DST
+        transition keys risk_manager's tightening and observation
+        visibility on the right local hour.
+        """
+        self.utc_offset_hours = int(utc_offset_hours)
         self.tz = tz_for(self.utc_offset_hours)
 
     def advance_to(self, ts: int) -> None:

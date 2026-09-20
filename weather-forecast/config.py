@@ -600,9 +600,12 @@ STATIONS = {
     #                            still 0/0.0/0 for europe), so no entry here
     #                            can size a live order.
     #   iana_timezone=...     -- these cities observe DST. utc_offset_hours
-    #                            is ALSO set, to the STANDARD-time value,
-    #                            because backtest/engine.py reads it
-    #                            directly and has no moving clock.
+    #                            is ALSO set, to the STANDARD-time value: it
+    #                            is the DST_AWARE_LOCAL_HOUR=False fallback
+    #                            (Wave 3, 3d) for position_manager, risk_
+    #                            manager and backtest/simclock, all of which
+    #                            resolve the live offset through
+    #                            current_utc_offset_hours() by default.
     # monsoon_phase_by_month deliberately omitted (defaults to {}) for every
     # station below, same as the Asian entries: the field feeds no
     # calculation, and the shared SE Asian monsoon lookup is meaningless in

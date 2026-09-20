@@ -161,30 +161,45 @@ from models import Position, ExitDecision
 MIN_RISK_UNIT = 0.01
 
 
-def _local_hour(tz_offset_hours: int = 8) -> int:
+def _local_hour(tz_offset_hours: int) -> int:
     """
-    Current local hour for SGT/MYT (UTC+8), both frameworks' stations.
-    Hardcoded offset rather than a timezone library dependency, since
-    both WSSS and WMKK share this offset -- revisit if a station in a
-    different timezone is added later.
+    Current local hour at a FIXED offset the caller resolved. WAVE 3 (3d):
+    NO DEFAULT. The old UTC+8 default was a station-agnostic fallback that
+    no production caller reached (position_manager, engine, take_sweep and
+    entry_bar_sweep all pass local_hour explicitly), and a hidden one is
+    how a DST station ends up tightening at 11:00 true local.
     """
     utc_now = datetime.now(timezone.utc)
     return (utc_now.hour + tz_offset_hours) % 24
 
 
-def _active_thresholds(local_hour: Optional[int] = None) -> dict:
+def _station_offset_now(station_icao: str) -> int:
     """
-    Return the full threshold set appropriate for the given time of day.
+    The offset evaluate_exit() uses when no local_hour is supplied: the
+    position's OWN station, DST-aware under config.DST_AWARE_LOCAL_HOUR
+    (config.current_utc_offset_hours at this instant), the static registry
+    int otherwise. config.LOCAL_UTC_OFFSET_HOURS only for a station that is
+    no longer registered -- the same fallback position_manager._station_for
+    takes, so an orphaned row is evaluated, not raised on.
+    """
+    try:
+        station = config.get_station(station_icao)
+    except KeyError:
+        return config.LOCAL_UTC_OFFSET_HOURS
+    if config.DST_AWARE_LOCAL_HOUR:
+        return config.current_utc_offset_hours(station, at=datetime.now(timezone.utc))
+    return station.utc_offset_hours
 
-    local_hour defaults to None, which reads the real wall clock via
-    _local_hour() -- unchanged behaviour for every live caller. Passing an
-    explicit hour (0-23) uses that instead, which is what a simulated
-    replay needs: a backtest re-running a past morning must apply the
-    thresholds that were active AT THAT SIMULATED HOUR, not whatever hour
-    the backtest itself happens to be executed at.
+
+def _active_thresholds(local_hour: int) -> dict:
     """
-    if local_hour is None:
-        local_hour = _local_hour()
+    Return the full threshold set appropriate for the given local hour
+    (0-23). REQUIRED since Wave 3: the caller resolves the hour -- the
+    replay from its simulated clock, the live path from the position's own
+    station -- so a backtest re-running a past morning applies the
+    thresholds active AT THAT SIMULATED HOUR, never the hour the backtest
+    happens to be executed at.
+    """
     if local_hour >= config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL:
         return {
             "profit_take_pct": config.TIGHTENED_PROFIT_TAKE_PCT,
@@ -357,13 +372,16 @@ def evaluate_exit(
     to unit-test independent of live price feeds.
 
     local_hour is threaded straight through to _active_thresholds():
-    None (the default) reads the real wall clock exactly as before, and
-    an explicit hour (0-23) pins the edge-decay tightening to a
+    None (the default) reads the real wall clock AT THE POSITION'S OWN
+    STATION (DST-aware since Wave 3, see _station_offset_now), and an
+    explicit hour (0-23) pins the edge-decay tightening to a
     caller-supplied time. That makes the function fully pure when the
     hour is supplied -- a replay or a unit test can then evaluate the
     same position at 06:00 and at 14:00 and get the two genuinely
     different answers the live system would have given.
     """
+    if local_hour is None:
+        local_hour = _local_hour(_station_offset_now(position.station_icao))
     thresholds = _active_thresholds(local_hour=local_hour)
     pnl_pct = compute_pnl_pct(position.entry_price, current_price)
 

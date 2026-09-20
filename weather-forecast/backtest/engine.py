@@ -483,7 +483,10 @@ def run(
     # simclock now takes utc_offset_hours on SimClock, local_minute_to_ts()
     # and generate_ticks(), and this function threads the station's own
     # offset through all three. The guard is gone because the limitation is.
-    local_offset = station.utc_offset_hours
+    # WAVE 3 (3d): the START day's offset, DST-aware; the day loop below
+    # re-resolves it per day and retunes the clock. The manifest records
+    # this one as sim_utc_offset_hours and the registry int beside it.
+    local_offset = simclock.utc_offset_for(station, start_date)
 
     run_id = run_id or _make_run_id(
         station_icao, start_date, end_date, depth_regime, fee_rate_pct, bankroll_mode
@@ -596,7 +599,9 @@ def run(
                 if ids.get(key):
                     tokens_seen.add(ids[key])
 
-        for tick in simclock.generate_ticks(day, local_offset):
+        day_offset = simclock.utc_offset_for(station, day)
+        clock.retune(day_offset)
+        for tick in simclock.generate_ticks(day, day_offset):
             clock.advance_to(tick.ts)
             last_ts = tick.ts
             counters["n_cycles"] = int(counters["n_cycles"]) + 1
@@ -662,7 +667,9 @@ def run(
     counters["n_unresolved"] = len(unresolved)
 
     # --- provenance and manifest --------------------------------------------
-    end_ts = simclock.local_minute_to_ts(end_date + timedelta(days=1), 0, local_offset)
+    end_ts = simclock.local_minute_to_ts(
+        end_date + timedelta(days=1), 0, simclock.utc_offset_for(station, end_date + timedelta(days=1)),
+    )
     coverage = price_store.coverage_stats(
         sorted(tokens_seen), first_ts, end_ts, db_path=market_db_path
     )
