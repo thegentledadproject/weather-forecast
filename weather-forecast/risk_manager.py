@@ -161,19 +161,27 @@ from models import Position, ExitDecision
 MIN_RISK_UNIT = 0.01
 
 
-def _local_hour(tz_offset_hours: int) -> int:
+def _local_hour(tz_offset_hours: int, at: Optional[datetime] = None) -> int:
     """
     Current local hour at a FIXED offset the caller resolved. WAVE 3 (3d):
-    NO DEFAULT. The old UTC+8 default was a station-agnostic fallback that
-    no production caller reached (position_manager, engine, take_sweep and
-    entry_bar_sweep all pass local_hour explicitly), and a hidden one is
-    how a DST station ends up tightening at 11:00 true local.
+    NO DEFAULT on tz_offset_hours. The old UTC+8 default was a
+    station-agnostic fallback that no production caller reached
+    (position_manager, engine, take_sweep and entry_bar_sweep all pass
+    local_hour explicitly), and a hidden one is how a DST station ends up
+    tightening at 11:00 true local.
+
+    `at` (fix round 1): the instant to read, so a caller that also needs
+    the offset for that same instant (evaluate_exit, via
+    _station_offset_now) can resolve both from ONE datetime.now() read
+    instead of two -- two separate reads could straddle a UTC-hour
+    boundary and price the offset and the hour off different instants.
+    Defaults to now for every other caller.
     """
-    utc_now = datetime.now(timezone.utc)
+    utc_now = at if at is not None else datetime.now(timezone.utc)
     return (utc_now.hour + tz_offset_hours) % 24
 
 
-def _station_offset_now(station_icao: str) -> int:
+def _station_offset_now(station_icao: str, at: Optional[datetime] = None) -> int:
     """
     The offset evaluate_exit() uses when no local_hour is supplied: the
     position's OWN station, DST-aware under config.DST_AWARE_LOCAL_HOUR
@@ -181,13 +189,19 @@ def _station_offset_now(station_icao: str) -> int:
     int otherwise. config.LOCAL_UTC_OFFSET_HOURS only for a station that is
     no longer registered -- the same fallback position_manager._station_for
     takes, so an orphaned row is evaluated, not raised on.
+
+    `at` (fix round 1): shares the single datetime.now(timezone.utc) read
+    evaluate_exit also feeds to _local_hour, the same one-wall-clock-read
+    pattern position_manager._local_hour_for uses. Defaults to now for
+    every other caller.
     """
     try:
         station = config.get_station(station_icao)
     except KeyError:
         return config.LOCAL_UTC_OFFSET_HOURS
+    now = at if at is not None else datetime.now(timezone.utc)
     if config.DST_AWARE_LOCAL_HOUR:
-        return config.current_utc_offset_hours(station, at=datetime.now(timezone.utc))
+        return config.current_utc_offset_hours(station, at=now)
     return station.utc_offset_hours
 
 
@@ -381,7 +395,8 @@ def evaluate_exit(
     different answers the live system would have given.
     """
     if local_hour is None:
-        local_hour = _local_hour(_station_offset_now(position.station_icao))
+        now = datetime.now(timezone.utc)
+        local_hour = _local_hour(_station_offset_now(position.station_icao, at=now), at=now)
     thresholds = _active_thresholds(local_hour=local_hour)
     pnl_pct = compute_pnl_pct(position.entry_price, current_price)
 

@@ -577,7 +577,7 @@ def run(
     first_ts = simclock.local_minute_to_ts(
         start_date, settings.SIM_DAY_START_HOUR_LOCAL * 60, local_offset,
     )
-    clock = simclock.SimClock(first_ts, utc_offset_hours=local_offset)
+    clock = simclock.SimClock(first_ts, utc_offset_hours=local_offset, station=station)
     last_ts = first_ts
 
     # Last price actually OBSERVED per position, mirroring

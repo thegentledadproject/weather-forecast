@@ -32,6 +32,7 @@ DEPENDENCIES
 dataclasses, datetime, typing (standard library)
 scheduler.py (local, for determine_window)
 backtest/settings.py (local)
+config.py (local, for current_utc_offset_hours / DST_AWARE_LOCAL_HOUR)
 """
 
 from dataclasses import dataclass
@@ -119,7 +120,7 @@ class SimClock:
     later as an inexplicably profitable backtest.
     """
 
-    def __init__(self, ts: int, utc_offset_hours: Optional[int] = None):
+    def __init__(self, ts: int, utc_offset_hours: Optional[int] = None, station=None):
         self.ts = int(ts)
         # The station's own offset. Everything local this clock reports --
         # the hour risk_manager's edge-decay tightening keys on, the date
@@ -130,6 +131,17 @@ class SimClock:
             settings.LOCAL_UTC_OFFSET_HOURS if utc_offset_hours is None else int(utc_offset_hours)
         )
         self.tz = tz_for(self.utc_offset_hours)
+        # WAVE 3 (3d) fix round 1: the station this clock replays, ICAO or
+        # StationConfig, or None. utc_offset_for()/retune() are day-anchored
+        # (right either side of a DST transition, wrong ON the transition
+        # day itself -- EGLC 2026-10-25 would replay all day at +1 even
+        # after the 01:00Z instant it actually became +0). Carrying the
+        # station lets local_datetime() re-resolve the offset PER TICK
+        # instead, so the transition instant itself reads correctly. None
+        # (every pre-fix caller/test) keeps the old day-anchored behaviour.
+        self.station = config.get_station(station) if isinstance(station, str) else station
+        self._offset_cache_bucket = None
+        self._offset_cache_value = None
 
     def retune(self, utc_offset_hours: int) -> None:
         """
@@ -137,10 +149,34 @@ class SimClock:
         the instant. A multi-day replay does this at each day boundary with
         simclock.utc_offset_for(), so the half of a run after a DST
         transition keys risk_manager's tightening and observation
-        visibility on the right local hour.
+        visibility on the right local hour. Superseded within a single day
+        by the per-tick resolution in local_datetime() when this clock
+        carries a station and DST_AWARE_LOCAL_HOUR is on; still the value
+        used otherwise (no station, or the flag off).
         """
         self.utc_offset_hours = int(utc_offset_hours)
         self.tz = tz_for(self.utc_offset_hours)
+
+    def _current_offset_hours(self) -> int:
+        """
+        The UTC offset AT THIS INSTANT (self.ts), so a tick landing after a
+        mid-day DST transition reads the new offset even though the day's
+        tick grid and the last retune() were both anchored at the day's
+        start. Falls back to self.utc_offset_hours (static, or whatever
+        retune() last set) when this clock has no station or the flag is
+        off -- exactly the behaviour every pre-fix caller relies on.
+
+        Cached per UTC-hour bucket of self.ts: a DST transition only ever
+        falls on an hour boundary, so this is at most one ZoneInfo lookup
+        per simulated hour, not one per tick.
+        """
+        if self.station is None or not config.DST_AWARE_LOCAL_HOUR:
+            return self.utc_offset_hours
+        bucket = self.ts // 3600
+        if bucket != self._offset_cache_bucket:
+            self._offset_cache_value = config.current_utc_offset_hours(self.station, at=self.utc_datetime())
+            self._offset_cache_bucket = bucket
+        return self._offset_cache_value
 
     def advance_to(self, ts: int) -> None:
         """Move the clock to ts. Raises ValueError if that would move time backwards."""
@@ -158,8 +194,13 @@ class SimClock:
         return datetime.fromtimestamp(self.ts, timezone.utc)
 
     def local_datetime(self) -> datetime:
-        """Current simulated time as a tz-aware datetime at THIS station's offset."""
-        return self.utc_datetime().astimezone(self.tz)
+        """
+        Current simulated time as a tz-aware datetime at THIS station's
+        offset. WAVE 3 (3d) fix round 1: resolves via _current_offset_hours()
+        (per-tick, cached per UTC hour) rather than the fixed self.tz, so a
+        tick after a mid-day DST transition reads the new offset.
+        """
+        return self.utc_datetime().astimezone(tz_for(self._current_offset_hours()))
 
     def local_hour(self) -> int:
         """Local hour 0-23 -- what risk_manager._local_hour() would have returned at this instant."""
