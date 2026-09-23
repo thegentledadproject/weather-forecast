@@ -215,6 +215,11 @@ echo "== backup =="
 DB="$PKG_DIR/data/polyweather.sqlite3"
 if [ -f "$DB" ]; then
     STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+    # I-1 review fix. If the daemon was SIGTERM'd mid-commit, a hot journal
+    # sits beside the DB; a mode=ro connection cannot roll it back and the
+    # backup below would fail with "attempt to write a readonly database"
+    # on every re-run. Force the rollback with one real read-write open first.
+    "$VENV/bin/python" -c "import sqlite3, sys; c = sqlite3.connect(sys.argv[1]); c.execute('SELECT count(*) FROM sqlite_master').fetchall(); c.close()" "$DB"
     "$VENV/bin/python" - "$DB" "$HOME/polyweather-pre-deploy-$STAMP.sqlite3" <<'PYBACKUP'
 import sqlite3, sys
 # Read-only by construction, not just by convention: a backup step that
