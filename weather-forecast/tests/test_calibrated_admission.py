@@ -115,6 +115,16 @@ def test_an_entry_whose_calibrated_edge_misses_the_bar_is_refused(no_live_io):
     assert "below required minimum" in decision.reason
 
 
+def test_the_final_net_ev_is_measured_on_the_calibrated_edge(no_live_io):
+    """asia-edge-review-2026-09-23: the final bar used raw edge and let two
+    losers through that the calibrated number would have refused."""
+    decision = entry_manager.evaluate_entry(
+        _ev(model_prob=0.50, price=0.30, calibrated=0.36, source=pc.STATION_TIER),
+        token_id="tok", min_net_ev=-9.0,
+    )
+    assert decision.net_ev_at_size == pytest.approx(0.06 / 0.30)  # raw would be 0.20/0.30
+
+
 def test_the_same_entry_is_admitted_when_the_flag_is_off(no_live_io, monkeypatch):
     """The flag is a real revert path, not decoration."""
     monkeypatch.setattr(config, "ADMIT_ON_CALIBRATED_EDGE", False)

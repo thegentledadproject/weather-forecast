@@ -1342,8 +1342,10 @@ def evaluate_entry(
     slippage_at_size = market_client.estimate_slippage(token_id, depth_capped_usd)
     # Both fee terms, or the approval runs on a number the EV table already
     # rejected -- the same defect shape as P1-2's unpriced limit pad.
+    # The same edge veto 0a2 admitted on: a raw edge here re-admitted what
+    # the calibrated gate had just shrunk (asia-edge-review-2026-09-23).
     net_ev_at_size = (
-        (ev_result.raw_edge / ev_result.market_price)
+        (deciding["admission_edge"] / ev_result.market_price)
         - slippage_at_size
         - ev_result.fee_rate_pct
         - getattr(ev_result, "expected_exit_fee_pct", 0.0)

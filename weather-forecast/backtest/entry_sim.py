@@ -470,7 +470,7 @@ def evaluate_entry_sim(
     # paper rows the engine builds, so no replay number moves today).
     slippage_at_size = slippage_fn(depth_capped_usd)
     net_ev_at_size = (
-        (ev.raw_edge / ev.market_price)
+        (admission_edge(ev) / ev.market_price)
         - slippage_at_size
         - ev.fee_rate_pct
         - getattr(ev, "expected_exit_fee_pct", 0.0)

@@ -160,7 +160,13 @@ def test_the_map_for_day_n_uses_no_data_from_day_n():
     fitted, source, n = pc.fit_for_day(earlier + same_day, DAY_N, "WSSS")
 
     assert n == 40, "day N's own 400 rows leaked into its map"
-    assert pc.apply_map(fitted, 0.60) == pytest.approx(0.0, abs=0.02)
+    assert pc.apply_map(fitted, 0.60) == pytest.approx(pc.MAP_FLOOR)
+
+
+def test_the_map_never_claims_certainty():
+    """Busan 2026-09-19..21: an all-won tail mapped NO to 1.00."""
+    assert pc.apply_map(pc.fit_map(_pairs(5, 0.7, 1.0)), 0.7) == pytest.approx(1 - pc.MAP_FLOOR)
+    assert pc.apply_map(pc.fit_map(_pairs(5, 0.3, 0.0)), 0.3) == pytest.approx(pc.MAP_FLOOR)
 
 
 def test_the_map_for_day_n_uses_no_data_from_after_day_n():

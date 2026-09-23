@@ -169,6 +169,17 @@ def apply_map(fitted: Optional[Tuple[List[float], List[float]]], model_prob: flo
     """
     if not fitted:
         return model_prob
+    return min(max(_interpolate(fitted, model_prob), MAP_FLOOR), 1.0 - MAP_FLOOR)
+
+
+# A sparse tail of a few station-days fits to exactly 0 or 1 (Busan NO 27/28C,
+# 2026-09-19..21: mapped to 1.00, two of the next three lost). No bucket is
+# ever certain, so the map may not say it is.
+# ponytail: hard clamp, shrink toward the pooled map by effective n if needed.
+MAP_FLOOR = 0.05
+
+
+def _interpolate(fitted, model_prob: float) -> float:
     knot_x, knot_y = fitted
     if model_prob <= knot_x[0]:
         return knot_y[0]
