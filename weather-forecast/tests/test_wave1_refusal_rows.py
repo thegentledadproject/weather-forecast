@@ -217,7 +217,7 @@ def test_a_recording_failure_never_raises(live, monkeypatch, capsys):
 
 def test_refused_rows_do_not_count_toward_the_daily_order_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
     storage.record_live_order_attempt(kind="entry", station_icao="WSSS", outcome="filled", detail="ok")
     storage.record_live_order_attempt(kind="entry", station_icao="WSSS", outcome="killed", detail="fok")
     storage.record_live_order_attempt(kind="entry", station_icao="WSSS", outcome="refused", detail="drift: x")

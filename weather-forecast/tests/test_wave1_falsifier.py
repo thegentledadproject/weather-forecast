@@ -34,7 +34,7 @@ def _position(pid, entry_time, calibrated_prob, source, station="WSSS"):
 def db(tmp_path, monkeypatch):
     path = str(tmp_path / "t.sqlite3")
     monkeypatch.setattr(config, "DB_PATH", path)
-    storage._connect().close()
+    storage.migrate()
     storage.record_entry_decisions([_decision(32, True, "approved"), _decision(33, False, "0a2")],
                                    book="live", cycle_ts="2026-09-19T05:00:10+00:00", config_sha="s")
     storage.record_entry_decisions([_decision(32, False, "0b"), _decision(33, False, "0a2")],

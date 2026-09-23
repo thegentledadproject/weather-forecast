@@ -28,13 +28,13 @@ SOLD_TOKEN = "7258321014310216" + "0" * 20
 def db(tmp_path, monkeypatch):
     """
     A throwaway trading db. config.DB_PATH is read at call time by
-    storage._connect(), so patching it here covers both the seeding and
+    storage, so patching it here covers both the seeding and
     the code under test.
     """
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
     import storage
 
-    storage.load_open_positions()  # forces schema creation
+    storage.migrate()
     return storage
 
 

@@ -1666,7 +1666,7 @@ def test_scheduler_warns_at_startup():
 def live_db(tmp_path, monkeypatch):
     """A real throwaway database, so the audit table is genuinely exercised."""
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
     monkeypatch.setattr(
         wallet_client, "reconcile_cached",
         lambda positions, **_: wallet_client.Reconciliation(ok=True, checked=True, reason="stubbed"),

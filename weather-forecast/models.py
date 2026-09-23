@@ -243,9 +243,11 @@ class Position:
     #   "open"                 -- executor.open_position()
     #   "closed_take_profit"   -- executor.close_position(), from ExitDecision.reason
     #   "closed_stop_loss"     -- executor.close_position(), from ExitDecision.reason
-    #   "closed_trailing_stop" -- executor.close_position(), from ExitDecision.reason
+    #   "closed_trailing_stop" -- HISTORICAL rows only: the trailing stop was removed
+    #                             2026-08-17, nothing writes it since, but old rows carry
+    #                             it and config.COOLDOWN_COUNTED_EXIT_STATUSES still matches it
     #   "closed_resolution"    -- position_manager._close_as_resolved(), passed explicitly
-    # The first three closed_* strings are derived as f"closed_{decision.reason}"
+    # The first two closed_* strings are derived as f"closed_{decision.reason}"
     # from the reasons risk_manager.evaluate_exit() sets should_exit=True on, so
     # they track that function exactly. "closed_resolution" is passed explicitly
     # instead, precisely so a resolved market can never be filed as a stop-loss.
@@ -266,7 +268,9 @@ class Position:
     # than being backfilled: there is no honest way to recover a bid from a
     # book that is hours or days gone.
     entry_bid: Optional[float] = None
-    high_water_mark: float = None  # best price seen since entry; defaults to entry_price -- drives the trailing stop
+    high_water_mark: float = None  # best price seen since entry; defaults to entry_price. A RECORD only:
+                                   # no exit rule reads it since the trailing stop was removed 2026-08-17
+                                   # (position_manager keeps it current so replay matches live)
     exit_price: float = None
     exit_time: str = None
     exit_reason: str = ""
@@ -374,10 +378,12 @@ class ExitDecision:
     """Output of risk_manager's exit evaluation for one open position."""
     position_id: str
     should_exit: bool
-    # Reasons actually produced: risk_manager.evaluate_exit() sets "stop_loss",
-    # "trailing_stop", "take_profit" (should_exit=True) and "trailing_active",
-    # "hold" (should_exit=False); position_manager adds "resolution"
-    # (should_exit=True) and "resolution_unknown" (should_exit=False).
+    # Reasons actually produced: risk_manager.evaluate_exit() sets "stop_loss"
+    # and "take_profit" (should_exit=True) and "hold" (should_exit=False);
+    # position_manager adds "resolution" (should_exit=True) and
+    # "resolution_unknown" (should_exit=False). "trailing_stop" and
+    # "trailing_active" went with the trailing stop on 2026-08-17 and survive
+    # only on historical rows.
     reason: str
     current_price: float
     pnl_pct: float             # unrealized P&L, as a fraction (0.25 = +25%)

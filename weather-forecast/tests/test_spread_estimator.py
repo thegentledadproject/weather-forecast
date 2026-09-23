@@ -26,7 +26,7 @@ from models import ObservedReading, PointForecast
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
     monkeypatch.setattr(calibration, "_pooled_spread_cache", {})
-    storage._connect().close()
+    storage.migrate()
 
 
 def seed_pairs(icao, errors, start=date(2026, 7, 1)):
@@ -212,7 +212,7 @@ def test_pooled_cache_is_keyed_on_the_database(tmp_path, monkeypatch):
 
     other = tmp_path / "replay.sqlite3"
     monkeypatch.setattr(config, "DB_PATH", str(other))
-    storage._connect().close()
+    storage.migrate()
     seed_pairs("WSSS", [0.1, -0.1, 0.1, -0.1, 0.1, -0.1])
     narrow, _ = calibration.pooled_error_spread()
 

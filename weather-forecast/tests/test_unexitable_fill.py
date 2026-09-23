@@ -103,6 +103,7 @@ def test_the_flag_survives_a_round_trip_through_storage(tmp_path, monkeypatch):
     position it cannot sell outlives the process that noticed.
     """
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+    storage.migrate()
     from models import Position
 
     storage.open_position(Position(
@@ -121,6 +122,7 @@ def test_the_flag_survives_a_round_trip_through_storage(tmp_path, monkeypatch):
 
 def test_an_ordinary_position_round_trips_with_no_flag(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+    storage.migrate()
     from models import Position
 
     storage.open_position(Position(

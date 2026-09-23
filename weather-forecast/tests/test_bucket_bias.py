@@ -221,6 +221,7 @@ def test_an_implausible_bias_raises_rather_than_graduating_a_station(monkeypatch
 def test_ingest_records_settled_days_and_skips_unresolved(monkeypatch, tmp_path):
     monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
     monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    bba.storage.migrate()
     monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
     bba._last_ingest_by_station.clear()
 
@@ -245,6 +246,7 @@ def test_ingest_caps_new_settlements_per_sweep_and_says_so(monkeypatch, tmp_path
     # fifteen -- so it takes a bounded bite and reports what it left.
     monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
     monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    bba.storage.migrate()
     monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
     bba._last_ingest_by_station.clear()
 
@@ -269,6 +271,7 @@ def test_ingest_never_reads_today(monkeypatch, tmp_path):
     # all -- not fetched and rejected, not fetched.
     monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
     monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    bba.storage.migrate()
     monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
     bba._last_ingest_by_station.clear()
 
@@ -287,6 +290,7 @@ def test_ingest_never_reads_today(monkeypatch, tmp_path):
 def test_ingest_throttles_to_once_per_local_day(monkeypatch, tmp_path):
     monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
     monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    bba.storage.migrate()
     monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
     bba._last_ingest_by_station.clear()
 
@@ -308,6 +312,7 @@ def test_ingest_throttles_to_once_per_local_day(monkeypatch, tmp_path):
 def test_one_stations_failure_does_not_stop_the_others(monkeypatch, tmp_path):
     monkeypatch.setattr(bba.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
     monkeypatch.setattr(bba.storage.config, "DB_PATH", str(tmp_path / "t.sqlite3"), raising=False)
+    bba.storage.migrate()
     monkeypatch.setattr(bba.config, "local_today", lambda station: date(2026, 8, 18))
     bba._last_ingest_by_station.clear()
 

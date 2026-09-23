@@ -621,8 +621,8 @@ class TestSettledBucketsAreSelfDescribing:
         import config
         import storage
 
-        # No init step: storage._connect() creates the schema on first use.
         monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.db"))
+        storage.migrate()
         storage.save_settled_bucket(
             "KLGA", date(2026, 8, 27), 78, 68, 88, "metar_daily_max",
             bucket_unit="F", bucket_step=2,
@@ -636,6 +636,7 @@ class TestSettledBucketsAreSelfDescribing:
         import storage
 
         monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.db"))
+        storage.migrate()
         storage.save_settled_bucket(
             "WSSS", date(2026, 8, 27), 31, 27, 37, "metar_daily_max",
         )

@@ -36,10 +36,8 @@ from models import ObservedReading, PointForecast, Position
 
 
 @pytest.fixture
-def temp_db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
-    storage._connect().close()
-    return str(tmp_path / "trading.sqlite3")
+def temp_db(tmp_db):
+    return tmp_db
 
 
 @pytest.fixture
@@ -149,6 +147,46 @@ def test_storage_has_no_bare_with_connect():
     assert not offenders, (
         f"storage.py must use _db(), not `with _connect()` -- lines {offenders}"
     )
+
+
+def test_connect_issues_no_ddl_and_apply_schema_declares_every_table():
+    """
+    WAVE 3 (3a) structural guard. _connect() opens and returns; the schema
+    lives in _apply_schema(), which only migrate() calls. The moment an
+    execute() reappears in _connect() -- "just one CREATE IF NOT EXISTS" --
+    every reader is a schema writer again, root dashboard timer included.
+    """
+    import ast
+    from pathlib import Path
+
+    text = Path(storage.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+    def _executes(fn):
+        return [
+            n.lineno for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.func.attr in ("execute", "executescript", "executemany")
+        ]
+
+    assert not _executes(fns["_connect"]), (
+        f"storage._connect() must issue no SQL -- execute() at lines {_executes(fns['_connect'])}"
+    )
+    assert _executes(fns["_apply_schema"])
+    body = ast.get_source_segment(text, fns["_apply_schema"])
+    for table in ("forecasts", "observations", "positions", "live_order_attempts",
+                  "entry_decisions", "settled_buckets", "ensemble_spread", "ev_snapshots"):
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in body, table
+    assert "_ensure_position_economics_view(conn)" in body
+    # migrate() is the only caller of _apply_schema, and migrate() commits.
+    callers = [
+        fn.name for fn in fns.values()
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "_apply_schema"
+    ]
+    assert callers == ["migrate"]
+    assert "conn.commit()" in ast.get_source_segment(text, fns["migrate"])
 
 
 def test_price_store_stays_fixed(tmp_path, no_gc):

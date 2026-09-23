@@ -598,6 +598,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.ingest:
+        # WAVE 3 (3a): --ingest writes settled_buckets; the report path
+        # below stays read-only. Only this branch declares the process a writer.
+        storage.set_writable(True)
         written = ingest_settled_buckets([args.station], max_lookback_days=args.lookback,
                                          max_per_sweep=args.max_per_sweep)
         print(f"[bucket_bias] recorded {written} new settlement(s) for {args.station}.")

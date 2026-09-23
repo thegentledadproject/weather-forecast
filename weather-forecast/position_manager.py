@@ -318,8 +318,16 @@ def _check_one_position(
         failures = _note_price_failure(position)
         # A market can resolve while its price feed is down, and a
         # position we can't price is one we'd otherwise never see
-        # resolve. Once blind for long enough, ask Gamma directly.
-        if failures >= UNMONITORABLE_CYCLES_WARN:
+        # resolve. Once blind for long enough, ask Gamma directly -- and,
+        # WAVE 3 (3c), at ONCE for a bucket whose market day is already
+        # over: a past-dated position is resolved by definition, so a
+        # second and third blind cycle buy nothing but two more cycles of
+        # a live slot held by a settled market (the 2026-09-02 journal).
+        past_dated = position.target_date < _local_today_for(position)
+        ask_gamma_now = failures >= UNMONITORABLE_CYCLES_WARN or (
+            config.PAST_DATED_GAMMA_ON_FIRST_FAILURE and past_dated
+        )
+        if ask_gamma_now:
             reported_closed = _market_reported_closed(position)
             if reported_closed is True:
                 return _close_resolved_without_price(position, token_id)
@@ -333,7 +341,15 @@ def _check_one_position(
             # market with a broken price feed is a feed problem, and
             # closing it on the weather would settle a position that can
             # still trade.
-            if reported_closed is None and position.target_date < _local_today_for(position):
+            #
+            # WAVE 3 (3c) only moved the ASK earlier, not this fallback: a
+            # past-dated position with Gamma UNREACHABLE (None) still waits
+            # for the same UNMONITORABLE_CYCLES_WARN cushion as before --
+            # only a DEFINITE Gamma answer (True, handled above) acts on
+            # the first failure. An unreachable Gamma on cycle one is most
+            # often a transient blip in the lookup itself, not evidence of
+            # anything; three of them in a row is.
+            if reported_closed is None and past_dated and failures >= UNMONITORABLE_CYCLES_WARN:
                 return _close_from_settlement_source(position, gamma_closed=None)
         return None
     _consecutive_price_failures.pop(position.position_id, None)
@@ -447,12 +463,10 @@ def _check_one_position(
         position.high_water_mark = new_hwm
 
     # local_hour is passed EXPLICITLY, from this position's own station
-    # offset. risk_manager._local_hour()'s default is UTC+8 and stays
-    # that way (a station-agnostic fallback the parity tests pin), so
-    # leaving this argument off would apply Singapore's edge-decay
-    # tightening hour to Tokyo and Karachi -- an hour early for +9, three
-    # hours late for +5. Fixing the default alone would have been a
-    # no-op precisely because this call site never passed one.
+    # offset (DST-aware since Wave 3). risk_manager.evaluate_exit would
+    # resolve the same hour from the position if it were omitted -- its
+    # old UTC+8 default is gone -- but passing it keeps the hour this
+    # cycle acted on visible at the call site.
     decision = risk_manager.evaluate_exit(
         position, current_price, local_hour=_local_hour_for(position),
     )
@@ -489,10 +503,23 @@ def _local_hour_for(position: Position) -> int:
     Current hour (0-23) in the position's own market timezone -- what
     risk_manager's edge-decay tightening must be evaluated against, since
     "10:00 local" is a different instant in Tokyo, Singapore and Karachi.
+
+    WAVE 3 (3d): DST-AWARE. The static station.utc_offset_hours is the
+    STANDARD-time value, so every European position tightened at 11:00
+    true local all summer. config.current_utc_offset_hours resolves the
+    offset at THIS instant for a station carrying an iana_timezone and
+    returns the static int for every other station, so Asia is unchanged.
+    DST_AWARE_LOCAL_HOUR=False restores the static read.
     """
     station = _station_for(position)
-    offset = station.utc_offset_hours if station is not None else config.LOCAL_UTC_OFFSET_HOURS
-    return (datetime.now(timezone.utc).hour + offset) % 24
+    now = datetime.now(timezone.utc)
+    if station is None:
+        offset = config.LOCAL_UTC_OFFSET_HOURS
+    elif config.DST_AWARE_LOCAL_HOUR:
+        offset = config.current_utc_offset_hours(station, at=now)
+    else:
+        offset = station.utc_offset_hours
+    return (now.hour + offset) % 24
 
 
 def _is_extreme(price: float) -> bool:

@@ -600,9 +600,12 @@ STATIONS = {
     #                            still 0/0.0/0 for europe), so no entry here
     #                            can size a live order.
     #   iana_timezone=...     -- these cities observe DST. utc_offset_hours
-    #                            is ALSO set, to the STANDARD-time value,
-    #                            because backtest/engine.py reads it
-    #                            directly and has no moving clock.
+    #                            is ALSO set, to the STANDARD-time value: it
+    #                            is the DST_AWARE_LOCAL_HOUR=False fallback
+    #                            (Wave 3, 3d) for position_manager, risk_
+    #                            manager and backtest/simclock, all of which
+    #                            resolve the live offset through
+    #                            current_utc_offset_hours() by default.
     # monsoon_phase_by_month deliberately omitted (defaults to {}) for every
     # station below, same as the Asian entries: the field feeds no
     # calculation, and the shared SE Asian monsoon lookup is meaningless in
@@ -1443,10 +1446,10 @@ DB_PATH = DATA_DIR / "polyweather.sqlite3"
 PROFIT_TAKE_PCT = 0.50      # take profit once gain reaches +50% of the risk unit
 STOP_LOSS_PCT = 0.30        # cut once loss reaches -30% of the risk unit
 
-# After this local hour, tighten both thresholds (see risk_manager.py) --
-# reflects the edge-decay curve: be quicker to lock in gains and quicker to
-# cut losses, since there's no more new edge coming to justify holding
-# through volatility.
+# After this local hour, tighten the take-profit target (see risk_manager.py;
+# the stop has NOT tightened since 2026-08-18, TIGHTENED_STOP_LOSS_PCT below)
+# -- reflects the edge-decay curve: be quicker to lock in gains, since
+# there's no more new edge coming to justify holding through volatility.
 #
 # THIS USED TO SAY "once the primary trading window closes", and that phrasing
 # was true only while entries also stopped at 10:00. They stop at 08:00 as of
@@ -2535,9 +2538,11 @@ SCHEDULE_WINDOWS = [
     # is 42 -> 72 ticks/day/station with fd count flat at 5 and RSS 72 MB
     # after 1d19h, so there is nothing to buy back by reverting.
     #
-    # ONE MEASUREMENT TRAP, since it will otherwise be rediscovered. At
-    # 10:00 the stop tightens from 30% to 15% of the risk unit, which
-    # RAISES the trigger price, so positions already sitting between the
+    # ONE MEASUREMENT TRAP, since it will otherwise be rediscovered.
+    # UNTIL 2026-08-18 the stop tightened at 10:00 from 30% to 15% of the
+    # risk unit (rows before that date only; TIGHTENED_STOP_LOSS_PCT is now
+    # the loose distance), which RAISED the trigger price, so positions
+    # already sitting between the
     # two levels are captured on the first tick after 10:00. That is the
     # edge-decay policy firing as designed, not a missed fill, and it
     # accounted for 5 of 12 and then 8 of 16 of what was first counted as
@@ -5131,3 +5136,49 @@ REFUSE_ON_TOTAL_FORECAST_OUTAGE = True
 # () on the branch; the Wave 2 deploy date is stamped here in the final
 # commit before merge, and moved by a follow-up commit if the deploy slips.
 REGIME_BOUNDARIES: tuple = ("2026-09-20",)
+
+
+# ===========================================================================
+# WAVE 3 (~2026-09-25) -- STOP THE DATA FROM CORRUPTING ITSELF.
+# docs/superpowers/specs/2026-09-17-evidence-first-remediation-design.md
+#
+# No statistic changes in this wave, so there is NO REGIME_BOUNDARIES stamp.
+# 3a (storage read-only by default, storage.migrate() the only DDL path) and
+# 3b (dashboard as ubuntu) are not flagged: they are the point. The flags
+# below default ON; False restores the pre-Wave-3 path at every site named.
+# Read-site counts: EXIT_CHECK_BEFORE_ENTRIES x2 (scheduler._run_full_cycle's
+# early call and the guard on the late call), PAST_DATED_GAMMA_ON_FIRST_
+# FAILURE x1 (position_manager._check_one_position's Gamma-ask timing only
+# -- see its own comment for what it does NOT move), DST_AWARE_LOCAL_HOUR x3
+# (Task 5: position_manager._local_hour_for, risk_manager._station_offset_
+# now, backtest/simclock.utc_offset_for).
+# ===========================================================================
+
+# 3c. THE EXIT CHECK RUNS BEFORE THE ENTRY LEG. Read by scheduler._run_full_
+# cycle. Journal-confirmed 2026-09-02: five live positions at the asia
+# concurrent cap, one of them yesterday's and already resolved; every
+# 05:00-05:20 SGT tick took the count (5) BEFORE the exit check closed the
+# resolved row, and refused the entry. Exits first also means a pipeline.run
+# failure no longer skips the station's exit check for that cycle.
+EXIT_CHECK_BEFORE_ENTRIES = True
+
+# 3c. A PAST-DATED POSITION WITH NO PRICE ASKS GAMMA ON THE FIRST FAILURE.
+# Read by position_manager._check_one_position. Its market day is over, so
+# a DEFINITE Gamma answer -- True closes it, False leaves it open -- no
+# longer waits for the second and third blind cycles UNMONITORABLE_CYCLES_
+# WARN used to demand. This moves the ASK earlier ONLY: the OBSERVATION-
+# RECORD fallback (_close_from_settlement_source), for when Gamma itself is
+# UNREACHABLE (None), still waits for the full three-failure
+# UNMONITORABLE_CYCLES_WARN cushion, exactly as before -- an unreachable
+# Gamma on cycle one is a blip in the lookup, not evidence of anything.
+# Same-day positions keep the three-failure counter for the ASK itself too:
+# a live market with a broken feed is a feed problem, not a resolution.
+PAST_DATED_GAMMA_ON_FIRST_FAILURE = True
+
+# 3d. THE EXIT PATH AND THE REPLAY USE THE DST-AWARE OFFSET. Read by
+# position_manager._local_hour_for, risk_manager._station_offset_now and
+# backtest/simclock.utc_offset_for (which engine.run threads per day). With
+# the static registry int, every European station's 10:00 edge-decay
+# tightening fired at 11:00 true local all summer (scheduler-timing review
+# 2026-09-15, production-confirmed), and the replay agreed with the error.
+DST_AWARE_LOCAL_HOUR = True

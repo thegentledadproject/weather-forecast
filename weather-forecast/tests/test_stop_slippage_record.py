@@ -158,9 +158,8 @@ def test_slippage_is_none_rather_than_zero_when_there_is_no_trigger():
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
-    return str(tmp_path / "t.sqlite3")
+def db(tmp_db):
+    return tmp_db
 
 
 def test_the_trigger_price_is_persisted_on_the_closed_row(db):

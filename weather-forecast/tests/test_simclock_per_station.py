@@ -23,6 +23,7 @@ from datetime import date, timedelta
 import pytest
 
 import config
+import storage
 from backtest import engine, settings, simclock
 
 
@@ -124,6 +125,7 @@ def test_engine_accepts_stations_outside_utc_plus_8(icao, tmp_path, monkeypatch)
     import io
 
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
+    storage.migrate()
     assert config.get_station(icao).utc_offset_hours != settings.LOCAL_UTC_OFFSET_HOURS
 
     with contextlib.redirect_stdout(io.StringIO()):
@@ -145,6 +147,7 @@ def test_run_records_the_offset_it_actually_used(tmp_path, monkeypatch):
     import io
 
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "trading.sqlite3"))
+    storage.migrate()
     with contextlib.redirect_stdout(io.StringIO()):
         run = engine.run(
             station_icao="RJTT", start_date=DAY, end_date=DAY,

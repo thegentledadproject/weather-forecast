@@ -1,7 +1,7 @@
 """
 Wave 1 migration: a database whose `positions` table predates the five
 deciding-number columns, and which has no `entry_decisions` table, must gain
-both from any storage._connect() -- and gain them once.
+both from storage.migrate() -- and gain them once.
 """
 import sqlite3
 
@@ -57,12 +57,12 @@ def _tables(db_path):
         con.close()
 
 
-def test_connect_adds_the_five_columns_and_the_table(tmp_path, monkeypatch):
+def test_migrate_adds_the_five_columns_and_the_table(tmp_path, monkeypatch):
     db = _pre_wave1_db(tmp_path)
     assert "entry_decisions" not in _tables(db)
     monkeypatch.setattr(config, "DB_PATH", db)
 
-    storage._connect().close()
+    storage.migrate()
 
     cols = _columns(db, "positions")
     for name in WAVE1_POSITION_COLUMNS:
@@ -75,21 +75,21 @@ def test_the_five_columns_come_last_in_declared_order(tmp_path, monkeypatch):
     """_row_to_position reads SELECT * positionally, so order is load-bearing."""
     db = _pre_wave1_db(tmp_path)
     monkeypatch.setattr(config, "DB_PATH", db)
-    storage._connect().close()
+    storage.migrate()
     assert tuple(_columns(db, "positions")[-5:]) == WAVE1_POSITION_COLUMNS
 
 
 def test_a_fresh_database_declares_the_same_order(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fresh.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
     assert tuple(_columns(config.DB_PATH, "positions")[-5:]) == WAVE1_POSITION_COLUMNS
 
 
 def test_the_migration_is_idempotent_and_keeps_old_rows_null(tmp_path, monkeypatch):
     db = _pre_wave1_db(tmp_path)
     monkeypatch.setattr(config, "DB_PATH", db)
-    storage._connect().close()
-    storage._connect().close()
+    storage.migrate()
+    storage.migrate()
     storage.load_open_positions("WSSS")
 
     assert _columns(db, "positions").count("calibrated_prob") == 1
@@ -104,7 +104,7 @@ def test_the_migration_is_idempotent_and_keeps_old_rows_null(tmp_path, monkeypat
 
 def test_entry_decisions_has_the_pairing_index(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fresh.sqlite3"))
-    storage._connect().close()
+    storage.migrate()
     con = sqlite3.connect(config.DB_PATH)
     names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='index'")}
     con.close()

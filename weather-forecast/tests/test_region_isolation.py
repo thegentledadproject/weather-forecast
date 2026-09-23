@@ -706,6 +706,7 @@ class TestRegionScopedLiveBlastRadius:
 class TestCountLiveOrderAttemptsFilter:
     def test_the_station_filter_narrows_the_count(self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+        storage.migrate()
 
         storage.record_live_order_attempt(
             kind="entry", station_icao="WSSS", outcome="filled", notional_usd=1.0)
@@ -724,6 +725,7 @@ class TestCountLiveOrderAttemptsFilter:
         rather than degrading to the unfiltered total.
         """
         monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
+        storage.migrate()
         storage.record_live_order_attempt(
             kind="entry", station_icao="WSSS", outcome="filled", notional_usd=1.0)
 

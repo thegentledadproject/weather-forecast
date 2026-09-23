@@ -112,6 +112,28 @@ def _config_sha() -> Optional[str]:
     return _config_sha_cache["sha"]
 
 
+def _boot_storage() -> None:
+    """
+    WAVE 3 (3a). The daemon is THE writer. Apply the schema once, then open
+    every later connection writable; every other process on the box opens
+    storage read-only (storage._WRITABLE defaults False) and cannot corrupt
+    the file the daemon is writing. deploy_daemon.sh runs the same
+    migrate() with the daemon stopped, so on a normal boot this is a no-op
+    pass over IF NOT EXISTS statements.
+
+    Also primes _config_sha() here, off the entry path: config._current_
+    git_sha() shells out to git, and the first entry cycle after a boot
+    used to pay for that subprocess (Wave 1 minor).
+    """
+    storage.migrate()
+    storage.set_writable(True)
+    sha = _config_sha()
+    print(
+        f"[scheduler] boot: storage migrated at {config.DB_PATH} "
+        f"({storage.schema_summary()}); writable; config sha {sha or 'unknown'}."
+    )
+
+
 def _record_entry_decisions(decisions, station_icao: str, book: str, cycle_ts: str) -> None:
     """
     Persist a cycle's EntryDecisions as entry_decisions rows. BEST-EFFORT:
@@ -461,6 +483,13 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
     # re-collect a station the 07:5x entry cycle had just recorded.
     _last_collection_ts[station_icao] = time.time()
 
+    # WAVE 3 (3c): EXITS FIRST. A position that resolved overnight must be
+    # closed before the entry leg counts open positions against the caps
+    # (config.EXIT_CHECK_BEFORE_ENTRIES has the 2026-09-02 case). interval_min
+    # is None here for the reason given at the bottom of this function.
+    if config.EXIT_CHECK_BEFORE_ENTRIES:
+        _run_exit_check(station_icao, interval_min=None)
+
     try:
         # Measured (forecast - settled truth) for THIS station, so a source
         # that habitually runs cool is read as what it has historically
@@ -562,23 +591,24 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
             except Exception as exc:  # noqa: BLE001 -- the shadow must never take the cycle down
                 print(f"[scheduler] {station_icao}: paper shadow pass failed: {exc} -- primary decisions unaffected.")
 
-    # DELIBERATELY None: no exit-path capture inside an entry window.
+    # DELIBERATELY None on the exit check in an entry window: no exit-path
+    # capture here, whichever end of the cycle it runs at.
     #
-    # ev_engine.run_for_station_with_map() above already captured both sides of every
+    # ev_engine.run_for_station_with_map() captures both sides of every
     # bucket this cycle, WITH ask and periodic depth, so an exit-path row
-    # here would be strictly poorer duplicate data. Worse than useless: the
-    # exit check runs seconds AFTER the EV leg, so its ask-less row is the
-    # NEWER one, and get_price_at() returns the newest row before an
-    # instant. A replay pricing an entry on any later tick would then find
-    # ask_price NULL and fall back to the bid -- overstating raw edge by the
-    # spread, which is precisely what the 2026-08-10 entry-pricing fix
-    # removed (see engine._entry_price and its n_entry_priced_bid_fallback
-    # counter). The exact-ts tie-break in get_price_at() does NOT save us;
-    # these two rows land a few seconds apart, not on the same second.
-    #
-    # The gap this whole change exists to close is in monitor_only/risk_only,
-    # where nothing captures at all. That is the only place it should write.
-    _run_exit_check(station_icao, interval_min=None)
+    # would be strictly poorer duplicate data. Worse than useless when the
+    # exit check ran AFTER the EV leg (every cycle before Wave 3, and still
+    # the EXIT_CHECK_BEFORE_ENTRIES=False path below): its ask-less row was
+    # the NEWER one, and get_price_at() returns the newest row before an
+    # instant, so a replay pricing an entry on any later tick found
+    # ask_price NULL and fell back to the bid -- overstating raw edge by the
+    # spread, precisely what the 2026-08-10 entry-pricing fix removed (see
+    # engine._entry_price and its n_entry_priced_bid_fallback counter). With
+    # exits first the row would be the OLDER one and harmless, but there is
+    # still nothing to gain from writing it. The gap this capture exists to
+    # close is in monitor_only/risk_only, where nothing captures at all.
+    if not config.EXIT_CHECK_BEFORE_ENTRIES:
+        _run_exit_check(station_icao, interval_min=None)
 
 
 def _run_collection_cycle(station_icao: str) -> None:
@@ -747,6 +777,8 @@ def run_forever(station_icaos: Optional[list] = None) -> None:
     would mean dispatching groups concurrently, which is a separate design
     decision with its own risks and is deliberately not made here.
     """
+    _boot_storage()
+
     groups = stations_by_utc_offset(station_icaos)
     if not groups:
         print("[scheduler] no registered stations to run -- nothing to do.")

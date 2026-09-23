@@ -64,10 +64,13 @@ hurting and a threshold move needs its own evidence.
 The code path below is intact and reads the constant at call time, so
 re-enabling is a one-value change rather than a revert of a revert.
 
-Both tighten after the edge-decay hour (config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL,
-10:00 local) -- consistent with the edge-decay analysis: once the morning's
-edge window closes, there's no new information coming to justify riding out
-volatility, so gains and losses should both be locked in faster.
+Only the TAKE-PROFIT tightens after the edge-decay hour
+(config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL, 10:00 local): TIGHTENED_PROFIT_TAKE_PCT
+0.25 against 0.50. The stop stopped tightening on 2026-08-18
+(TIGHTENED_STOP_LOSS_PCT is defined AS STOP_LOSS_PCT; stop_loss_audit.py
+scored the tightened stop at +21.49 USD for nothing measurable). The
+edge-decay reasoning survives on the take side only: once the morning's edge
+window closes, no new information justifies riding out a winner.
 
 THAT HOUR IS NO LONGER THE HOUR ENTRIES STOP. Entries closed at 10:00 when
 this was written; since 2026-08-17 they close at 08:00 (config.SCHEDULE_WINDOWS),
@@ -158,30 +161,59 @@ from models import Position, ExitDecision
 MIN_RISK_UNIT = 0.01
 
 
-def _local_hour(tz_offset_hours: int = 8) -> int:
+def _local_hour(tz_offset_hours: int, at: Optional[datetime] = None) -> int:
     """
-    Current local hour for SGT/MYT (UTC+8), both frameworks' stations.
-    Hardcoded offset rather than a timezone library dependency, since
-    both WSSS and WMKK share this offset -- revisit if a station in a
-    different timezone is added later.
+    Current local hour at a FIXED offset the caller resolved. WAVE 3 (3d):
+    NO DEFAULT on tz_offset_hours. The old UTC+8 default was a
+    station-agnostic fallback that no production caller reached
+    (position_manager, engine, take_sweep and entry_bar_sweep all pass
+    local_hour explicitly), and a hidden one is how a DST station ends up
+    tightening at 11:00 true local.
+
+    `at` (fix round 1): the instant to read, so a caller that also needs
+    the offset for that same instant (evaluate_exit, via
+    _station_offset_now) can resolve both from ONE datetime.now() read
+    instead of two -- two separate reads could straddle a UTC-hour
+    boundary and price the offset and the hour off different instants.
+    Defaults to now for every other caller.
     """
-    utc_now = datetime.now(timezone.utc)
+    utc_now = at if at is not None else datetime.now(timezone.utc)
     return (utc_now.hour + tz_offset_hours) % 24
 
 
-def _active_thresholds(local_hour: Optional[int] = None) -> dict:
+def _station_offset_now(station_icao: str, at: Optional[datetime] = None) -> int:
     """
-    Return the full threshold set appropriate for the given time of day.
+    The offset evaluate_exit() uses when no local_hour is supplied: the
+    position's OWN station, DST-aware under config.DST_AWARE_LOCAL_HOUR
+    (config.current_utc_offset_hours at this instant), the static registry
+    int otherwise. config.LOCAL_UTC_OFFSET_HOURS only for a station that is
+    no longer registered -- the same fallback position_manager._station_for
+    takes, so an orphaned row is evaluated, not raised on.
 
-    local_hour defaults to None, which reads the real wall clock via
-    _local_hour() -- unchanged behaviour for every live caller. Passing an
-    explicit hour (0-23) uses that instead, which is what a simulated
-    replay needs: a backtest re-running a past morning must apply the
-    thresholds that were active AT THAT SIMULATED HOUR, not whatever hour
-    the backtest itself happens to be executed at.
+    `at` (fix round 1): shares the single datetime.now(timezone.utc) read
+    evaluate_exit also feeds to _local_hour, the same one-wall-clock-read
+    pattern position_manager._local_hour_for uses. Defaults to now for
+    every other caller.
     """
-    if local_hour is None:
-        local_hour = _local_hour()
+    try:
+        station = config.get_station(station_icao)
+    except KeyError:
+        return config.LOCAL_UTC_OFFSET_HOURS
+    now = at if at is not None else datetime.now(timezone.utc)
+    if config.DST_AWARE_LOCAL_HOUR:
+        return config.current_utc_offset_hours(station, at=now)
+    return station.utc_offset_hours
+
+
+def _active_thresholds(local_hour: int) -> dict:
+    """
+    Return the full threshold set appropriate for the given local hour
+    (0-23). REQUIRED since Wave 3: the caller resolves the hour -- the
+    replay from its simulated clock, the live path from the position's own
+    station -- so a backtest re-running a past morning applies the
+    thresholds active AT THAT SIMULATED HOUR, never the hour the backtest
+    happens to be executed at.
+    """
     if local_hour >= config.EDGE_DECAY_TIGHTEN_HOUR_LOCAL:
         return {
             "profit_take_pct": config.TIGHTENED_PROFIT_TAKE_PCT,
@@ -354,13 +386,17 @@ def evaluate_exit(
     to unit-test independent of live price feeds.
 
     local_hour is threaded straight through to _active_thresholds():
-    None (the default) reads the real wall clock exactly as before, and
-    an explicit hour (0-23) pins the edge-decay tightening to a
+    None (the default) reads the real wall clock AT THE POSITION'S OWN
+    STATION (DST-aware since Wave 3, see _station_offset_now), and an
+    explicit hour (0-23) pins the edge-decay tightening to a
     caller-supplied time. That makes the function fully pure when the
     hour is supplied -- a replay or a unit test can then evaluate the
     same position at 06:00 and at 14:00 and get the two genuinely
     different answers the live system would have given.
     """
+    if local_hour is None:
+        now = datetime.now(timezone.utc)
+        local_hour = _local_hour(_station_offset_now(position.station_icao, at=now), at=now)
     thresholds = _active_thresholds(local_hour=local_hour)
     pnl_pct = compute_pnl_pct(position.entry_price, current_price)
 
@@ -446,7 +482,10 @@ def evaluate_exit(
     stop_from, stop_basis = stop_basis_price(position)
 
     # Lottery-priced entries (see LOTTERY_PRICE_THRESHOLD in config.py)
-    # skip BOTH price-noise exits. Below that entry price the threshold
+    # skip the STOP-LOSS -- the one price-noise exit left since the trailing
+    # stop was removed 2026-08-17; the take below is NOT skipped, and
+    # memory's wsss-2026-08-19-trade note is what that asymmetry cost.
+    # Below that entry price the threshold
     # distances are sub-tick, so any book wobble "triggers" them, and they
     # convert "win p% of the time" into "win only if the price never dips
     # two cents first" -- forfeiting the exact tail scenarios that justify

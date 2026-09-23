@@ -33,7 +33,7 @@ def two_regimes(tmp_path, monkeypatch):
     """One settled winner before the boundary, one settled loser after it."""
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
     monkeypatch.setattr(config, "REGIME_BOUNDARIES", (BOUNDARY,))
-    storage._connect().close()
+    storage.migrate()
     for day, bucket, pid in ((BEFORE, 32, "w"), (AFTER, 31, "l")):
         storage.open_position(_position(day, bucket, pid))
         storage.close_position(pid, 0.30, f"{day}T10:00:00+00:00", "closed_resolution", "test")

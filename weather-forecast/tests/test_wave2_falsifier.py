@@ -50,7 +50,7 @@ def _seed_paper(days, bucket, prefix):
 def db(tmp_path, monkeypatch):
     path = str(tmp_path / "t.sqlite3")
     monkeypatch.setattr(config, "DB_PATH", path)
-    storage._connect().close()
+    storage.migrate()
     # (i)/(ii): six dates, truth 32.0. Morning (05:00) forecasts err -1,0,+1,
     # -1,0,+1 -> sd sqrt(4/5) = 0.894; a 14:00 row at 32.0 on every day
     # halves the all-day error -> sd sqrt(1/5) = 0.447.

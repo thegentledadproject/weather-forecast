@@ -142,8 +142,9 @@ def build_scenario(
     Seed a fresh pair of sqlite files under `tmp_path` and return the handle.
 
     config.DB_PATH is monkeypatched to the throwaway trading db BEFORE
-    storage is touched -- storage._connect() reads config.DB_PATH at call
-    time, so the patch has to be live for both the seeding below and the
+    storage is touched, then storage.migrate() builds the schema there --
+    storage reads config.DB_PATH at call time, so the patch has to be live
+    for both the seeding below and the
     later engine.run(). The market db is passed explicitly instead
     (price_store takes db_path per call), which keeps the two stores as
     separate as backtest/settings.py insists they are.
@@ -164,6 +165,9 @@ def build_scenario(
     import storage
     from models import ObservedReading, PointForecast
     from backtest import price_store, simclock
+
+    # WAVE 3 (3a): _connect() no longer builds the schema; the fixture does.
+    storage.migrate()
 
     start_date, end_date = D1, D3
     window_end_ts = simclock.local_minute_to_ts(end_date + timedelta(days=1), 0)
@@ -393,3 +397,50 @@ def _deterministic_maturity(monkeypatch):
     import config
 
     monkeypatch.setattr(config, "_maturity_cache", dict(config.MATURITY_SNAPSHOT))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_default_db(tmp_path_factory):
+    """
+    WAVE 3 (3a). Two things every test gets without asking:
+
+      * config.DB_PATH points at ONE empty, migrated temp file for the whole
+        session -- never at data/polyweather.sqlite3 in the checkout. Until
+        this fixture the suite wrote into the operator's own database (the
+        memory note that said "do not run the suite on the box" was about
+        exactly this). Measured before the change: pointing the default at
+        an empty file fails nothing.
+      * storage._WRITABLE is True for the test process. Tests own their
+        throwaway files; the read-only default is exercised by the tests
+        that flip it back explicitly (tests/test_wave3_storage_migrate.py).
+
+    Session-scoped MonkeyPatch, undone at the end of the run.
+    """
+    import config
+    import storage
+
+    path = tmp_path_factory.mktemp("session-db") / "polyweather.sqlite3"
+    mp = pytest.MonkeyPatch()
+    mp.setattr(config, "DB_PATH", str(path))
+    mp.setattr(storage, "_WRITABLE", True)
+    storage.migrate()
+    yield
+    mp.undo()
+
+
+@pytest.fixture
+def tmp_db(tmp_path, monkeypatch):
+    """
+    A fresh, MIGRATED trading database at a throwaway path, with
+    config.DB_PATH pointed at it for the test. Returns the path as a str.
+    THE one implementation of what 36 fixtures used to do by hand (point
+    DB_PATH somewhere and let _connect() build the schema); those now alias
+    this or call storage.migrate() after their own setattr.
+    """
+    import config
+    import storage
+
+    path = tmp_path / "trading.sqlite3"
+    monkeypatch.setattr(config, "DB_PATH", str(path))
+    storage.migrate()
+    return str(path)

@@ -26,9 +26,8 @@ def _decision(net_ev=0.30, slip=0.01, price=0.30):
 
 
 @pytest.fixture
-def db(tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "t.sqlite3"))
-    return str(tmp_path / "t.sqlite3")
+def db(tmp_db):
+    return tmp_db
 
 
 @pytest.fixture

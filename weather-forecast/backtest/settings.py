@@ -33,10 +33,11 @@ import config
 # through SimClock, local_minute_to_ts() and generate_ticks(), and a run's
 # manifest records the offset it actually used as sim_utc_offset_hours.
 #
-# Still matches risk_manager._local_hour()'s tz_offset_hours default and
-# scheduler.local_now()'s, both of which hardcode 8 as their own
-# station-agnostic fallback. This value is what a caller gets when it names
-# no station at all -- the synthetic test scenario, mainly.
+# Still matches scheduler.local_now()'s default, which hardcodes 8 as its
+# own station-agnostic fallback (risk_manager._local_hour lost its default in
+# Wave 3: it resolves the position's own station). This value is what a
+# caller gets when it names no station at all -- the synthetic test scenario,
+# mainly.
 LOCAL_UTC_OFFSET_HOURS = 8
 
 # An observation for target date D is not knowable until D+1 local: the
