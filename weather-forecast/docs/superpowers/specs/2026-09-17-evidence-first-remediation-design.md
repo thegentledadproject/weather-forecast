@@ -1,6 +1,6 @@
 # Evidence-first remediation — design
 
-Date: 2026-09-17. Status: approved 2026-09-17; Wave 1 MERGED 0dcc5f6 + DEPLOYED 2026-09-17; Wave 2 MERGED f6f8aac + DEPLOYED 2026-09-19 08:45 UTC (regime boundary 2026-09-20); Wave 3 next.
+Date: 2026-09-17. Status: approved 2026-09-17; Wave 1 MERGED 0dcc5f6 + DEPLOYED 2026-09-17; Wave 2 MERGED f6f8aac + DEPLOYED 2026-09-19 08:45 UTC (regime boundary 2026-09-20); Wave 3 MERGED 1c32d1f + DEPLOYED 2026-09-23 14:40 UTC (no regime boundary); checkpoint ~2026-10-04.
 
 Source: the six read-only reviews of 2026-09-15 (architecture, trade
 logic, edge, stop/take, scheduler timing, paper-vs-live). Their findings

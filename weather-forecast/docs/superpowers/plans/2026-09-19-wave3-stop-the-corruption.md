@@ -4,6 +4,8 @@
 
 **Status:** DRAFT 2026-09-19 — not started. Target merge + deploy ~2026-09-25, inside the 15:00–19:00Z gap.
 
+**Status:** COMPLETE — merged 1c32d1f, deployed 2026-09-23 14:40 UTC, 1905 tests.
+
 **Goal:** Remove the four ways the production record corrupts itself without anyone deciding to: every process that opens the trading database issues schema DDL (3a); the dashboard timer runs as root and can leave root-owned files beside a database the daemon must write (3b); the entry leg runs before the exit check, so yesterday's resolved position holds a live slot through the 05:00 window, and a past-dated position with no price is held blind for three cycles (3c); the exit-tightening hour and the replay's local clock use the static registry offset, so every DST station tightens at true 11:00 (3d). Sweep the stale comments the 2026-09-15 reviews listed (3e) and settle, read-only, whether `NegRiskAdapter.redeemPositions` expects a two-element amounts array (3f). Fold in two carried items: `scheduler._config_sha` resolved at boot, and `deploy_daemon.sh` starting the dashboard before the daemon restart.
 **Architecture:** `storage.migrate()` holds every DDL statement and the entry-fee backfill (moved verbatim out of `_connect()` into `_apply_schema(conn)`); `_connect()` is open-only and, unless `storage.set_writable(True)` was called in this process, opens a `mode=ro` URI — a write then raises `StorageReadOnlyError` naming the process. The daemon calls `scheduler._boot_storage()` (migrate → writable → `_config_sha` primed) at the top of `run_forever`; the three operator writers (`manual_trigger.py`, `bucket_bias.py --ingest`, `main.py`) call `set_writable(True)`; everything else — dashboards, cohort_monitor, calibration_panel, promotion_dossier, the sweeps, spread_audit, redeem.py — is read-only by default with no edit. `deploy_daemon.sh` stops the daemon, backs the database up through the sqlite backup API, runs `storage.migrate()` as ubuntu, restarts the daemon and only then starts the dashboard. `setup_dashboard.sh` writes `User=ubuntu` and hands `/var/www/html` to ubuntu. 3c and 3d are three flags in a `WAVE 3` block at the end of `config.py`, defaulting on, each read at one site. The test suite gets ONE migrated throwaway database per session and ONE `tmp_db` fixture; the 36 per-file copies of "point DB_PATH at a tmp file and let `_connect()` build the schema" either alias `tmp_db` or call `storage.migrate()` explicitly.
 **Tech Stack:** Python 3.12, sqlite3, pytest; bash/systemd on Ubuntu EC2; no numpy/scipy (not on the box)
@@ -62,7 +64,7 @@
 **Files:** Modify `storage.py` (imports 18-24; `_db` 27-61; `_ensure_position_economics_view` docstring 153-170; `_connect` 205-580), `tests/conftest.py` (lines 160-166; new fixtures after `_deterministic_maturity`, line 395), `tests/test_no_fd_leak.py` (after `test_storage_has_no_bare_with_connect`, line 151), the 34 test files in the edit table / Test `tests/test_wave3_storage_migrate.py`
 **Interfaces:** Produces: `storage.StorageReadOnlyError(RuntimeError)`, `storage._WRITABLE: bool = False`, `storage.set_writable(flag: bool = True) -> None`, `storage.is_writable() -> bool`, `storage.migrate() -> None`, `storage.schema_summary() -> str`, `storage._apply_schema(conn) -> None`, conftest `tmp_db` (returns the path as `str`), conftest `_isolated_default_db` (session, autouse)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave3_storage_migrate.py
@@ -219,9 +221,9 @@ def test_the_suite_never_touches_the_checkout_database():
     assert not pathlib.Path(config.DB_PATH).resolve().is_relative_to(PKG)
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_storage_migrate.py -v` / Expected: FAIL with `AttributeError: module 'storage' has no attribute 'migrate'` (and `fixture 'tmp_db' not found` on the two `tmp_db` tests)
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_storage_migrate.py -v` / Expected: FAIL with `AttributeError: module 'storage' has no attribute 'migrate'` (and `fixture 'tmp_db' not found` on the two `tmp_db` tests)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 storage.py imports (line 18-24) — old:
 ```python
@@ -704,9 +706,9 @@ def test_connect_issues_no_ddl_and_apply_schema_declares_every_table():
 
 (Files that set `DB_PATH` and build their own tables by hand — `test_forecast_bias.py`, `test_forecast_lead_window.py`, `test_spread_audit.py`, `test_wave2_error_sample_window.py` — and the two that only read through stubs — `test_wave2_forecast_outage_refuses.py`, `test_wave2_signed_admission_edge.py` — are untouched; they pass on the prototype.)
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_storage_migrate.py tests/test_no_fd_leak.py tests/test_wave1_schema.py tests/test_entry_fee_migration.py -v` / Expected: PASS
-- [ ] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1860 (1851 + 8 new + 1 guard). Any remaining `no such table` failure is a site the table above missed: add `storage.migrate()` after its `DB_PATH` setattr and record it in the commit message.
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_storage_migrate.py tests/test_no_fd_leak.py tests/test_wave1_schema.py tests/test_entry_fee_migration.py -v` / Expected: PASS
+- [x] **Step 5: Run the full suite** — `pytest -q` from weather-forecast/ / Expected: all pass, count >= 1860 (1851 + 8 new + 1 guard). Any remaining `no such table` failure is a site the table above missed: add `storage.migrate()` after its `DB_PATH` setattr and record it in the commit message.
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -733,7 +735,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Why redeem.py is NOT in the writer list.** The ruling names it as one of "the two operator writers"; on the code it is a reader: `redeem.py` never imports `storage`, and the only storage call on its path is `clients/redemption_client.py:122 storage.load_settled_live_tokens()` (a SELECT). Making it writable would grant a write it never makes. The two real operator writers beyond `manual_trigger.py` are `bucket_bias.py --ingest` (bucket_bias.py:600-603 → `storage.save_settled_bucket`) and `main.py` (`pipeline.run` → `storage.save_forecast`/`save_ensemble_spread`); both would otherwise die with `StorageReadOnlyError` after Task 1. Every other module-level entry point (cohort_monitor, calibration_panel, promotion_dossier, spread_audit, spread_tier_brier, stop_loss_audit, paper_trading_report, check_holdings, check_open_orders, backtest/cli, the three sweeps, observed_half_life, the falsifiers, the three generators) reads only, and the AST test below pins that none of them calls `set_writable`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave3_writers_and_readers.py
@@ -835,9 +837,9 @@ def test_deploy_script_stops_backs_up_migrates_restarts_then_starts_the_dashboar
     assert "import sqlite3" in script[i_backup - 300:i_backup]
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_writers_and_readers.py -v` / Expected: FAIL with `assert set() == {...}` on the writer allowlist, `AttributeError: module 'scheduler' has no attribute '_boot_storage'`, and `ValueError: substring not found` on the deploy script
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_writers_and_readers.py -v` / Expected: FAIL with `assert set() == {...}` on the writer allowlist, `AttributeError: module 'scheduler' has no attribute '_boot_storage'`, and `ValueError: substring not found` on the deploy script
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 scheduler.py, after `_config_sha` (after line 112):
 ```python
@@ -1033,9 +1035,9 @@ systemctl is-active $SERVICE
 sudo journalctl -u $SERVICE -n 20 --no-pager
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_writers_and_readers.py tests/test_realmoney_dashboard.py tests/test_wave1_entry_decisions_recorded.py -v` / Expected: PASS (the two existing `test_deploy_daemon_*` tests still find "generate_realmoney_dashboard.py", "polyweather-dashboard.service" and "hand-edit the unit")
-- [ ] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1865
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_writers_and_readers.py tests/test_realmoney_dashboard.py tests/test_wave1_entry_decisions_recorded.py -v` / Expected: PASS (the two existing `test_deploy_daemon_*` tests still find "generate_realmoney_dashboard.py", "polyweather-dashboard.service" and "hand-edit the unit")
+- [x] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1865
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1062,7 +1064,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Why the same path.** nginx serves `/var/www/html`; every bookmark points at it. `chown -R ubuntu:ubuntu /var/www/html` once (idempotent) lets `os.replace(tmp, OUT)` in all three generators succeed as ubuntu — that needs write permission on the DIRECTORY, and the recursive chown also takes the existing root-owned `.html` files. The script used to `mv` the generators from `/home/ubuntu/*.py` (scp'd copies), which fails on a re-run; it now copies from the repo's `deploy/` like `deploy_daemon.sh` does, so re-running it IS the 3b deploy step. `journalctl -u polyweather` inside `generate_dashboard.py` needs journal read access as ubuntu: `usermod -aG systemd-journal ubuntu` (idempotent; the service picks the group up on its next start). `/proc/<pid>/environ` of the daemon (realmoney's Gate 2 probe) is readable by the same uid, which ubuntu is.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave3_dashboard_as_ubuntu.py
@@ -1124,9 +1126,9 @@ def test_three_generators_exist_and_none_is_a_writer():
         assert not offenders, f"{gen.name} touches storage beyond its public readers at lines {offenders}"
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_dashboard_as_ubuntu.py -v` / Expected: FAIL on `"User=ubuntu" in block`, on `chown -R`, and on `"sudo mv /home/ubuntu/" not in script`; the generator AST test passes already (pinning, not changing)
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_dashboard_as_ubuntu.py -v` / Expected: FAIL on `"User=ubuntu" in block`, on `chown -R`, and on `"sudo mv /home/ubuntu/" not in script`; the generator AST test passes already (pinning, not changing)
 
-- [ ] **Step 3: Write minimal implementation** — replace `../deploy/setup_dashboard.sh` (all 49 lines) with:
+- [x] **Step 3: Write minimal implementation** — replace `../deploy/setup_dashboard.sh` (all 49 lines) with:
 
 ```bash
 #!/usr/bin/env bash
@@ -1207,9 +1209,9 @@ echo "== local check =="
 curl -s -o /dev/null -w "nginx says: HTTP %{http_code}, %{size_download} bytes\n" http://localhost/
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_dashboard_as_ubuntu.py tests/test_realmoney_dashboard.py -v` / Expected: PASS (the existing ExecStart assertions in test_realmoney_dashboard.py still hold: the line is unchanged)
-- [ ] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1868
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_dashboard_as_ubuntu.py tests/test_realmoney_dashboard.py -v` / Expected: PASS (the existing ExecStart assertions in test_realmoney_dashboard.py still hold: the line is unchanged)
+- [x] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1868
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1234,7 +1236,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **The 2026-09-02 journal case (scheduler-timing review).** Five live WSSS positions sat at `REGION_LIVE_MAX_CONCURRENT_POSITIONS["asia"] = 5`; one was yesterday's, already resolved. `_run_full_cycle` ran the EV leg and `executor.open_position` → `_live_budget_breach` counted five open live rows and refused `region_concurrent`; one second later `_run_exit_check` closed the resolved row. Every 05:00–05:20 SGT tick repeated it. With the exit check first, the resolved row is closed before the count is taken.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave3_exit_check_first.py
@@ -1434,9 +1436,9 @@ def test_flag_off_a_past_dated_position_waits_three_failures(blind, monkeypatch)
     assert blind["gamma"] == 1
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_exit_check_first.py -v` / Expected: FAIL: `assert ['record', 'open', 'exit'] == ['exit', 'record', 'open']`, `assert ['...REGION_LIVE_MAX_CONCURRENT_POSITIONS...'] == [None]`, `assert [] == [('exit', None)]`, `assert 0 == 1` on the first-failure Gamma test; the two `flag off` scheduler tests fail with `AttributeError: EXIT_CHECK_BEFORE_ENTRIES` on the monkeypatch (raising) until the constant exists
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_exit_check_first.py -v` / Expected: FAIL: `assert ['record', 'open', 'exit'] == ['exit', 'record', 'open']`, `assert ['...REGION_LIVE_MAX_CONCURRENT_POSITIONS...'] == [None]`, `assert [] == [('exit', None)]`, `assert 0 == 1` on the first-failure Gamma test; the two `flag off` scheduler tests fail with `AttributeError: EXIT_CHECK_BEFORE_ENTRIES` on the monkeypatch (raising) until the constant exists
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 config.py, appended after `REGIME_BOUNDARIES: tuple = ("2026-09-20",)` (line 5133):
 ```python
@@ -1605,9 +1607,9 @@ new:
         return None
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_exit_check_first.py tests/test_exit_snapshot_capture.py tests/test_wave1_entry_decisions_recorded.py tests/test_wave1_shadow_pass.py tests/test_cycle_calibration.py tests/test_collection_window.py -v` / Expected: PASS (the shadow-pass call-graph guard walks `_run_full_cycle` and finds no new forbidden call; `test_full_cycle_exit_check_passes_no_fidelity` still sees `interval_min=None`)
-- [ ] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1876
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_exit_check_first.py tests/test_exit_snapshot_capture.py tests/test_wave1_entry_decisions_recorded.py tests/test_wave1_shadow_pass.py tests/test_cycle_calibration.py tests/test_collection_window.py -v` / Expected: PASS (the shadow-pass call-graph guard walks `_run_full_cycle` and finds no new forbidden call; `test_full_cycle_exit_check_passes_no_fidelity` still sees `interval_min=None`)
+- [x] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1876
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -1637,7 +1639,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **The replay.** `engine.run` resolved ONE static offset per run (engine.py:486). It now resolves the offset per LOCAL DAY through `simclock.utc_offset_for(station, day)` — `config.current_utc_offset_hours` at UTC midnight of that day, the same anchor `config.local_day_bounds_utc` uses (config.py:143-158), so a replay spanning the October transition keys each half on the right clock. The `SimClock` is retuned at each day boundary; `generate_ticks` and `local_minute_to_ts` already take the offset per call. The manifest's `sim_utc_offset_hours` records the start day's offset (RJTT stays 9, the existing test holds).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave3_dst_local_hour.py
@@ -1795,9 +1797,9 @@ def test_engine_threads_the_per_day_offset(monkeypatch, tmp_path, tmp_db):
     assert datetime.fromtimestamp(first_tick.ts, timezone.utc).hour == settings.SIM_DAY_START_HOUR_LOCAL - 1
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_dst_local_hour.py -v` / Expected: FAIL: `assert 9 == 10` (live hour at 09:00Z), `'take_profit' == 'hold'` (the 08:00Z case: HEAD's dead UTC+8 default reads it as 16:00), `AttributeError: module 'backtest.simclock' has no attribute 'utc_offset_for'`, the two `TypeError` expectations fail because the defaults still exist, the flag-off tests fail on `monkeypatch.setattr(config, "DST_AWARE_LOCAL_HOUR", ...)` only if Task 4 was skipped. (`test_the_tightening_fires_at_10_true_local_when_no_hour_is_passed` passes on HEAD by coincidence -- 17:00 SGT is tightened too -- and is kept as the regression pin; the 08:00Z test is the discriminating one.)
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_dst_local_hour.py -v` / Expected: FAIL: `assert 9 == 10` (live hour at 09:00Z), `'take_profit' == 'hold'` (the 08:00Z case: HEAD's dead UTC+8 default reads it as 16:00), `AttributeError: module 'backtest.simclock' has no attribute 'utc_offset_for'`, the two `TypeError` expectations fail because the defaults still exist, the flag-off tests fail on `monkeypatch.setattr(config, "DST_AWARE_LOCAL_HOUR", ...)` only if Task 4 was skipped. (`test_the_tightening_fires_at_10_true_local_when_no_hour_is_passed` passes on HEAD by coincidence -- 17:00 SGT is tightened too -- and is kept as the regression pin; the 08:00Z test is the discriminating one.)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 position_manager.py `_local_hour_for` (line 487-495) — old:
 ```python
@@ -2070,9 +2072,9 @@ new:
     #                            current_utc_offset_hours() by default.
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_dst_local_hour.py tests/test_parity_exit.py tests/test_simclock_per_station.py tests/test_determinism.py tests/test_no_lookahead.py tests/test_backtest_stack.py tests/test_take_sweep.py tests/test_stop_loss_audit.py -v` / Expected: PASS (`test_run_records_the_offset_it_actually_used` still sees 9 for RJTT; the WSSS synthetic scenario is offset 8 on both paths)
-- [ ] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1890
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_dst_local_hour.py tests/test_parity_exit.py tests/test_simclock_per_station.py tests/test_determinism.py tests/test_no_lookahead.py tests/test_backtest_stack.py tests/test_take_sweep.py tests/test_stop_loss_audit.py -v` / Expected: PASS (`test_run_records_the_offset_it_actually_used` still sees 9 for RJTT; the WSSS synthetic scenario is offset 8 on both paths)
+- [x] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1890
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -2099,7 +2101,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Verified already done:** the `storage.py` day-filter comment the spec lists was corrected in Wave 2 (`_forecast_means_in_local_day` docstring, storage.py:694-712, now describes the fetch window and explains the old `date(fetched_at) <= target_date` comparison as history); `tests/test_wave2_error_sample_window.py::test_the_stale_lookahead_comments_are_corrected` pins it. No edit.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave3_stale_docs.py
@@ -2150,9 +2152,9 @@ def test_executor_and_storage_no_longer_reference_a_live_trailing_stop():
     assert "'closed_trailing_stop' (historical rows only" in _src("storage.py")
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_stale_docs.py -v` / Expected: FAIL on every assertion that names replacement text
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_stale_docs.py -v` / Expected: FAIL on every assertion that names replacement text
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 risk_manager.py (line 67-70) — old:
 ```
@@ -2277,9 +2279,9 @@ new:
     """Mark a position closed -- status should be one of 'closed_take_profit', 'closed_stop_loss', 'closed_resolution', or 'closed_trailing_stop' (historical rows only; see models.Position.status)."""
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_stale_docs.py tests/test_wave2_error_sample_window.py -v` / Expected: PASS
-- [ ] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1894
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_stale_docs.py tests/test_wave2_error_sample_window.py -v` / Expected: PASS
+- [x] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1894
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -2297,7 +2299,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **What it answers and how.** `redeem.py:269` sends `[amount_base_units]` — one element — to `redeemPositions(bytes32,uint256[])`. The review read the adapter as expecting `[yesAmount, noAmount]`, forwarded as the `amounts` of an ERC1155 `safeBatchTransferFrom` over the two position ids, which reverts on a length mismatch. The probe (i) prints the selector it derives from the canonical signature (`0xdbeccb23`, equal to `clients/onchain_client.REDEEM_POSITIONS_SELECTOR` — the test asserts it); (ii) with an Etherscan/Polygonscan key, fetches the verified source and prints the `redeemPositions` lines that touch the amounts argument; (iii) without a key, `eth_getCode` over plain JSON-RPC and scans the dispatcher's PUSH4 immediates for `0xdbeccb23` and for `safeBatchTransferFrom`'s `0x2eb2c2d6` — evidence consistent with the two-element reading, not proof; (iv) offline, prints the numbers and the commands. From this dev box the RPC returns HTTP 403 (verified), so the operator runs it on the EC2 box, where `redeem.py` already reaches the same endpoint. It imports `eth_utils.keccak` (installed on the box by `py-clob-client-v2`'s dependency chain and locally) and nothing that signs; an AST test pins the import allowlist. No transaction, no key, no wallet. `redeem.py` is NOT changed in this wave.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 # tests/test_wave3_redeem_abi_probe.py
@@ -2371,9 +2373,9 @@ def test_the_probe_imports_no_signing_code():
     assert "eth_sendRawTransaction" not in SRC and "Account" not in SRC
 ```
 
-- [ ] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_redeem_abi_probe.py -v` / Expected: FAIL with `ModuleNotFoundError: No module named 'redeem_abi_probe'`
+- [x] **Step 2: Run test to verify it fails** — Run: `pytest tests/test_wave3_redeem_abi_probe.py -v` / Expected: FAIL with `ModuleNotFoundError: No module named 'redeem_abi_probe'`
 
-- [ ] **Step 3: Write minimal implementation** — create `redeem_abi_probe.py`:
+- [x] **Step 3: Write minimal implementation** — create `redeem_abi_probe.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -2594,9 +2596,9 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-- [ ] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_redeem_abi_probe.py -v && python redeem_abi_probe.py --offline` / Expected: PASS; the offline run prints `selector wanted  : 0xdbeccb23`
-- [ ] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1899
-- [ ] **Step 6: Commit**
+- [x] **Step 4: Run test to verify it passes** — Run: `pytest tests/test_wave3_redeem_abi_probe.py -v && python redeem_abi_probe.py --offline` / Expected: PASS; the offline run prints `selector wanted  : 0xdbeccb23`
+- [x] **Step 5: Run the full suite** — `pytest -q` / Expected: all pass, count >= 1899
+- [x] **Step 6: Commit**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -2620,7 +2622,7 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Shape.** Backup-and-stop, now performed BY `deploy_daemon.sh` (Task 2): pull → re-exec → pip → generators copied → mode/demotion guard → unit written → **stop timer + daemon → sqlite backup → `storage.migrate()` as ubuntu → restart daemon → start timer + dashboard**. The first run pulls the NEW script and re-execs into it before any of that, so the new order applies on the very first Wave 3 deploy. Then `setup_dashboard.sh` once, for 3b (it is idempotent now). No `REGIME_BOUNDARIES` stamp.
 
-- [ ] **Step 1: Full suite on the branch, then merge and push**
+- [x] **Step 1: Full suite on the branch, then merge and push**
 
 ```bash
 cd "C:/Users/user/Downloads/weather-forecast/weather-forecast"
@@ -2634,19 +2636,19 @@ cd weather-forecast && pytest -q && cd ..
 git push origin main
 ```
 
-- [ ] **Step 2: Wait for the window** — deploy only between 16:00Z and 19:00Z (Americas windows close 16:00Z; no region's entry window open; the Asia collection window opens 20:00Z). Record the UTC time of every step below.
+- [x] **Step 2: Wait for the window** — deploy only between 16:00Z and 19:00Z (Americas windows close 16:00Z; no region's entry window open; the Asia collection window opens 20:00Z). Record the UTC time of every step below.
 
-- [ ] **Step 3: Pre-deploy reads on the box (read-only)** — via plink (memory `ec2-deployment.md`): `systemctl show polyweather-dashboard.service -p User` (expect empty — the 3b before-state), `ls -l ~/weather-forecast/weather-forecast/data/` (expect ubuntu:ubuntu, and note any `-journal`/`-wal` file and its owner), `ls -l /var/www/html` (expect root:root — before-state), `git -C ~/weather-forecast log -1 --oneline`, `df -h ~`. If `ls -l data/` shows anything root-owned (DB, market_data.sqlite3, -journal): `sudo chown ubuntu:ubuntu ~/weather-forecast/weather-forecast/data/*` before Step 4.
+- [x] **Step 3: Pre-deploy reads on the box (read-only)** — via plink (memory `ec2-deployment.md`): `systemctl show polyweather-dashboard.service -p User` (expect empty — the 3b before-state), `ls -l ~/weather-forecast/weather-forecast/data/` (expect ubuntu:ubuntu, and note any `-journal`/`-wal` file and its owner), `ls -l /var/www/html` (expect root:root — before-state), `git -C ~/weather-forecast log -1 --oneline`, `df -h ~`. If `ls -l data/` shows anything root-owned (DB, market_data.sqlite3, -journal): `sudo chown ubuntu:ubuntu ~/weather-forecast/weather-forecast/data/*` before Step 4.
 
-- [ ] **Step 4: Deploy the daemon** — `~/deploy.sh` (the shim to `deploy/deploy_daemon.sh`). Expected in its output, in this order: `== stop ==`, `== backup ==` with `backup written: /home/ubuntu/polyweather-pre-deploy-<stamp>.sqlite3`, `== migrate ==` with exactly one `migrate: ok -- 8 tables: ...; 1 view(s): position_economics` line, then the restart, then `== dashboard ==`, then `active`. If the demotion guard refuses, the daemon is still running (the stop comes after the guard): fix the mode and re-run.
+- [x] **Step 4: Deploy the daemon** — `~/deploy.sh` (the shim to `deploy/deploy_daemon.sh`). Expected in its output, in this order: `== stop ==`, `== backup ==` with `backup written: /home/ubuntu/polyweather-pre-deploy-<stamp>.sqlite3`, `== migrate ==` with exactly one `migrate: ok -- 8 tables: ...; 1 view(s): position_economics` line, then the restart, then `== dashboard ==`, then `active`. If the demotion guard refuses, the daemon is still running (the stop comes after the guard): fix the mode and re-run.
 
   **Recovery if `!! DEPLOY ABORTED` prints:** if the failure was at `== migrate ==`, roll back with `git -C ~/weather-forecast checkout <pre-merge sha> && sudo systemctl start polyweather polyweather-dashboard.timer` (the old code applies the same DDL itself), then confirm `systemctl is-active polyweather`. Restore the `~/polyweather-pre-deploy-<stamp>.sqlite3` backup only if the DB is unreadable.
 
-- [ ] **Step 5: Deploy the dashboard unit (3b)** — `bash ~/weather-forecast/deploy/setup_dashboard.sh`. Expected: `User=ubuntu` printed by `systemctl show`, `ls -l /var/www/html/*.html` shows ubuntu-owned files with a fresh mtime, nginx `HTTP 200`.
+- [x] **Step 5: Deploy the dashboard unit (3b)** — `bash ~/weather-forecast/deploy/setup_dashboard.sh`. Expected: `User=ubuntu` printed by `systemctl show`, `ls -l /var/www/html/*.html` shows ubuntu-owned files with a fresh mtime, nginx `HTTP 200`.
 
-- [ ] **Step 6: Box == main** — `git -C ~/weather-forecast log -1` equals the merge commit from Step 1.
+- [x] **Step 6: Box == main** — `git -C ~/weather-forecast log -1` equals the merge commit from Step 1.
 
-- [ ] **Step 7: Same-day falsifier (all read-only)** — append every line to a memory note `wave3-stop-the-corruption.md`:
+- [x] **Step 7: Same-day falsifier (all read-only)** — append every line to a memory note `wave3-stop-the-corruption.md`:
   1. **3a, boot:** `sudo journalctl -u polyweather --since "-15 min" --no-pager | grep -c "boot: storage migrated"` is `1`, and the line carries `writable; config sha <merge sha>`.
   2. **3a, no read-only errors:** `sudo journalctl -u polyweather --since "-15 min" --no-pager | grep -cE "StorageReadOnlyError|_WRITABLE is False|read-only and it does not exist|readonly database"` is `0`; the same over `journalctl -u polyweather-dashboard.service --since "-15 min" --no-pager` is `0`.
   3. **3a, migrate once (no-regression read):** the deploy output has exactly one `migrate: ok` line; from the package dir, `.venv/bin/python -c "import sqlite3; c=sqlite3.connect('file:data/polyweather.sqlite3?mode=ro',uri=True); print(c.execute('PRAGMA table_info(positions)').fetchall()[-5:])"` ends with `kelly_size_preclamp_usd`.
@@ -2657,7 +2659,7 @@ git push origin main
   7. **3f:** `cd ~/weather-forecast/weather-forecast && .venv/bin/python redeem_abi_probe.py` (no key: the bytecode read) and, if an explorer key is available, `--api-key`. If `eth_utils` fails to import, record it and re-run with `--offline`. Append its VERDICT paragraph to memory verbatim, labelled evidence-not-proof if only the bytecode read ran.
   8. **Unchanged-behaviour check:** entry count and per-station approval rate over the next 24h versus the 7 days before (`entry_decisions` grouped by date), expected within the usual day-to-day range — 3c can only ADD approvals that the concurrent cap used to refuse, and only on live stations.
 
-- [ ] **Step 8: Update the spec's status line** — `docs/superpowers/specs/2026-09-17-evidence-first-remediation-design.md` line 3: append `; Wave 3 MERGED <sha> + DEPLOYED <date> <hh:mm> UTC (no regime boundary)`. Commit on `main` with the trailer and push.
+- [x] **Step 8: Update the spec's status line** — `docs/superpowers/specs/2026-09-17-evidence-first-remediation-design.md` line 3: append `; Wave 3 MERGED <sha> + DEPLOYED <date> <hh:mm> UTC (no regime boundary)`. Commit on `main` with the trailer and push.
 
 ---
 
