@@ -174,8 +174,8 @@ def apply_map(fitted: Optional[Tuple[List[float], List[float]]], model_prob: flo
 
 # A sparse tail of a few station-days fits to exactly 0 or 1 (Busan NO 27/28C,
 # 2026-09-19..21: mapped to 1.00, two of the next three lost). No bucket is
-# ever certain, so the map may not say it is.
-# ponytail: hard clamp, shrink toward the pooled map by effective n if needed.
+# ever certain, so the map may not say it is. Backstop to the shrinkage in
+# fit_for_day, which is the real fix.
 MAP_FLOOR = 0.05
 
 
@@ -224,13 +224,33 @@ def fit_for_day(
     ]
 
     own = [r for r in prior if r["station_icao"] == station_icao]
+    pooled = fit_map(prior) if len(prior) >= minimum else None
     if len(own) >= minimum:
-        return fit_map(own), STATION_TIER, len(own)
+        station = fit_map(own)
+        if pooled is None:
+            return station, STATION_TIER, len(own)
+        days = len({r["target_date"] for r in own})
+        return blend_maps(station, pooled, days / (days + config.CALIBRATION_SHRINK_DAYS)), STATION_TIER, len(own)
 
-    if len(prior) >= minimum:
-        return fit_map(prior), POOLED_TIER, len(prior)
+    if pooled is not None:
+        return pooled, POOLED_TIER, len(prior)
 
     return None, NO_TIER, len(prior)
+
+
+def blend_maps(a, b, weight_a: float):
+    """
+    weight_a * a + (1 - weight_a) * b, as a map.
+
+    SHRINKAGE BY INDEPENDENT DAYS (asia-edge-review-2026-09-23). Tickets on
+    one station-day share one temperature, so 30 rows can be 8 days of
+    evidence; Busan's sparse tail fitted to 1.00. The station map is trusted
+    in proportion to its DAYS, the pooled book fills the rest. Exact, not
+    approximate: both maps are piecewise linear and flat past their ends, so
+    blending at the union of their knots reproduces the blend everywhere.
+    """
+    xs = sorted(set(a[0]) | set(b[0]))
+    return xs, [weight_a * _interpolate(a, x) + (1 - weight_a) * _interpolate(b, x) for x in xs]
 
 
 def haircut_applies(has_stop: bool, calibration_source: str) -> bool:

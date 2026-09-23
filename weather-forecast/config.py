@@ -2769,6 +2769,19 @@ SIZE_STOPLESS_BOOKS_ON_PURE_KELLY = False
 # is always visible.
 MIN_CALIBRATION_SAMPLES = 30
 
+# probability_calibration.fit_for_day: a station's own map gets weight
+# days / (days + this), the pooled map the rest. 0 = pure station map (the
+# pre-2026-09-23 behaviour).
+#
+# CHRONOLOGICAL REPLAY 2026-09-23 (production book, 753 settled tickets over
+# 37 days 08-17..09-22, each day fitted on strictly earlier days, Brier on
+# the 60 station-tier tickets): K=0 .1903, 10 .1834, 40 .1789, pooled-only
+# .1771. Monotone -- more shrinkage always helped -- but no day-cluster CI
+# excludes 0 (K=40 vs 0: [-.032, +.008]). 40 takes nearly all of the gain
+# while a station with ~30 days still gets ~43% weight, rising as it
+# accrues. Re-run the replay before moving it; it is tiny evidence.
+CALIBRATION_SHRINK_DAYS = 40
+
 EXPENSIVE_ENTRY_PRICE = 0.55
 MAX_POSITION_USD_EXPENSIVE = 30.0
 

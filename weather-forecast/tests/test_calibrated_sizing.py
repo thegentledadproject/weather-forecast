@@ -169,6 +169,34 @@ def test_the_map_never_claims_certainty():
     assert pc.apply_map(pc.fit_map(_pairs(5, 0.3, 0.0)), 0.3) == pytest.approx(pc.MAP_FLOOR)
 
 
+def test_a_station_map_is_shrunk_toward_the_pool_by_its_days(monkeypatch):
+    """Busan: a few days of an all-won tail must not become the answer."""
+    monkeypatch.setattr(config, "CALIBRATION_SHRINK_DAYS", 3)
+    day = DAY_N - timedelta(days=1)
+    own = _dated(day, 40, 0.70, 1.0, station="RKPK")            # 1 day, all won
+    pool = _dated(day, 400, 0.70, 0.0, station="WSSS")          # the book says 0
+    fitted, source, _ = pc.fit_for_day(own + pool, DAY_N, "RKPK")
+    assert source == pc.STATION_TIER
+    pooled = 40 / 440                                            # pooled map at 0.70
+    assert pc.apply_map(fitted, 0.70) == pytest.approx(0.25 * 1.0 + 0.75 * pooled)
+
+
+def test_zero_shrinkage_is_the_pure_station_map(monkeypatch):
+    monkeypatch.setattr(config, "CALIBRATION_SHRINK_DAYS", 0)
+    day = DAY_N - timedelta(days=1)
+    rows = _dated(day, 40, 0.70, 1.0, station="RKPK") + _dated(day, 400, 0.70, 0.0)
+    fitted, _, _ = pc.fit_for_day(rows, DAY_N, "RKPK")
+    assert pc.apply_map(fitted, 0.70) == pytest.approx(1 - pc.MAP_FLOOR)
+
+
+def test_blending_is_exact_between_knots():
+    a, b = ([0.2, 0.8], [0.1, 0.9]), ([0.5], [0.4])
+    blended = pc.blend_maps(a, b, 0.5)
+    for x in (0.1, 0.3, 0.5, 0.65, 0.9):
+        assert pc.apply_map(blended, x) == pytest.approx(
+            0.5 * pc.apply_map(a, x) + 0.5 * pc.apply_map(b, x))
+
+
 def test_the_map_for_day_n_uses_no_data_from_after_day_n():
     earlier = _dated(DAY_N - timedelta(days=1), 40, 0.60, 0.0)
     later = _dated(DAY_N + timedelta(days=3), 400, 0.60, 1.0)
