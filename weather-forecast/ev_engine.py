@@ -361,10 +361,15 @@ def compute_ev_table(
             # fitting here would be circular. run_for_station_with_map fetches.
             calibrated_prob = None
             calibration_source = "uncalibrated"
-            if calibration is not None:
+            # A {side: (map, source, n)} dict from _calibration_for, or one
+            # tuple for both sides (tests, callers that fit it themselves).
+            side_calibration = (
+                calibration.get(side) if isinstance(calibration, dict) else calibration
+            )
+            if side_calibration is not None:
                 import probability_calibration
 
-                fitted, calibration_source, _n = calibration
+                fitted, calibration_source, _n = side_calibration
                 if calibration_source in probability_calibration.CALIBRATED_TIERS:
                     calibrated_prob = probability_calibration.apply_map(
                         fitted, side_model_prob
@@ -562,7 +567,10 @@ def _calibration_for(station_icao: str, target_date):
     try:
         import probability_calibration
 
-        return probability_calibration.calibration_for(station_icao, target_date)
+        return {
+            "YES": probability_calibration.calibration_for(station_icao, target_date),
+            "NO": probability_calibration.calibration_for(station_icao, target_date, "NO"),
+        }
     except Exception as exc:  # noqa: BLE001 -- must not take a cycle down
         print(f"[ev_engine] calibration unavailable for {station_icao}: {exc}")
         return None

@@ -189,6 +189,27 @@ def test_zero_shrinkage_is_the_pure_station_map(monkeypatch):
     assert pc.apply_map(fitted, 0.70) == pytest.approx(1 - pc.MAP_FLOOR)
 
 
+def test_no_side_is_fitted_on_no_rows_only(monkeypatch):
+    """Replay 2026-09-23: the combined map left NO 11.5 points hot."""
+    day = DAY_N - timedelta(days=1)
+    yes = [dict(r, side="YES") for r in _dated(day, 40, 0.70, 1.0)]
+    no = [dict(r, side="NO") for r in _dated(day, 40, 0.70, 0.0)]
+    fitted, source, n = pc.fit_for_day(yes + no, DAY_N, "WSSS", "NO")
+    assert (source, n) == (pc.STATION_TIER, 40)
+    assert pc.apply_map(fitted, 0.70) == pytest.approx(pc.MAP_FLOOR)
+
+    monkeypatch.setattr(config, "CALIBRATE_NO_SIDE_SEPARATELY", False)
+    fitted, _, n = pc.fit_for_day(yes + no, DAY_N, "WSSS", "NO")
+    assert n == 80 and pc.apply_map(fitted, 0.70) == pytest.approx(0.5)
+
+
+def test_the_ev_table_applies_each_sides_own_map():
+    yes_map, no_map = ([0.0, 1.0], [0.1, 0.1]), ([0.0, 1.0], [0.9, 0.9])
+    rows = _ev_table(calibration={
+        "YES": (yes_map, pc.STATION_TIER, 40), "NO": (no_map, pc.STATION_TIER, 40)})
+    assert {r.side: r.calibrated_prob for r in rows} == {"YES": pytest.approx(0.1), "NO": pytest.approx(0.9)}
+
+
 def test_blending_is_exact_between_knots():
     a, b = ([0.2, 0.8], [0.1, 0.9]), ([0.5], [0.4])
     blended = pc.blend_maps(a, b, 0.5)

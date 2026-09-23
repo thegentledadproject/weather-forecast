@@ -2782,6 +2782,18 @@ MIN_CALIBRATION_SAMPLES = 30
 # accrues. Re-run the replay before moving it; it is tiny evidence.
 CALIBRATION_SHRINK_DAYS = 40
 
+# NO tickets get their own calibration map, fitted on NO rows only; YES keeps
+# the combined map. CHRONOLOGICAL REPLAY 2026-09-23 (same book, 263 NO / 456
+# YES scored, day-cluster CIs vs the combined map):
+#   NO   won .513, ask .527 | combined mean p .628 Brier .2546 | NO-only .575
+#        .2469 [-.0175, +.0020]
+#   YES  won .226           | combined .235 .1549 | YES-only .263 .1603 [-.0028,
+#        +.0137] -- worse, hence NO only.
+# Still ~5 points hot on NO after this (.575 vs .513), and still above the ask:
+# the map is fitted on the tickets we CHOSE, so selection bias survives it.
+# False reverts NO to the combined map.
+CALIBRATE_NO_SIDE_SEPARATELY = True
+
 EXPENSIVE_ENTRY_PRICE = 0.55
 MAX_POSITION_USD_EXPENSIVE = 30.0
 

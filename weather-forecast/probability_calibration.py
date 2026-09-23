@@ -197,9 +197,13 @@ def fit_for_day(
     rows: Sequence[dict],
     target_day: date,
     station_icao: str,
+    side: Optional[str] = None,
 ) -> Tuple[Optional[Tuple[List[float], List[float]]], str, int]:
     """
     (map, provenance, n) for `station_icao` on `target_day`.
+
+    side="NO" fits on NO rows only (config.CALIBRATE_NO_SIDE_SEPARATELY),
+    with the same tiers and shrinkage inside that subset.
 
     STRICTLY EARLIER DAYS ONLY. A map that has seen the day it is pricing is
     scored against an answer it already knows, which flatters every station and
@@ -222,6 +226,8 @@ def fit_for_day(
         r for r in rows
         if r["target_date"] < target_day and r.get("model_prob") is not None
     ]
+    if side == "NO" and config.CALIBRATE_NO_SIDE_SEPARATELY:
+        prior = [r for r in prior if r.get("side") == "NO"]
 
     own = [r for r in prior if r["station_icao"] == station_icao]
     pooled = fit_map(prior) if len(prior) >= minimum else None
@@ -312,9 +318,10 @@ def clear_cache() -> None:
     _COHORT_CACHE.clear()
 
 
-def calibration_for(station_icao: str, target_day: date):
+def calibration_for(station_icao: str, target_day: date, side: Optional[str] = None):
     """
     (map, provenance, n) for this station on this day, from the stored book.
+    `side` as in fit_for_day.
 
     THE COHORT COMES FROM cohort_monitor, not from a loader written here. That
     module already defines "a closed row with a settled outcome", reproduces
@@ -326,7 +333,7 @@ def calibration_for(station_icao: str, target_day: date):
     "uncalibrated" is precisely today's sizing behaviour, double buffer
     included -- so a storage error costs the correction, not the cycle.
     """
-    key = (station_icao, target_day)
+    key = (station_icao, target_day, side)
     if key in _CACHE:
         return _CACHE[key]
 
@@ -334,7 +341,7 @@ def calibration_for(station_icao: str, target_day: date):
         if target_day not in _COHORT_CACHE:
             rows, _ = cohort_monitor.load_cohort(until=target_day)
             _COHORT_CACHE[target_day] = rows
-        result = fit_for_day(_COHORT_CACHE[target_day], target_day, station_icao)
+        result = fit_for_day(_COHORT_CACHE[target_day], target_day, station_icao, side)
     except Exception as exc:  # noqa: BLE001 -- must not take the entry path down
         print(
             f"[probability_calibration] could not fit a map for {station_icao} "
