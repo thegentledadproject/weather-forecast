@@ -64,7 +64,7 @@ The EC2 box (`ubuntu@43.216.25.99`) has run daemon code `e31363d` since 2026-09-
      - The same holds at every European station plus ZSPD and RKPK: the market is both sharper (top-bucket p 0.52-0.70 vs 0.38-0.51) and more often right.
      - The remedy is the edge-logic review's "shrink toward the ask". The calibration map already does that in effect: 0 approvals at these stations since `e31363d`.
    - **The Task 5 re-check of the 2026-09-09 named stops is now runnable** (their ratios exist):
-     - CYYZ 0.98 and KHOU 0.95 now PASS. The config note says to drop any that pass, but CYYZ's model loses to the ask (Brier 0.202 vs 0.129). Operator decision, pending.
+     - CYYZ 0.98 and KHOU 0.95 now PASS. **Decided 2026-09-24: both dropped from `FORCE_COLLECTION_ONLY_STATIONS`** (commit below). The measured gate owns them now; the book is paper-only. CYYZ's Brier loss (n=6, 3 days) was not treated as a reason. NOT YET DEPLOYED.
      - SBGR 2.00, KSEA 1.19, KMIA 1.05 and MMMX 1.02 still fail. Keep them stopped.
      - Re-run with the scratch script's logic: `calibration.error_width_ratio` plus `promotion_dossier.live_calibration` per station.
    - Re-run `--by region --since 2026-09-03` and `--by station` at the ~10-04 checkpoint.

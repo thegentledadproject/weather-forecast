@@ -191,9 +191,15 @@ UNGUARDED_WIDE_2026_09_09 = {
     "MMMX": 1.160,
     "KSEA": 1.131,
     "KMIA": 1.096,
-    "CYYZ": 1.010,
-    "KHOU": 1.002,
 }
+
+# Released 2026-09-24 (Task 5): the gate now measures them and they pass.
+RELEASED_2026_09_24 = {"CYYZ": 0.98, "KHOU": 0.95}
+
+
+def test_released_stations_are_left_to_the_measured_gate():
+    for icao in RELEASED_2026_09_24:
+        assert not config.force_collection_only(icao), icao
 
 
 def test_unguarded_wide_stations_are_named_until_the_gate_can_see_them():

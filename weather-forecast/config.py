@@ -3893,12 +3893,20 @@ FORCE_COLLECTION_ONLY_STATIONS = {
     # number for it -- Europe ~2026-09-15, the Americas ~2026-09-19 -- and
     # drop any that passes. KHOU and CYYZ first. See Task 5 of
     # docs/superpowers/plans/2026-09-09-spread-width-remediation.md.
+    #
+    # TASK 5, 2026-09-24: error_width_ratio now returns a number for all six
+    # (n=21 scored residuals). KHOU 0.95 and CYYZ 0.98 PASS and are dropped,
+    # handing them to MAX_ERROR_RMSE_PER_BUCKET, which re-measures daily and
+    # stops them itself if either crosses 1.0. Both sit within sampling noise
+    # of the line, which is exactly why the measured gate, not a name, should
+    # own them. The whole book is paper since 2026-09-23, so a wrong release
+    # costs no money. CYYZ's Brier loss to the ask (0.202 vs 0.129) is n=6
+    # over 3 days and is not a reason to keep it named.
+    # Still failing: SBGR 2.00, KSEA 1.19, KMIA 1.05, MMMX 1.02.
     "SBGR",
     "KSEA",
     "KMIA",
     "MMMX",
-    "KHOU",
-    "CYYZ",
 }
 
 
