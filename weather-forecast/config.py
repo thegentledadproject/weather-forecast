@@ -4412,6 +4412,15 @@ LOW_CONFIDENCE_SPREAD_SOURCES = {"fallback_default", "pooled_error", "ensemble"}
 GHOST_BOOK_BID_MAX = 0.02
 GHOST_BOOK_ASK_MIN = 0.98
 
+# STALE BOOK (honest fills, 2026-09-25). An entry refuses a /book older than
+# this many seconds, aged from the book's own `timestamp` (else our fetch
+# time). That timestamp is the server's snapshot epoch, shared by every book
+# fetched in the same instant: probed on 40 live books 2026-09-24 its age ran
+# 0.1s-106s (median 26s) on a healthy API. 300s is ~3x the worst healthy age,
+# so it trips on a frozen snapshot, not on a quiet market. Entries only --
+# an exit logs a stale or crossed book and trades anyway.
+BOOK_MAX_AGE_S = 300
+
 # BALANCE PROPAGATION. update_balance_allowance() returning 200 OK does not
 # mean the refreshed balance is what post_order() will read: production logs
 # elsewhere show a 200, then a "balance: 0" rejection ~250ms later, then a

@@ -453,3 +453,37 @@ def tmp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(path))
     storage.migrate()
     return str(path)
+
+
+class _LegacySeamEntryBook:
+    """
+    HONEST FILLS: the entry path now reads ONE /book snapshot
+    (market_client.get_entry_book). Most tests predate that and mock the two
+    legacy seams, get_available_depth_usd and estimate_slippage. This adapter
+    answers depth/slippage through those two, looked up at CALL time so a
+    test's monkeypatch still applies, and never touches the network. Tests of
+    get_entry_book itself import the real one at module level (before this
+    fixture runs) and patch it back in.
+    """
+    refusal = None
+    best_ask = None
+
+    def __init__(self, token_id):
+        self.token_id = token_id
+
+    def depth_usd(self, max_price_impact_pct=0.10):
+        from clients import market_client
+        return market_client.get_available_depth_usd(self.token_id)
+
+    def slippage(self, size_usd):
+        from clients import market_client
+        return market_client.estimate_slippage(self.token_id, size_usd)
+
+
+@pytest.fixture(autouse=True)
+def _entry_book_via_legacy_seams(monkeypatch):
+    from clients import market_client
+    monkeypatch.setattr(
+        market_client, "get_entry_book",
+        lambda token_id, decided_ask=None, timeout=10: _LegacySeamEntryBook(token_id),
+    )

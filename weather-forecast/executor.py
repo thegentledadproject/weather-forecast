@@ -396,11 +396,19 @@ def _resolved_size_ok(spec, decision, out: Optional[dict] = None) -> tuple:
     # that moves on its own, without the size changing at all. Slippage was
     # always re-read live; depth was not, so the cheaper number was the stale
     # one.
+    # ONE snapshot for depth and slippage, quality-checked (crossed / empty /
+    # stale) the same way entry_manager's is -- see market_client.get_entry_book.
     try:
-        depth = market_client.get_available_depth_usd(decision.token_id)
+        book = market_client.get_entry_book(decision.token_id)
+        depth = book.depth_usd()
     except Exception as exc:  # noqa: BLE001 -- a failed re-check must not pass by default
         return _refuse("resolved_depth_unreadable", f"could not re-read depth at ${resolved:.2f} ({exc}) -- refusing to guess")
 
+    if depth is None and book.refusal:
+        return _refuse(f"resolved_book_{book.refusal}", (
+            f"order book refused at submission ({book.refusal}) -- refusing to submit "
+            f"${resolved:.2f} against it"
+        ))
     if depth is None:
         # get_available_depth_usd documents None as "unknown depth", not
         # "zero depth", and entry_manager already treats unknown as a reason
@@ -424,7 +432,7 @@ def _resolved_size_ok(spec, decision, out: Optional[dict] = None) -> tuple:
         ))
 
     try:
-        slippage = market_client.estimate_slippage(decision.token_id, resolved)
+        slippage = book.slippage(resolved)
     except Exception as exc:  # noqa: BLE001 -- a failed re-check must not pass by default
         return _refuse("resolved_slippage_unreadable", f"could not re-estimate slippage at ${resolved:.2f} ({exc}) -- refusing to guess")
 

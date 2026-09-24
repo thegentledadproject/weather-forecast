@@ -1293,8 +1293,11 @@ def evaluate_entry(
     if live_cap is not None:
         size_usd = min(size_usd, live_cap)
 
-    # Cap 3: real order-book depth
-    depth_usd = market_client.get_available_depth_usd(token_id)
+    # Cap 3: real order-book depth -- from ONE /book snapshot, the same one
+    # the slippage below walks, checked for crossed/empty/stale and for an ask
+    # worse than the one this EV was priced at (market_client.get_entry_book).
+    entry_book = market_client.get_entry_book(token_id, decided_ask=ev_result.market_price)
+    depth_usd = entry_book.depth_usd()
     if depth_usd is None:
         return EntryDecision(
             station_icao=station_icao, target_date=ev_result.target_date,
@@ -1302,7 +1305,11 @@ def evaluate_entry(
             kelly_fraction_raw=kelly_raw, kelly_fraction_applied=kelly_applied,
             recommended_size_usd=0.0, available_depth_usd=None,
             slippage_at_size_pct=None, net_ev_at_size=None,
-            approved=False, reason="Order book depth unavailable -- cannot size safely, skipping.",
+            approved=False, reason=(
+                f"Order book refused ({entry_book.refusal}) -- cannot size safely, skipping."
+                if entry_book.refusal else
+                "Order book depth unavailable -- cannot size safely, skipping."
+            ),
             station_maturity=maturity,
             entry_price=ev_result.market_price,
             entry_bid=ev_result.market_bid,
@@ -1339,7 +1346,7 @@ def evaluate_entry(
 
     # Re-check slippage and net EV at the ACTUAL recommended size, not the
     # flat test size ev_engine.py used to screen this candidate initially.
-    slippage_at_size = market_client.estimate_slippage(token_id, depth_capped_usd)
+    slippage_at_size = entry_book.slippage(depth_capped_usd)
     # Both fee terms, or the approval runs on a number the EV table already
     # rejected -- the same defect shape as P1-2's unpriced limit pad.
     # The same edge veto 0a2 admitted on: a raw edge here re-admitted what
