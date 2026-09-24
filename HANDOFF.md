@@ -1,8 +1,9 @@
 # Handoff - 2026-09-24
 
 ## State
-Branch `main`, clean, pushed. Last commit: `9fcff2e` Add Asia NO calibration gap diagnostic.
-The EC2 box (`ubuntu@43.216.25.99`) has run `e31363d` since 2026-09-23 15:52 UTC. The two later commits are standalone read-only scripts, and the daemon doesn't need them.
+Branch `main`, clean, pushed. Last code commit: `da3a5a1` cohort_monitor --by.
+The EC2 box (`ubuntu@43.216.25.99`) has run daemon code `e31363d` since 2026-09-23 15:52 UTC. Its checkout was pulled to `da3a5a1` on 2026-09-24 without a restart. The later commits are read-only scripts and docs, so the daemon doesn't need them.
+- The box has a stray untracked file, `weather-forecast/None`. It is probably from a script that wrote to a missing path. It's harmless.
 - **The daemon runs in PAPER mode** (`--mode paper --fallback-mode paper`) since 2026-09-23 15:33 UTC.
   - This was set in `/etc/polyweather/mode.env`, not in config. The backup is `mode.env.bak-20260923`.
   - To re-arm live: restore the backup, then restart the daemon.
@@ -37,8 +38,11 @@ The EC2 box (`ubuntu@43.216.25.99`) has run `e31363d` since 2026-09-23 15:52 UTC
    - Stop rule: if the CI upper bound of (after − before) is below 0, set `ERROR_SAMPLE_FETCH_WINDOW_ENABLED` and `SPREAD_FLOOR_MEASURED_TIERS_EXEMPT` to False.
    - Then run the checkpoint reads: λ refit on `ev_snapshots`, the calibration gap on stored `calibrated_prob`, and shadow-twin pairing.
    - Re-run the shrink and side replays at the same time.
-4. **Still open from the Europe review (P2):** report the entry held-to-settlement result and the executed exit P&L as separate metrics. Nothing has been built.
-   - This matters less now: paper trades have used no stop/take exits since 2026-09-02.
+4. **Europe review P2 is DONE (`da3a5a1`).** `python cohort_monitor.py --by station|side|region` (read-only) prints held-to-settlement and as-traded P&L per group, net of entry fees. Results from the box on 2026-09-24:
+   - All time: held +$467 vs as traded −$531 on $6,017 staked, so exits cost $998 (Asia $742, Europe $256, Americas $0). All of that exit cost predates 2026-09-02.
+   - Since 2026-09-03 (no exits, so held == as traded): Americas +$220, Asia −$120, Europe −$191; NO −$116, YES +$24.
+   - So removing exits fixed the exit loss, but the entries are now losing outside the Americas. Americas' +$220 is mostly KATL (+$159); don't act on one station.
+   - Re-run `--by region --since 2026-09-03` at the ~10-04 checkpoint.
 5. **DST end:** restart the daemon after 2026-10-25 01:00 UTC (EGLC) and after 2026-11-01 06:00 UTC (KLGA). The scheduler's offset groups are computed once, at boot.
 
 ## Gotchas
