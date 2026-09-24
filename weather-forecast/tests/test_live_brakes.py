@@ -175,3 +175,55 @@ def test_paper_never_consults_the_brakes(monkeypatch, book):
     monkeypatch.setattr(storage, "open_position", lambda p: opened.append(p))
     executor.open_position(_decision())
     assert len(opened) == 1
+
+
+# --------------------------------------------------------------------------
+# #16 KILL-SWITCH DRILL (plan section 12): every brake, end to end -- the live
+# entry is refused, an exit on the same station still goes out, and the
+# operator hears about it exactly once however many entries it refuses.
+# --------------------------------------------------------------------------
+
+def _trip(code, book, monkeypatch):
+    if code == "daily_loss":
+        monkeypatch.setattr(config, "LIVE_DAILY_LOSS_LIMIT_USD", 4.0)
+        book["closed"] = [_live_pos("L", status="closed_resolution", entry=0.50, exit_price=0.0,
+                                    exit_time=_recent(2), size_usd=5.0)]
+    elif code == "kill_criterion":
+        book["kill"] = True
+    elif code == "stranded":
+        book["open"] = [_live_pos("S", target_date=TODAY - timedelta(days=5))]
+    elif code == "error":
+        def boom(**kw):
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(storage, "load_open_positions", boom)
+
+
+@pytest.mark.parametrize("code", ["daily_loss", "kill_criterion", "stranded", "error"])
+def test_kill_switch_drill(code, live_path, book, monkeypatch):
+    from models import ExitDecision
+
+    refusals, submitted = live_path
+    monkeypatch.setattr(executor, "_kill_cache", {})
+    _trip(code, book, monkeypatch)
+
+    for _ in range(3):
+        executor.open_position(_decision())
+    assert submitted == [], f"{code}: a braked live entry reached the exchange"
+    assert refusals == [f"brake_{code}"] * 3
+    assert [a[0] for a in book["sent"]] == [f"LIVE brake: {code}"], "alert exactly once"
+
+    # The exit still goes out.
+    sell = wallet_client.OrderSpec(ok=True, token_id="TOK", side="SELL", limit_price=0.20,
+                                   expected_price=0.20, size_shares=5.0, notional_usd=1.0)
+    monkeypatch.setattr(wallet_client, "build_exit_order", lambda **kw: sell)
+    monkeypatch.setattr(wallet_client, "submit_order",
+                        lambda spec, live=False: submitted.append(spec) or
+                        wallet_client.OrderResult(submitted=True, filled=True, simulated=False,
+                                                  spec=spec, fill_price=0.20, fill_shares=5.0,
+                                                  order_id="X"))
+    closed = []
+    monkeypatch.setattr(storage, "close_position", lambda **kw: closed.append(kw) or True)
+    executor.close_position(_live_pos("E"), ExitDecision(
+        position_id="E", should_exit=True, reason="stop_loss", current_price=0.20, pnl_pct=-0.5))
+    assert [s.side for s in submitted] == ["SELL"]
+    assert closed and closed[0]["status"] == "closed_stop_loss"

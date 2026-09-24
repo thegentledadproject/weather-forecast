@@ -601,7 +601,7 @@ def _day_budget_breach(resolved_usd: float, decision) -> Optional[str]:
 
 
 def _record_attempt(kind, station_icao, spec, result, target_date=None,
-                    bucket_c=None, side="") -> None:
+                    bucket_c=None, side="", client_order_key=None) -> None:
     """
     Append one real-money submission to the audit trail.
 
@@ -626,7 +626,7 @@ def _record_attempt(kind, station_icao, spec, result, target_date=None,
             target_date=target_date, bucket_c=bucket_c, side=side,
             notional_usd=spec.notional_usd, size_shares=spec.size_shares,
             limit_price=spec.limit_price, order_id=result.order_id,
-            detail=result.error or spec.reason,
+            detail=result.error or spec.reason, client_order_key=client_order_key,
         )
     except Exception as exc:  # noqa: BLE001
         print(
@@ -915,7 +915,7 @@ def warn_about_unmanageable_live_positions() -> int:
 # Entries
 # --------------------------------------------------------------------------
 
-def open_position(decision: EntryDecision) -> None:
+def open_position(decision: EntryDecision, cycle_ts: Optional[str] = None) -> None:
     """
     Open a new position per entry_manager's EntryDecision. The single
     required path for opening a position, symmetric with close_position().
@@ -923,6 +923,10 @@ def open_position(decision: EntryDecision) -> None:
     Does nothing if decision.approved is False -- callers pass every
     EntryDecision through here, approved or not, for one consistent log of
     what was considered each cycle.
+
+    cycle_ts (the scheduler's per-cycle stamp) makes a LIVE submission
+    idempotent: the same decision twice in one cycle submits once. None
+    (manual callers) keeps the old unkeyed behaviour.
     """
     if not decision.approved:
         print(f"[executor] {decision.station_icao} {decision.bucket_c}°{decision.side}: not opened -- {decision.reason}")
@@ -1010,7 +1014,7 @@ def open_position(decision: EntryDecision) -> None:
         storage.open_position(_position(decision.recommended_size_usd))
         return
 
-    _open_via_order_path(decision, mode, _position)
+    _open_via_order_path(decision, mode, _position, cycle_ts=cycle_ts)
 
 
 def _unexitable_fill_reason(spec, fill_shares: float) -> Optional[str]:
@@ -1060,7 +1064,8 @@ def _alert_unexitable_fill(decision, spec, fill_shares, fill_price, order_id, re
     )
 
 
-def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> None:
+def _open_via_order_path(decision: EntryDecision, mode: str, make_position,
+                         cycle_ts: Optional[str] = None) -> None:
     """
     The shared simulation/live entry path. Identical in both modes right up
     to the submit call -- that is the entire design intent of the
@@ -1119,12 +1124,29 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
             _record_refusal(decision, backstop.get("refusal_code", "live_backstop"), breach, mode=mode, spec=spec)
             return
 
+    # IDEMPOTENCY: one submission per (station, date, bucket, side, cycle).
+    # Our key only -- the CLOB has no client-order-id (MarketOrderArgs'
+    # `metadata` is a signed bytes32, not a dedup key), so nothing sent changes.
+    order_key = None
+    if mode == "live" and cycle_ts:
+        order_key = storage.client_order_key("entry", decision.station_icao, decision.target_date,
+                                             decision.bucket_c, decision.side, cycle_ts)
+        try:
+            seen = storage.live_order_key_exists(order_key)
+        except Exception as exc:  # noqa: BLE001 - cannot prove it is new: do not send
+            print(f"[executor] LIVE: {label} idempotency check failed ({exc}) -- NOT submitting.")
+            return
+        if seen:
+            print(f"[executor] WARNING: LIVE {label} duplicate submission in cycle {cycle_ts} "
+                  f"(key {order_key}) -- already attempted, not sending again.")
+            return
+
     result = wallet_client.submit_order(spec, live=(mode == "live"))
 
     if mode == "live":
         _record_attempt("entry", decision.station_icao, spec, result,
                         target_date=decision.target_date, bucket_c=decision.bucket_c,
-                        side=decision.side)
+                        side=decision.side, client_order_key=order_key)
 
     if mode == "simulation":
         print(

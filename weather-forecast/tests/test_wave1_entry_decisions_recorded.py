@@ -80,7 +80,7 @@ def cycle(monkeypatch, temp_db):
     monkeypatch.setattr(market_client, "get_available_depth_usd", lambda token_id: 1000.0)
     monkeypatch.setattr(market_client, "estimate_slippage", lambda token_id, size_usd: 0.01)
 
-    def _open(decision):
+    def _open(decision, cycle_ts=None):
         seen["order"].append("open")
         seen["opened"].append(decision)
 
@@ -155,7 +155,7 @@ def test_decisions_are_identical_with_recording_on_and_off(cycle, monkeypatch):
 
 def test_config_sha_is_recorded_and_cached(cycle, temp_db, monkeypatch):
     calls = []
-    monkeypatch.setattr(config, "_current_git_sha", lambda: calls.append(1) or "abc123")
+    monkeypatch.setattr(config, "config_fingerprint", lambda mode=None: calls.append(1) or "abc123")
     monkeypatch.setattr(scheduler, "_config_sha_cache", {})
 
     scheduler._run_full_cycle(STATION, min_net_ev=0.15)

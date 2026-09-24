@@ -106,7 +106,9 @@ _config_sha_cache: Dict[str, Optional[str]] = {}
 def _config_sha() -> Optional[str]:
     if "sha" not in _config_sha_cache:
         try:
-            _config_sha_cache["sha"] = config._current_git_sha()
+            # git sha + dirty flag + hash of the effective mode (resolved by
+            # the CLI into executor.EXECUTION_MODE before run_forever primes this).
+            _config_sha_cache["sha"] = config.config_fingerprint(dict(executor.EXECUTION_MODE))
         except Exception:  # noqa: BLE001 -- provenance must never break a cycle
             _config_sha_cache["sha"] = None
     return _config_sha_cache["sha"]
@@ -577,7 +579,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                 # were already recorded.
                 primary_ok = True
                 for decision in entry_decisions:
-                    executor.open_position(decision)
+                    executor.open_position(decision, cycle_ts=cycle_ts)
             else:
                 print(f"[scheduler] {station_icao}: no opportunities clearing the {config.entry_bar_label(min_net_ev)} net EV threshold this cycle.")
                 primary_ok = True
