@@ -40,8 +40,17 @@ The EC2 box (`ubuntu@43.216.25.99`) has run daemon code `e31363d` since 2026-09-
 4. **Europe review P2 is DONE (`da3a5a1`).** `python cohort_monitor.py --by station|side|region` (read-only) prints held-to-settlement and as-traded P&L per group, net of entry fees. Results from the box on 2026-09-24:
    - All time: held +$467 vs as traded −$531 on $6,017 staked, so exits cost $998 (Asia $742, Europe $256, Americas $0). All of that exit cost predates 2026-09-02.
    - Since 2026-09-03 (no exits, so held == as traded): Americas +$220, Asia −$120, Europe −$191; NO −$116, YES +$24.
-   - So removing exits fixed the exit loss, but the entries are now losing outside the Americas. Americas' +$220 is mostly KATL (+$159); don't act on one station.
-   - Re-run `--by region --since 2026-09-03` at the ~10-04 checkpoint.
+   - So removing exits fixed the exit loss, but the entries are now losing outside the Americas.
+   - Per station since 09-03, profit and loss both come from a handful of stations:
+     - KATL +$159 and KLGA +$63.
+     - EDDM −$76, ZSPD −$71 and RKPK −$29.
+     - The other 26 stations net about −$140.
+   - Americas without KATL and KLGA is about −$3. Europe: 6 of 7 stations lost; only LFPB is positive (+$31). Asia traded far less than before (69 trades vs Europe's 124).
+   - Every station has at most 15 days since 09-03, so none of this is separable yet. KATL is also the one station where raw beats calibrated (see memory `regional-calibration-replay`). Don't act on one station.
+   - Candidate next step: check whether EDDM, ZSPD and RKPK should join `FORCE_COLLECTION_ONLY_STATIONS`, with a structural reason like RPLL's spread, not just a bad fortnight.
+   - Re-run `--by region --since 2026-09-03` and `--by station` at the ~10-04 checkpoint.
+   - To split by station within one region, build the `--station` list from `config.region_of`:
+     `PY=~/weather-forecast/.venv/bin/python; $PY cohort_monitor.py --by station --since 2026-09-03 $($PY -c 'import config; print(" ".join("--station "+s for s in sorted(config.STATIONS) if config.region_of(s)=="europe"))')`
 5. **DST end:** restart the daemon after 2026-10-25 01:00 UTC (EGLC) and after 2026-11-01 06:00 UTC (KLGA). The scheduler's offset groups are computed once, at boot.
 
 ## Gotchas
