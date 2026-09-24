@@ -353,9 +353,21 @@ def admission_edge(ev_result: EVResult) -> float:
     A station nothing has measured is not a station with a corrected
     probability, and refusing it would be a trading change nothing here scored.
     """
+    robust = _robust_edge(ev_result)
+    if config.ADMIT_ON_ROBUST_EDGE and robust is not None:
+        return robust
     if not config.ADMIT_ON_CALIBRATED_EDGE:
         return ev_result.raw_edge
     return _calibrated_or_raw_edge(ev_result)
+
+
+def _robust_edge(ev_result: EVResult) -> Optional[float]:
+    """GAP 4: p_robust - ask, signed in this side's own direction (p_robust
+    is already P(this side wins)). None when the row carries no p_robust."""
+    p_robust = getattr(ev_result, "p_robust", None)
+    if p_robust is None or ev_result.market_price is None:
+        return None
+    return p_robust - ev_result.market_price
 
 
 def sizing_edge(ev_result: EVResult) -> float:
@@ -383,7 +395,14 @@ def sizing_edge(ev_result: EVResult) -> float:
     # getattr, not attribute access: several callers and the backtest's parity
     # replica pass duck-typed EV stubs that predate these fields, and a sizing
     # function that raises on them would turn a missing optional into a dead
-    return _calibrated_or_raw_edge(ev_result)
+    edge = _calibrated_or_raw_edge(ev_result)
+    # GAP 4: never size past what P_robust justifies. min() rather than
+    # sizing on P_robust outright, so P3-6's calibrated sizing (and its tests)
+    # still hold whenever the robust edge is the larger one; flag off = P3-6.
+    robust = _robust_edge(ev_result)
+    if config.ADMIT_ON_ROBUST_EDGE and robust is not None and edge is not None:
+        return min(edge, robust)
+    return edge
 
 
 def deciding_numbers(ev_result: EVResult) -> dict:
@@ -409,6 +428,7 @@ def deciding_numbers(ev_result: EVResult) -> dict:
         "bias_c": getattr(est, "forecast_bias_c", None),
         "spread_source": getattr(ev_result, "spread_source", None),
         "forecast_fetched_at": getattr(est, "forecast_fetched_at", None),
+        **{k: getattr(ev_result, k, None) for k in ("p_robust", "lambda_hat", "lambda_se", "lambda_days")},
     }
 
 
@@ -1093,7 +1113,11 @@ def evaluate_entry(
         # when a station stops entering, and "edge 0.001 below minimum" against
         # a stored raw_edge of 0.132 is unreadable without the basis.
         basis_note = (
-            f" [bar applied to the calibrated edge: {_calibration_note(ev_result)}]"
+            f" [bar applied to the robust edge: p_robust={ev_result.p_robust:.3f}, lambda_robust "
+            f"from lambda_hat={ev_result.lambda_hat} se={ev_result.lambda_se} "
+            f"over {ev_result.lambda_days} day(s); {_calibration_note(ev_result)}]"
+            if config.ADMIT_ON_ROBUST_EDGE and _robust_edge(ev_result) is not None
+            else f" [bar applied to the calibrated edge: {_calibration_note(ev_result)}]"
             if gate_edge != raw_edge else ""
         )
         return _rejected(

@@ -255,6 +255,7 @@ def compute_ev_table(
     model_probs: Optional[Dict[int, float]] = None,
     execution_mode: Optional[str] = None,
     calibration: Optional[tuple] = None,
+    shrink: Optional[tuple] = None,
 ) -> List[EVResult]:
     """
     Core entry point. For every bucket with a token_map entry, compute
@@ -394,6 +395,28 @@ def compute_ev_table(
                 market_bid=bid,
                 estimate=estimate,
             ))
+
+    # GAP 4: P_robust on every priced row, from the day's pooled lambda
+    # (probability_calibration.shrink_for_day, fitted on normalised YES asks).
+    # ADMISSION anchors each side on its OWN raw ask:
+    #     p_robust = ask_side + lambda_robust * (p_side - ask_side)
+    # so lambda_robust 0 means exactly "trade at market": zero edge before
+    # fees on both sides. (Anchoring NO on 1 - the normalised YES ask made NO
+    # on favourites look cheap at lambda 0, because normalising moves the
+    # overround's mass onto the long shots.) A book with any unpriced YES
+    # bucket keeps p_robust = the own ask: fail closed. None `shrink` =
+    # caller did not ask.
+    if shrink is not None:
+        lam_robust, lam_hat, lam_se, lam_days = shrink
+        full_book = all(quotes[b].yes_price is not None for b in token_map)
+        for r in results:
+            if r.market_price is None:
+                continue
+            r.p_robust = (
+                r.market_price + lam_robust * (r.model_prob - r.market_price)
+                if full_book else r.market_price
+            )
+            r.lambda_hat, r.lambda_se, r.lambda_days = lam_hat, lam_se, lam_days
 
     return results
 
@@ -578,6 +601,17 @@ def _calibration_for(station_icao: str, target_date):
         return None
 
 
+def _shrink_for(target_date) -> tuple:
+    """The day's pooled shrink fit; any failure fails CLOSED (lambda 0)."""
+    import probability_calibration
+
+    try:
+        return probability_calibration.shrink_for_day(target_date)
+    except Exception as exc:  # noqa: BLE001 -- must not take a cycle down
+        print(f"[ev_engine] shrink fit unavailable for {target_date}: {exc} -- lambda_robust 0.")
+        return probability_calibration.SHRINK_FAIL_CLOSED
+
+
 def run_for_station_with_map(
     estimate: CalibratedEstimate,
     trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
@@ -681,6 +715,7 @@ def run_for_station_with_map(
         # cycle, and degrades to "uncalibrated" -- the pre-P3-6 behaviour,
         # double buffer included -- on any failure.
         calibration=_calibration_for(station.icao, estimate.target_date),
+        shrink=_shrink_for(estimate.target_date),
     )
     return StationEVRun(
         station_icao=station.icao,
@@ -962,6 +997,7 @@ def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
         try:
             storage.save_ev_snapshot_rows(
                 station_icao, results[0].target_date, payload["generated_at"], results,
+                config_sha=config.cached_git_sha(),
             )
         except Exception as exc:
             # Broader than the OSError above on purpose. The file write can

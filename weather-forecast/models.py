@@ -494,6 +494,16 @@ class EVResult:
     # buffer.
     calibrated_prob: Optional[float] = None
     calibration_source: str = "uncalibrated"
+    # GAP 4: shrink toward the ask. p_robust = ask + lambda_robust *
+    # (model_prob - ask), both for THIS side, raw ask (not normalised).
+    # lambda_* describe the pooled fit it came from
+    # (probability_calibration.shrink_for_day). None = this caller did not
+    # compute it (tests, the replay), never "failed": a failed fit is
+    # lambda_robust 0, i.e. p_robust = the ask, zero edge.
+    p_robust: Optional[float] = None
+    lambda_hat: Optional[float] = None
+    lambda_se: Optional[float] = None
+    lambda_days: Optional[int] = None
     notes: str = ""
     # GAP 8: the estimate this row was priced from, carried so the decision
     # can record its inputs. Out of repr/eq so EV-table comparisons are unchanged.
@@ -553,6 +563,11 @@ class EntryDecision:
     calibration_source: str = "uncalibrated"
     admission_edge: Optional[float] = None
     sizing_edge: Optional[float] = None
+    # GAP 4: copied off EVResult by deciding_numbers(); see EVResult.p_robust.
+    p_robust: Optional[float] = None
+    lambda_hat: Optional[float] = None
+    lambda_se: Optional[float] = None
+    lambda_days: Optional[int] = None
     # recommended_size_usd BEFORE the live $1.00 clamp and before the
     # exchange 5-share bump -- what the paper path would have staked. None
     # when nothing was sized (a pre-sizing veto).
