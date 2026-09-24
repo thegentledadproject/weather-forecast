@@ -119,7 +119,7 @@ def live_cycle(tmp_path, monkeypatch):
     storage.migrate()
     opened = []
     monkeypatch.setattr(executor, "EXECUTION_MODE", {icao: ("live" if icao == STATION else "paper") for icao in config.STATIONS})
-    monkeypatch.setattr(executor, "open_position", lambda d: opened.append(d))
+    monkeypatch.setattr(executor, "open_position", lambda d, cycle_ts=None: opened.append(d))
     monkeypatch.setattr(scheduler.pipeline, "run",
                         lambda station_icao, forecast_bias_c=0.0: {"estimate": SimpleNamespace(inputs_used=["open_meteo_ecmwf"])})
     monkeypatch.setattr(scheduler.pipeline, "print_summary", lambda r: None)
@@ -213,7 +213,7 @@ def test_shadow_still_records_when_order_placement_fails(live_cycle, monkeypatch
     """
     calls = []
 
-    def _flaky_open(d):
+    def _flaky_open(d, cycle_ts=None):
         calls.append(d)
         if len(calls) == 2:
             raise RuntimeError("CLOB order failed")

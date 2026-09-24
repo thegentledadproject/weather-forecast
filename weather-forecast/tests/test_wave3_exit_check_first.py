@@ -78,7 +78,7 @@ def cycle(monkeypatch, tmp_db):
     monkeypatch.setattr(storage, "record_entry_decisions",
                         lambda decisions, **kw: seen["order"].append("record") or real_record(decisions, **kw))
 
-    def _open(decision):
+    def _open(decision, cycle_ts=None):
         seen["order"].append("open")
         seen["breach"].append(executor._live_budget_breach(1.0, STATION))
 
