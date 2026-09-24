@@ -396,11 +396,19 @@ def deciding_numbers(ev_result: EVResult) -> dict:
     decided, not a recomputation that could drift. getattr for the
     duck-typed stubs the replay feeds, as _calibrated_or_raw_edge explains.
     """
+    est = getattr(ev_result, "estimate", None)
     return {
         "calibrated_prob": getattr(ev_result, "calibrated_prob", None),
         "calibration_source": getattr(ev_result, "calibration_source", probability_calibration.NO_TIER),
         "admission_edge": admission_edge(ev_result),
         "sizing_edge": sizing_edge(ev_result),
+        # GAP 8: the estimate the probability came from. None without one
+        # (replay stubs); spread_source is the tier the edge gate read.
+        "mu_c": getattr(est, "central_estimate_c", None),
+        "sd_c": getattr(est, "std_dev_c", None),
+        "bias_c": getattr(est, "forecast_bias_c", None),
+        "spread_source": getattr(ev_result, "spread_source", None),
+        "forecast_fetched_at": getattr(est, "forecast_fetched_at", None),
     }
 
 

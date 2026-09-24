@@ -15,6 +15,7 @@ sqlite3 (standard library)
 config.py, models.py (local)
 """
 
+import json
 import os
 import sqlite3
 import sys
@@ -316,6 +317,8 @@ ENTRY_DECISION_COLUMNS = (
     "raw_edge", "admission_edge", "sizing_edge", "net_ev_at_size",
     "kelly_size_preclamp_usd", "recommended_size_usd", "min_net_ev",
     "station_maturity", "config_sha",
+    # GAP 8: the estimate behind the decision; forecast_fetched_at is JSON.
+    "mu_c", "sd_c", "bias_c", "spread_source", "forecast_fetched_at",
 )
 
 
@@ -613,6 +616,15 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # GAP 8: the estimate behind each decision. ALTER-only so fresh and
+    # deployed databases take the same path; NULL on every earlier row.
+    existing_ed_columns = {r[1] for r in conn.execute("PRAGMA table_info(entry_decisions)")}
+    for column_name, column_type in (
+        ("mu_c", "REAL"), ("sd_c", "REAL"), ("bias_c", "REAL"),
+        ("spread_source", "TEXT"), ("forecast_fetched_at", "TEXT"),
+    ):
+        if column_name not in existing_ed_columns:
+            conn.execute(f"ALTER TABLE entry_decisions ADD COLUMN {column_name} {column_type}")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_ed_cycle ON entry_decisions(cycle_ts)")
     # The shadow-twin pairing key (spec 1d): entry_decisions(book='paper_shadow')
     # joined to positions(execution_mode='live') on (station, date, bucket, side).
@@ -1705,6 +1717,8 @@ def record_entry_decisions(
                     f"field -- ENTRY_DECISION_COLUMNS and EntryDecision have drifted"
                 )
             row[col] = getattr(d, col)
+        if isinstance(row["forecast_fetched_at"], list):
+            row["forecast_fetched_at"] = json.dumps(row["forecast_fetched_at"])
         missing = [c for c in ENTRY_DECISION_COLUMNS if c not in row]
         if missing:
             raise ValueError(f"entry_decisions row missing column(s): {missing}")

@@ -220,6 +220,9 @@ def test_record_and_load_round_trip(temp_db):
         "net_ev_at_size": 0.05, "kelly_size_preclamp_usd": 20.0,
         "recommended_size_usd": 12.5, "min_net_ev": 0.15,
         "station_maturity": "mature", "config_sha": "deadbeef",
+        # GAP 8: not set on this hand-built decision
+        "mu_c": None, "sd_c": None, "bias_c": None, "spread_source": None,
+        "forecast_fetched_at": None,
     }
     assert set(expected_full) == set(storage.ENTRY_DECISION_COLUMNS)
     for col, val in expected_full.items():
@@ -235,6 +238,8 @@ def test_record_and_load_round_trip(temp_db):
         "net_ev_at_size": 0.2, "kelly_size_preclamp_usd": None,
         "recommended_size_usd": 5.0, "min_net_ev": None,
         "station_maturity": "exploratory", "config_sha": "deadbeef",
+        "mu_c": None, "sd_c": None, "bias_c": None, "spread_source": None,
+        "forecast_fetched_at": None,
     }
     assert set(expected_defaults) == set(storage.ENTRY_DECISION_COLUMNS)
     for col, val in expected_defaults.items():

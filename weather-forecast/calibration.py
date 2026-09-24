@@ -731,4 +731,5 @@ def calibrate(
         notes="; ".join(notes),
         spread_source=spread_source,
         forecast_bias_c=applied_bias,
+        forecast_fetched_at=[f.fetched_at for f in forecasts if f.max_temp_c is not None],
     )
