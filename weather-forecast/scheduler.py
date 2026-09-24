@@ -571,7 +571,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                 # were already recorded.
                 primary_ok = True
                 for decision in entry_decisions:
-                    executor.open_position(decision)
+                    executor.open_position(decision, cycle_ts=cycle_ts)
             else:
                 print(f"[scheduler] {station_icao}: no opportunities clearing the {config.entry_bar_label(min_net_ev)} net EV threshold this cycle.")
                 primary_ok = True

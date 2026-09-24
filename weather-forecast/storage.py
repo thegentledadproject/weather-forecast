@@ -516,6 +516,15 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         """
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_loa_ts ON live_order_attempts(kind, ts)")
+    # IDEMPOTENCY (gap audit 2026-09-24, Track B): a deterministic key per
+    # (kind, station, date, bucket, side, cycle, attempt) -- see
+    # client_order_key(). NULL on every earlier row and on refusals/exits, and
+    # SQLite's UNIQUE admits any number of NULLs, so adding it cannot collide
+    # with history (the 2026-09-24 snapshot had 0 duplicate submissions anyway).
+    if "client_order_key" not in {r[1] for r in conn.execute("PRAGMA table_info(live_order_attempts)")}:
+        conn.execute("ALTER TABLE live_order_attempts ADD COLUMN client_order_key TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_loa_client_key "
+                 "ON live_order_attempts(client_order_key)")
 
     # WAVE 1: every EntryDecision, every cycle, whether or not it traded.
     # `positions` records what was DONE; this records what was DECIDED and
@@ -1480,9 +1489,13 @@ def record_live_order_attempt(
     limit_price: Optional[float] = None,
     order_id: Optional[str] = None,
     detail: str = "",
-) -> None:
+    client_order_key: Optional[str] = None,
+) -> bool:
     """
     Append one real-money order SUBMISSION to the audit trail.
+
+    Returns False, with a warning and no row, when client_order_key is
+    already recorded -- the UNIQUE index makes a repeat a no-op.
 
     WHY THIS TABLE EXISTS SEPARATELY FROM `positions`. An unfilled FOK
     writes no position, deliberately -- a stored position with no shares
@@ -1502,27 +1515,50 @@ def record_live_order_attempt(
     entries feed the daily cap (an exit must never be rate-limited), but
     both are recorded because both are real requests to the exchange.
     """
+    try:
+        with _db() as conn:
+            conn.execute(
+                "INSERT INTO live_order_attempts "
+                "(ts, kind, station_icao, target_date, bucket_c, side, notional_usd, "
+                " size_shares, limit_price, outcome, order_id, detail, client_order_key) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    kind,
+                    station_icao,
+                    target_date.isoformat() if hasattr(target_date, "isoformat") else (target_date or ""),
+                    bucket_c,
+                    side,
+                    notional_usd,
+                    size_shares,
+                    limit_price,
+                    outcome,
+                    order_id,
+                    detail[:500],
+                    client_order_key,
+                ),
+            )
+    except sqlite3.IntegrityError:
+        print(f"[storage] WARNING: duplicate live order attempt {client_order_key} "
+              f"({kind} {station_icao} {bucket_c} {side}) -- not recorded twice.")
+        return False
+    return True
+
+
+def client_order_key(kind: str, station_icao: str, target_date, bucket_c, side: str,
+                     cycle_ts: str, attempt: int = 0) -> str:
+    """Deterministic idempotency key for one live order submission (32 hex)."""
+    import hashlib
+
+    td = target_date.isoformat() if hasattr(target_date, "isoformat") else str(target_date)
+    raw = "|".join((kind, station_icao, td, str(bucket_c), side, cycle_ts, str(attempt)))
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
+
+
+def live_order_key_exists(key: str) -> bool:
     with _db() as conn:
-        conn.execute(
-            "INSERT INTO live_order_attempts "
-            "(ts, kind, station_icao, target_date, bucket_c, side, notional_usd, "
-            " size_shares, limit_price, outcome, order_id, detail) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                datetime.now(timezone.utc).isoformat(),
-                kind,
-                station_icao,
-                target_date.isoformat() if hasattr(target_date, "isoformat") else (target_date or ""),
-                bucket_c,
-                side,
-                notional_usd,
-                size_shares,
-                limit_price,
-                outcome,
-                order_id,
-                detail[:500],
-            ),
-        )
+        return conn.execute("SELECT 1 FROM live_order_attempts WHERE client_order_key = ?",
+                            (key,)).fetchone() is not None
 
 
 def count_live_order_attempts(
@@ -1580,12 +1616,13 @@ def load_live_order_attempts(limit: int = 50) -> List[dict]:
     with _db() as conn:
         rows = conn.execute(
             "SELECT ts, kind, station_icao, target_date, bucket_c, side, notional_usd, "
-            "       size_shares, limit_price, outcome, order_id, detail "
-            "FROM live_order_attempts ORDER BY ts DESC LIMIT ?",
+            "       size_shares, limit_price, outcome, order_id, detail, client_order_key "
+            "FROM live_order_attempts ORDER BY ts DESC, rowid DESC LIMIT ?",
             (limit,),
         ).fetchall()
     keys = ("ts", "kind", "station_icao", "target_date", "bucket_c", "side",
-            "notional_usd", "size_shares", "limit_price", "outcome", "order_id", "detail")
+            "notional_usd", "size_shares", "limit_price", "outcome", "order_id", "detail",
+            "client_order_key")
     return [dict(zip(keys, r)) for r in rows]
 
 

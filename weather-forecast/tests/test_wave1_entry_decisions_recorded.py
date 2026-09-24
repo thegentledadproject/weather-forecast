@@ -79,7 +79,7 @@ def cycle(monkeypatch, temp_db):
     monkeypatch.setattr(market_client, "get_available_depth_usd", lambda token_id: 1000.0)
     monkeypatch.setattr(market_client, "estimate_slippage", lambda token_id, size_usd: 0.01)
 
-    def _open(decision):
+    def _open(decision, cycle_ts=None):
         seen["order"].append("open")
         seen["opened"].append(decision)
 
