@@ -63,7 +63,7 @@ def cycle(monkeypatch, tmp_db):
     ev_run = ev_engine.StationEVRun(
         station_icao=STATION, target_date=TARGET,
         token_map={b: {"yes_token_id": f"y{b}", "no_token_id": f"n{b}"} for b in (31, 32, 33)},
-        bucket_min_c=31, bucket_max_c=33, ev_results=[_ev(32)],
+        bucket_min_c=31, bucket_max_c=33, ev_results=[_ev(32)], contract_status="VALID",
     )
     monkeypatch.setattr(ev_engine, "run_for_station_with_map", lambda estimate, **kw: ev_run)
     monkeypatch.setattr(entry_manager, "forecast_bias_stats", lambda icao: (0.1, 20, 0.1))

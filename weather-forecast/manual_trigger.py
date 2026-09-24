@@ -222,6 +222,17 @@ def main():
     if not token_map:
         print(f"ERROR: no event/markets discovered for {args.station} on {target_date}.")
         return 1
+    # GAP 7: not a model gate either. An operator order on a re-pointed
+    # contract is a bet on the wrong thermometer, whatever the operator thinks.
+    import contract_rules
+    slug = market_discovery.build_event_slug(station, target_date)
+    contract_status, contract_reasons = contract_rules.evaluate(
+        station, target_date, market_discovery.last_fetched_event(slug), slug=slug,
+    )
+    if contract_status != contract_rules.VALID:
+        print(f"ERROR: market rules check {contract_status} ({', '.join(contract_reasons)}) "
+              f"for {args.station} {target_date} -- refusing to open.")
+        return 1
     if args.bucket not in token_map:
         print(f"ERROR: bucket {args.bucket}C not in the discovered event. "
               f"Found: {sorted(token_map)}")

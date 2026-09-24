@@ -129,6 +129,7 @@ def live_cycle(tmp_path, monkeypatch):
     ev_run = ev_engine.StationEVRun(
         station_icao=STATION, target_date=TARGET, token_map=token_map,
         bucket_min_c=31, bucket_max_c=33, ev_results=[_ev(32), _ev(33, model_prob=0.95)],  # 33: veto 0a
+        contract_status="VALID",
     )
     monkeypatch.setattr(ev_engine, "run_for_station_with_map", lambda estimate, **kw: ev_run)
     monkeypatch.setattr(entry_manager, "forecast_bias_stats", lambda icao: (0.1, 20, 0.1))
