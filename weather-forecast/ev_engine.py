@@ -255,6 +255,7 @@ def compute_ev_table(
     model_probs: Optional[Dict[int, float]] = None,
     execution_mode: Optional[str] = None,
     calibration: Optional[tuple] = None,
+    shrink: Optional[tuple] = None,
 ) -> List[EVResult]:
     """
     Core entry point. For every bucket with a token_map entry, compute
@@ -392,6 +393,29 @@ def compute_ev_table(
                 spread_source=estimate.spread_source,
                 market_bid=bid,
             ))
+
+    # GAP 4: P_robust on every priced row, from the day's pooled lambda
+    # (probability_calibration.shrink_for_day). YES = m + lambda (p - m) with
+    # m the YES ask normalised over this book; NO = 1 - that. A book with any
+    # unpriced YES bucket cannot be normalised, so p_robust = the row's own
+    # ask: zero edge, fail closed. None `shrink` = caller did not ask.
+    if shrink is not None:
+        import probability_calibration
+
+        lam_robust, lam_hat, lam_se, lam_days = shrink
+        q_yes = probability_calibration.robust_yes_probs(
+            {b: quotes[b].yes_price for b in token_map},
+            {b: model_probs.get(b, 0.0) for b in token_map},
+            lam_robust,
+        )
+        for r in results:
+            if r.market_price is None:
+                continue
+            if q_yes is None:
+                r.p_robust = r.market_price
+            else:
+                r.p_robust = q_yes[r.bucket_c] if r.side == "YES" else 1 - q_yes[r.bucket_c]
+            r.lambda_hat, r.lambda_se, r.lambda_days = lam_hat, lam_se, lam_days
 
     return results
 
@@ -576,6 +600,17 @@ def _calibration_for(station_icao: str, target_date):
         return None
 
 
+def _shrink_for(target_date) -> tuple:
+    """The day's pooled shrink fit; any failure fails CLOSED (lambda 0)."""
+    import probability_calibration
+
+    try:
+        return probability_calibration.shrink_for_day(target_date)
+    except Exception as exc:  # noqa: BLE001 -- must not take a cycle down
+        print(f"[ev_engine] shrink fit unavailable for {target_date}: {exc} -- lambda_robust 0.")
+        return probability_calibration.SHRINK_FAIL_CLOSED
+
+
 def run_for_station_with_map(
     estimate: CalibratedEstimate,
     trade_size_usd: float = DEFAULT_TRADE_SIZE_USD,
@@ -679,6 +714,7 @@ def run_for_station_with_map(
         # cycle, and degrades to "uncalibrated" -- the pre-P3-6 behaviour,
         # double buffer included -- on any failure.
         calibration=_calibration_for(station.icao, estimate.target_date),
+        shrink=_shrink_for(estimate.target_date),
     )
     return StationEVRun(
         station_icao=station.icao,

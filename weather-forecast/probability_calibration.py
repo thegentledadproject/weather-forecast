@@ -71,6 +71,8 @@ config.py (local)
 """
 
 import bisect
+import math
+from collections import defaultdict
 from datetime import date
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -316,6 +318,7 @@ def clear_cache() -> None:
     fitted."""
     _CACHE.clear()
     _COHORT_CACHE.clear()
+    _SHRINK_CACHE.clear()
 
 
 def calibration_for(station_icao: str, target_day: date, side: Optional[str] = None):
@@ -359,4 +362,123 @@ def calibration_for(station_icao: str, target_day: date, side: Optional[str] = N
         result = (None, NO_TIER, 0)
 
     _CACHE[key] = result
+    return result
+
+
+# ---------------------------------------------------------------------------
+# GAP 4: shrink toward the ask (P_robust)
+# ---------------------------------------------------------------------------
+#
+# The map above is fitted on tickets the book BOUGHT, so it moves whenever the
+# gate moves and stops learning when approvals fall to zero (gap audit #4).
+# This fit uses EVERY settled candidate instead, and asks one question: how
+# much of the model's disagreement with the market is real?
+#
+#     q = m + lambda * (p - m)
+#
+# m = the bucket's YES ask normalised over the station-day's listed buckets,
+# p = the raw model probability. lambda = 0 says "the ask is the forecast";
+# 1 says "the model is". Least squares on the outcome, pooled over every
+# station, one number:
+#
+#     A_d = sum over date d of (o - m)(p - m),   B_d = sum of (p - m)^2
+#     lambda_hat = sum A_d / sum B_d
+#     SE = sqrt(sum_d (A_d - lambda_hat B_d)^2) / sum B_d   (date-clustered:
+#          a day's buckets share one weather outcome, so they are one draw)
+#     lambda_robust = clamp(lambda_hat - 1.645 SE, 0, 1)
+#
+# Walk-forward on the production snapshot (2026-09-04..23): the ask was the
+# best forecaster, this tied it, and lambda_robust has been 0 since
+# 2026-09-08 -- so admitting on it admits ~nothing today. Accepted by the
+# user: an edge that is not measurably there is not traded.
+
+SHRINK_Z = 1.645
+SHRINK_FAIL_CLOSED = (0.0, None, None, 0)
+
+# {day: (lambda_robust, lambda_hat, se, n_days)}; successes only.
+_SHRINK_CACHE: Dict[date, tuple] = {}
+
+
+def fit_shrink(points, min_days: Optional[int] = None) -> tuple:
+    """
+    (lambda_robust, lambda_hat, se, n_days) from (date, outcome, m, p) points.
+    Zero model-vs-ask variance -> (0, None, None, n). Fewer than
+    config.SHRINK_MIN_FIT_DAYS dates -> the estimate is reported but
+    lambda_robust is 0: a clustered SE on a handful of clusters is not a
+    bound.
+    """
+    if min_days is None:
+        min_days = config.SHRINK_MIN_FIT_DAYS
+    a, b = defaultdict(float), defaultdict(float)
+    for d, o, m, p in points:
+        a[d] += (o - m) * (p - m)
+        b[d] += (p - m) ** 2
+    sb = sum(b.values())
+    if sb <= 0:
+        return 0.0, None, None, len(a)
+    lam = sum(a.values()) / sb
+    se = math.sqrt(sum((a[d] - lam * b[d]) ** 2 for d in a)) / sb
+    if len(a) < min_days:
+        return 0.0, lam, se, len(a)
+    return min(1.0, max(0.0, lam - SHRINK_Z * se)), lam, se, len(a)
+
+
+def shrink_points(rows) -> List[tuple]:
+    """
+    (date, outcome, m_norm, p) per YES row of storage.load_shrink_fit_rows(),
+    keeping only station-days where EVERY listed bucket has a YES ask and a
+    model probability (a partial book has nothing to normalise against).
+    """
+    by_day = defaultdict(list)
+    for r in rows:
+        by_day[(r["station_icao"], r["target_date"])].append(r)
+    out = []
+    for (_st, td), rs in by_day.items():
+        if any(r["market_price"] is None or r["model_prob"] is None for r in rs):
+            continue
+        total = sum(r["market_price"] for r in rs)
+        if total <= 0:
+            continue
+        d = date.fromisoformat(td)
+        for r in rs:
+            o = 1.0 if r["bucket_c"] == r["settled_bucket_c"] else 0.0
+            out.append((d, o, r["market_price"] / total, r["model_prob"]))
+    return out
+
+
+def robust_yes_probs(yes_asks: Dict[int, Optional[float]], model_yes: Dict[int, float],
+                     lam: float) -> Optional[Dict[int, float]]:
+    """{bucket: m + lam (p - m)} with m the normalised YES ask, or None when
+    any listed bucket is unpriced (the caller then fails closed)."""
+    if not yes_asks or any(v is None for v in yes_asks.values()):
+        return None
+    total = sum(yes_asks.values())
+    if total <= 0:
+        return None
+    return {
+        b: (ask / total) + lam * (model_yes[b] - ask / total)
+        for b, ask in yes_asks.items()
+    }
+
+
+def shrink_for_day(day: date) -> tuple:
+    """
+    (lambda_robust, lambda_hat, se, n_days) fitted on settled station-days
+    strictly before `day`. Cached per day like the map; a FAILURE is returned
+    uncached (Wave 2, 2d) and fails CLOSED: lambda_robust 0, so P_robust is
+    the ask and no edge survives.
+    """
+    if day in _SHRINK_CACHE:
+        return _SHRINK_CACHE[day]
+    try:
+        import storage  # lazy: storage is heavy and tests stub it
+
+        result = fit_shrink(shrink_points(storage.load_shrink_fit_rows(day)))
+    except Exception as exc:  # noqa: BLE001 -- must not take the entry path down
+        print(
+            f"[probability_calibration] shrink fit failed for {day} ({exc}) -- "
+            f"lambda_robust 0 (admit nothing on model edge); not cached, the next cycle retries."
+        )
+        return SHRINK_FAIL_CLOSED
+    _SHRINK_CACHE[day] = result
     return result

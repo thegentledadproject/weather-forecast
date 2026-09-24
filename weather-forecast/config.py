@@ -2276,6 +2276,25 @@ ADMIT_ON_CALIBRATED_EDGE = True
 # [start, end) -- the primary entry window in SCHEDULE_WINDOWS.
 SHRINK_FIT_WINDOW_LOCAL = (5, 8)
 
+# GAP 4 (2026-09-24, user decision: switch now). Veto 0a2 AND the final
+# net-EV bar read P_robust = m + lambda_robust * (p - m) instead of the
+# calibrated probability; Kelly sizes on min(calibrated edge, robust edge).
+# See probability_calibration's "shrink toward the ask" block for the fit.
+#
+# PRECEDENCE: this flag wins over ADMIT_ON_CALIBRATED_EDGE whenever the EV
+# row carries p_robust (production always stamps it; a failed fit stamps
+# lambda 0, i.e. p_robust = the ask). A row without it -- tests, the replay,
+# which builds no fit -- falls back to ADMIT_ON_CALIBRATED_EDGE's rule. The
+# calibrated map is still computed and stored beside it for comparison.
+#
+# Walk-forward (scratchpad step1): lambda_robust has been 0 since 2026-09-08,
+# so this admits ~nothing today. False restores the calibrated rule exactly.
+ADMIT_ON_ROBUST_EDGE = True
+
+# Fewer distinct settled dates than this -> lambda_robust 0 (a clustered SE
+# on a handful of clusters is not a lower bound). Not tuned: a fortnight.
+SHRINK_MIN_FIT_DAYS = 14
+
 # WHICH QUANTITY THE ADMISSION BAR IS KEYED ON. Ships "ratio", which is what
 # this book has always run: net_ev_per_dollar >= min_net_ev, where
 # net_ev_per_dollar = (raw_edge / price) - slippage - fee. "per_share" tests
