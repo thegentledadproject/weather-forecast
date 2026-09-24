@@ -400,6 +400,8 @@ def _deterministic_maturity(monkeypatch):
     # The live fixture (WSSS) also needs the redemption lock open. Tests
     # about that lock set it back to None explicitly (test_live_rearm_gate).
     monkeypatch.setattr(config, "REDEMPTION_PROVEN_TX", "0xtest-fixture")
+    # No test may reach ntfy.sh; tests of alerts.py set the topic themselves.
+    monkeypatch.delenv("NTFY_TOPIC", raising=False)
 
 
 @pytest.fixture(scope="session", autouse=True)

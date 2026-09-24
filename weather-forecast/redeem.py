@@ -266,9 +266,16 @@ def execute_one(
     section 6/7 of the design for what each one means and why.
     """
     amount_base_units = round(item.size_shares * 1_000_000)
-    redeem_calldata = onchain_client.encode_redeem_positions(
-        item.condition_id, [amount_base_units],
-    )
+    # NegRiskAdapter batch-transfers positionIds(conditionId) = [yesId, noId]
+    # with these amounts, so the array is [yes, no]. The old one-element
+    # array reverted on the length mismatch (gap audit 2026-09-24, gap 2).
+    if item.side == "YES":
+        amounts = [amount_base_units, 0]
+    elif item.side == "NO":
+        amounts = [0, amount_base_units]
+    else:
+        raise ValueError(f"unknown side {item.side!r} for {_bucket_label(item)}")
+    redeem_calldata = onchain_client.encode_redeem_positions(item.condition_id, amounts)
     calls = [(neg_risk_adapter, 0, redeem_calldata)]
 
     proxy_nonce = onchain_client.get_nonce(funder, rpc_url)

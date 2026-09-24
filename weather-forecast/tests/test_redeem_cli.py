@@ -28,10 +28,10 @@ RPC_URL = "https://example-polygon-rpc.test"
 PRIVATE_KEY = "0x" + "42" * 32
 
 
-def _item(station="WSSS", shares=5.0, is_winner=False):
+def _item(station="WSSS", shares=5.0, is_winner=False, side="YES"):
     return RedeemableItem(
         token_id="12345", condition_id=b"\xaa" * 32, station_icao=station,
-        target_date=date(2026, 8, 28), bucket_c=32, side="YES",
+        target_date=date(2026, 8, 28), bucket_c=32, side=side,
         size_shares=shares, is_winner=is_winner, value_usd=(shares if is_winner else 0.0),
     )
 
@@ -178,7 +178,34 @@ class TestSuccessfulRedemption:
 
         redeem.execute_one(**_execute_kwargs(_item(shares=5.138885)))
 
-        assert captured["amounts"] == [5138885]
+        assert captured["amounts"] == [5138885, 0]
+
+    @pytest.mark.parametrize("side,expected", [("YES", [5000000, 0]), ("NO", [0, 5000000])])
+    def test_amounts_array_has_one_slot_per_outcome(self, monkeypatch, side, expected):
+        """
+        NegRiskAdapter.redeemPositions batch-transfers positionIds(conditionId)
+        = [yesId, noId] with `amounts`, so amounts must be [yes, no]. A
+        one-element array reverts on the length mismatch.
+        """
+        import eth_abi
+        _common(monkeypatch)
+        captured = {}
+        real_encode_execute = onchain_client.encode_execute
+        monkeypatch.setattr(onchain_client, "encode_execute",
+                            lambda **kw: captured.update(kw) or real_encode_execute(**kw))
+
+        redeem.execute_one(**_execute_kwargs(_item(shares=5.0, side=side)))
+
+        data = captured["calls"][0][2]
+        condition_id, amounts = eth_abi.decode(
+            ["bytes32", "uint256[]"], data[len(onchain_client.REDEEM_POSITIONS_SELECTOR):])
+        assert condition_id == b"\xaa" * 32
+        assert list(amounts) == expected
+
+    def test_an_unknown_side_is_refused_before_anything_is_signed(self, monkeypatch):
+        _common(monkeypatch)
+        with pytest.raises(ValueError):
+            redeem.execute_one(**_execute_kwargs(_item(side="MAYBE")))
 
 
 class TestPendingReceipt:

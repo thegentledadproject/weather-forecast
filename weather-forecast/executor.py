@@ -66,6 +66,7 @@ from models import Position, ExitDecision, EntryDecision
 import storage
 import risk_manager
 import config
+import alerts
 import bucket_axis
 from clients import market_client, wallet_client
 
@@ -1252,7 +1253,7 @@ def close_position(
         # exactly, so a suffix on decision.reason itself would silently break
         # both. None (every non-stop_loss exit) adds nothing here.
         basis_note = f"; basis={decision.stop_basis}" if decision.stop_basis else ""
-        storage.close_position(
+        changed = storage.close_position(
             position_id=position.position_id,
             exit_price=exit_price,
             exit_time=exit_time,
@@ -1264,6 +1265,17 @@ def close_position(
             # than recomputed, so the recorded trigger is the one that fired.
             trigger_price=getattr(decision, "trigger_price", None),
         )
+        if not changed:
+            # The first close's exit price stands; this one is dropped. A live
+            # sell that reaches here DID trade -- the order log has it.
+            print(
+                f"[executor] WARNING: {position.position_id} was already closed (or has no "
+                f"row) -- this {status} close at {exit_price:.4f} ({reason_tag}) was NOT "
+                f"recorded; the first close's exit price stands."
+            )
+            if mode == "live":
+                alerts.send("LIVE double close", f"{position.position_id}: second {status} "
+                            f"close at {exit_price:.4f} not recorded", priority="high")
         # A closed position cannot fail an exit again, so its unfilled-exit
         # streak must not outlive it. Cleared HERE rather than on the fill
         # branch because this is the one place every mode's close is written

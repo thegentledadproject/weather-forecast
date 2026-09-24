@@ -94,6 +94,7 @@ backtest/resolution.py (local) -- for the settlement-source fallback
 from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 
+import alerts
 import config
 import storage
 import risk_manager
@@ -595,6 +596,7 @@ def _close_as_resolved(
     confirmed_price: float,
     market_closed: Optional[bool],
     basis: Optional[str] = None,
+    exchange_pays: Optional[float] = None,
 ) -> ExitDecision:
     """
     Close a position whose market has resolved. Deliberately its own code
@@ -628,11 +630,32 @@ def _close_as_resolved(
         f"(gamma_closed={market_closed}, {where}) -- closing at "
         f"{exit_price:.1f} as market_resolved, pnl={pnl_pct:+.1%}. This is NOT a stop-loss."
     )
+    exit_reason = "market_resolved"
+    # CROSS-CHECK ONLY (gap audit 2026-09-24, gap 2). Our answer is still the
+    # one booked; a disagreement means one of the two records is wrong, and a
+    # human has to find out which before the P&L -- or a redemption -- is
+    # trusted.
+    if exchange_pays is not None and exchange_pays != exit_price:
+        exit_reason = (
+            f"market_resolved SETTLEMENT_MISMATCH: booked {exit_price:.1f}, "
+            f"exchange says {exchange_pays:.1f}"
+        )
+        print(
+            f"[position_manager] !!! SETTLEMENT_MISMATCH !!! {position.position_id}: we booked "
+            f"{exit_price:.1f} but the exchange says this {position.side} pays {exchange_pays:.1f}. "
+            f"Our answer stands; CHECK BY HAND ({where})."
+        )
+        alerts.send(
+            "SETTLEMENT_MISMATCH",
+            f"{position.position_id} ({position.execution_mode}): booked {exit_price:.1f}, "
+            f"exchange says {exchange_pays:.1f}",
+            priority="high",
+        )
     executor.close_position(
         position,
         decision,
         status="closed_resolution",
-        exit_reason="market_resolved",
+        exit_reason=exit_reason,
     )
     _forget_position(position.position_id)
     return decision
@@ -761,6 +784,32 @@ def _book_basis_prefix(book_quote: Optional[float]) -> str:
     )
 
 
+def _exchange_pays(position: Position, book_quote: Optional[float]) -> Optional[float]:
+    """
+    What the EXCHANGE says this position pays -- 1.0, 0.0, or None when it
+    has not said. The book's quote when it is decisive (the same 0.90/0.10
+    thresholds bucket_bias.settled_bucket uses), else the recorded
+    settlement, which is the exchange's own answer once the book is unseeded.
+    A cross-check input only: never used to decide the payout.
+    """
+    if book_quote is not None:
+        if book_quote >= 0.90:
+            return 1.0
+        if book_quote <= 0.10:
+            return 0.0
+        return None
+    try:
+        record = storage.load_settled_buckets(position.station_icao).get(position.target_date)
+    except Exception:  # noqa: BLE001 - no exchange answer, not a mismatch
+        return None
+    if record is None:
+        return None
+    winning_bucket, bucket_min, bucket_max, *_ = record
+    if not (bucket_min <= position.bucket_c <= bucket_max):
+        return None
+    return settlement.resolution_exit_price(position.side, position.bucket_c, winning_bucket)
+
+
 def _close_from_recorded_settlement(
     position: Position, station, gamma_closed: Optional[bool],
     book_quote: Optional[float] = None,
@@ -835,7 +884,8 @@ def _close_from_recorded_settlement(
         f"settled from the MARKET's own resolution -> winning bucket {winning_bucket}C, "
         f"so {position.bucket_c}C {position.side} pays {exit_price:.1f}"
     )
-    return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)
+    return _close_as_resolved(position, exit_price, gamma_closed, basis=basis,
+                              exchange_pays=_exchange_pays(position, book_quote))
 
 
 def _close_from_settlement_source(
@@ -937,7 +987,8 @@ def _close_from_settlement_source(
         f"{axis.label(position.bucket_c, bucket_min, bucket_max)} "
         f"{position.side} pays {exit_price:.1f}"
     )
-    return _close_as_resolved(position, exit_price, gamma_closed, basis=basis)
+    return _close_as_resolved(position, exit_price, gamma_closed, basis=basis,
+                              exchange_pays=_exchange_pays(position, book_quote))
 
 
 def _close_resolved_market(
