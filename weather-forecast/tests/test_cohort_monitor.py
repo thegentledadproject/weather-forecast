@@ -535,3 +535,29 @@ def test_a_status_that_beat_holding_reports_a_negative_cost():
     ])
     cost = cohort_monitor.summarize(rows)["by_status"]["closed_trailing_stop"]["cost_usd"]
     assert cost < 0
+
+
+# ---------------------------------------------------------------------------
+# Held vs as-traded, split by group (europe-edge-review 2026-09-23, P2)
+# ---------------------------------------------------------------------------
+
+def test_the_breakdown_splits_held_and_as_traded_per_station_and_sums_to_the_pool():
+    day = date(2026, 8, 10)
+    # WSSS: YES on the winner, stopped at 0.20 -> held +$23.33, as traded -$3.33 gross.
+    # RCSS: YES on a loser, taken at 0.50 -> held -$10.00, as traded +$6.67 gross.
+    rows = _rows([
+        _position(station_icao="WSSS"),
+        _position(station_icao="RCSS", bucket_c=WINNING_BUCKET + 1,
+                  exit_price=0.50, status="closed_take_profit"),
+    ], _settled(day))
+    table = cohort_monitor.breakdown(rows, "station")
+    fee = {r["station_icao"]: cohort_monitor._entry_fee_usd(r) for r in rows}
+
+    assert table["WSSS"]["held_usd"] == pytest.approx(70 / 3 - fee["WSSS"])
+    assert table["WSSS"]["as_traded_usd"] == pytest.approx(-10 / 3 - fee["WSSS"])
+    assert table["RCSS"]["held_usd"] == pytest.approx(-10.0 - fee["RCSS"])
+    assert table["RCSS"]["as_traded_usd"] == pytest.approx(20 / 3 - fee["RCSS"])
+
+    pooled = cohort_monitor.summarize(rows)["scenarios"]
+    assert sum(c["held_usd"] for c in table.values()) == pytest.approx(pooled["held"]["pnl_usd_net"])
+    assert sum(c["as_traded_usd"] for c in table.values()) == pytest.approx(pooled["as_traded"]["pnl_usd_net"])

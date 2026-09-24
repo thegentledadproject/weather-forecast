@@ -532,6 +532,53 @@ def summarize(rows: Sequence[dict]) -> Optional[dict]:
     }
 
 
+BREAKDOWN_KEYS = {
+    "station": lambda row: row["station_icao"],
+    "side": lambda row: row["side"],
+    "region": lambda row: config.region_of(row["station_icao"]),
+}
+
+
+def breakdown(rows: Sequence[dict], by: str) -> Dict[str, dict]:
+    """
+    {group: {n, n_days, staked_usd, held_usd, as_traded_usd}}, net of entry fees.
+
+    ENTRY AND EXIT AS SEPARATE METRICS, per group (europe-edge-review
+    2026-09-23, P2). `held` is what the entries were worth at settlement;
+    `as_traded` is what the exits actually booked. Their gap is the exit
+    policy's cost. The pooled summary cannot show this per station, where
+    one exit rule can hide a station whose entries were fine -- or the
+    reverse. No bootstrap here: a per-group CI on a few station-days is
+    noise, and summarize() already reports the pooled one.
+    """
+    key = BREAKDOWN_KEYS[by]
+    groups: Dict[str, List[dict]] = {}
+    for row in rows:
+        groups.setdefault(key(row), []).append(row)
+    out = {}
+    for name, group in sorted(groups.items()):
+        fee = sum(_entry_fee_usd(row) for row in group)
+        out[name] = {
+            "n": len(group),
+            "n_days": len(_clusters(group)),
+            "staked_usd": sum(row["size_usd"] for row in group),
+            "held_usd": _totals(group, "held")[0] - fee,
+            "as_traded_usd": _totals(group, "as_traded")[0] - fee,
+        }
+    return out
+
+
+def _print_breakdown(by: str, table: Dict[str, dict]) -> None:
+    print(f"\nheld vs as-traded by {by} (net of entry fees)")
+    print(f"  {by:<8} {'n':>5} {'days':>5} {'staked':>10} {'held':>10} {'as traded':>10} {'exit cost':>10}")
+    for name, cell in table.items():
+        print(
+            f"  {name:<8} {cell['n']:>5} {cell['n_days']:>5} {cell['staked_usd']:>10,.2f} "
+            f"{_fmt_usd(cell['held_usd']):>10} {_fmt_usd(cell['as_traded_usd']):>10} "
+            f"{_fmt_usd(cell['held_usd'] - cell['as_traded_usd']):>10}"
+        )
+
+
 def windows(
     rows: Sequence[dict],
     as_of: Optional[date] = None,
@@ -741,9 +788,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--no-regime-split", action="store_true",
                         help="one pooled all-time block instead of one block per side of "
                              "config.REGIME_BOUNDARIES (the trailing windows are always pooled)")
+    parser.add_argument("--by", choices=sorted(BREAKDOWN_KEYS),
+                        help="print only the held-vs-as-traded table split by this key")
     args = parser.parse_args(argv)
 
-    since = date.fromisoformat(args.since) if args.since else None
+    since =date.fromisoformat(args.since) if args.since else None
     until = date.fromisoformat(args.until) if args.until else None
     as_of = date.fromisoformat(args.as_of) if args.as_of else None
     if args.reproduce:
@@ -754,6 +803,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("skipped:")
         for reason, count in sorted(skipped.items(), key=lambda kv: -kv[1]):
             print(f"  {count:>6}  {reason}")
+
+    if args.by:
+        _print_breakdown(args.by, breakdown(rows, args.by))
+        return 0
 
     if args.reproduce:
         summary = summarize(rows)
