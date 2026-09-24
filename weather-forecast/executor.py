@@ -622,7 +622,9 @@ def _record_attempt(kind, station_icao, spec, result, target_date=None,
     has already reached the exchange; the loud complaint is the right
     outcome, a traceback here is not.
     """
-    if result.filled:
+    if _outcome_unknown(result):
+        outcome = "unknown"
+    elif result.filled:
         outcome = "filled"
     elif result.submitted:
         outcome = "killed"
@@ -642,6 +644,29 @@ def _record_attempt(kind, station_icao, spec, result, target_date=None,
             f"{station_icao} ({outcome}): {exc}. The order itself is unaffected, but "
             f"LIVE_MAX_ORDERS_PER_DAY is now under-counting."
         )
+
+
+def _outcome_unknown(result) -> bool:
+    """
+    HONEST FILLS. The exchange may hold shares we cannot account for: either
+    wallet_client could not tell (result.unknown), or a "fill" arrived
+    without the price or share count that booking it needs. Never booked at
+    the limit / requested size -- that assumed a full fill at the worst price.
+    """
+    return bool(getattr(result, "unknown", False)) or (
+        result.filled and (result.fill_price is None or result.fill_shares is None)
+    )
+
+
+def _alert_unknown_order(kind: str, label: str, spec, result) -> None:
+    msg = (
+        f"{label} {kind}: {spec.describe()} -- order {result.order_id or 'unrecorded'}; "
+        f"{result.error or 'fill details missing'}. NOTHING BOOKED. Check the exchange; "
+        f"live entries on this token stay blocked until a live_order_attempts row with "
+        f"outcome='reconciled' is appended for it."
+    )
+    print(f"\n[ACTION NEEDED] LIVE ORDER OUTCOME UNKNOWN -- {msg}\n")
+    alerts.send("LIVE order outcome UNKNOWN", msg, priority="high")
 
 
 def _record_refusal(decision, code: str, message: str, *, mode: str, spec=None) -> None:
@@ -1122,6 +1147,16 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         print(f"[executor] {tag}: {label} resized -- {size_note}")
 
     if mode == "live":
+        unresolved = storage.has_unreconciled_unknown_attempt(
+            decision.station_icao, decision.target_date, decision.bucket_c, decision.side,
+        )
+        if unresolved is None or unresolved:
+            why = ("a previous live order on this token has an UNKNOWN outcome and has not been "
+                   "reconciled" if unresolved else
+                   "could not read the unknown-order ledger -- refusing to open blind")
+            print(f"[executor] LIVE: {label} entry BLOCKED -- {why}")
+            _record_refusal(decision, "unknown_order_unreconciled", why, mode=mode, spec=spec)
+            return
         brake = _live_brake()
         if brake:
             code, why = brake
@@ -1183,6 +1218,10 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         ))
         return
 
+    if mode == "live" and _outcome_unknown(result):
+        _alert_unknown_order("entry", label, spec, result)
+        return
+
     if not result.filled:
         # NOTHING is written. An unfilled order means no shares exist, and a
         # stored "open" position with no shares behind it is a position the
@@ -1194,8 +1233,11 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         )
         return
 
-    fill_price = result.fill_price or spec.limit_price
-    fill_shares = result.fill_shares or spec.size_shares
+    # Both are set: _outcome_unknown() returned above when either was missing.
+    fill_price = result.fill_price
+    fill_shares = result.fill_shares
+    if result.error:  # e.g. price not reported -> booked at the limit, a bound
+        alerts.send("LIVE fill booked on a reconciled figure", f"{label}: {result.error}", priority="high")
     print(
         f"[executor] LIVE FILL: {label} {fill_shares:.2f} shares @ {fill_price:.4f} "
         f"= ${fill_price * fill_shares:.2f} (order {result.order_id}). REAL MONEY."
@@ -1462,6 +1504,13 @@ def _close_via_order_path(
             f"pnl={net_pnl_pct:+.1%} net ({fee_note})."
         )
         record("simulation", spec.expected_price)
+        return
+
+    if _outcome_unknown(result):
+        # Left OPEN: if it did sell, reconciliation reports db_only; if it did
+        # not, the next cycle retries. Recording a close we cannot prove is
+        # the one outcome that hides a real holding.
+        _alert_unknown_order("exit", label, spec, result)
         return
 
     if not result.filled:

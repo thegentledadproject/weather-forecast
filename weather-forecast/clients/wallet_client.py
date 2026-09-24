@@ -813,6 +813,56 @@ class OrderResult:
     fill_shares: Optional[float] = None
     raw: Optional[dict] = None
     error: str = ""
+    # HONEST FILLS: the exchange may or may not have filled this and nothing
+    # could tell. Never booked; executor records it UNKNOWN, alerts, and
+    # blocks the token until an operator reconciles it.
+    unknown: bool = False
+
+
+# A token-balance move at least this big (shares) is a fill, not noise.
+_FILL_DELTA_MIN_SHARES = 0.001
+
+
+def _balance_moved(client, spec: OrderSpec, before: Optional[float]) -> Optional[float]:
+    """
+    Shares this order moved according to the token balance (bought for a BUY,
+    sold for a SELL), or None if either read failed. Reuses _held_shares, the
+    same read reconcile_live_positions() trusts.
+    """
+    if before is None:
+        return None
+    after = _held_shares(client, spec.token_id)
+    if after is None:
+        return None
+    return (after - before) if spec.side == "BUY" else (before - after)
+
+
+def _reconciled_result(client, spec, before, *, order_id=None, raw=None, error="",
+                       fill_price=None, fill_shares=None) -> "OrderResult":
+    """
+    The fill as the EXCHANGE shows it, when the response did not say.
+
+    Shares come from the token-balance move. A move proves a fill; NO move
+    proves nothing (balances lag -- see _wait_for_balance), so it is UNKNOWN,
+    never "no fill". A price the response did not carry is booked at the
+    limit, the worst price a FOK can fill at; executor alerts on it.
+    """
+    moved = _balance_moved(client, spec, before) if fill_shares is None else fill_shares
+    if moved is None or moved < _FILL_DELTA_MIN_SHARES:
+        logger.error(
+            f"[wallet_client] order outcome UNKNOWN: {spec.describe()} -- {error or 'fill details missing'}; "
+            f"balance moved {moved}"
+        )
+        return OrderResult(submitted=True, filled=False, simulated=False, spec=spec,
+                           order_id=order_id, raw=raw, unknown=True,
+                           error=error or "fill details missing and the balance could not confirm a fill")
+    return OrderResult(
+        submitted=True, filled=True, simulated=False, spec=spec, order_id=order_id,
+        fill_price=fill_price if fill_price is not None else spec.limit_price,
+        fill_shares=moved, raw=raw,
+        error=(error + "; " if error else "") + (
+            "" if fill_price is not None else "fill price not reported -- booked at the limit (worst case)"),
+    )
 
 
 def submit_order(spec: OrderSpec, live: bool) -> OrderResult:
@@ -916,24 +966,38 @@ def submit_order(spec: OrderSpec, live: bool) -> OrderResult:
 
     try:
         signed = client.create_market_order(order_args)
-        resp = client.post_order(signed, lib.OrderType.FOK)
-    except Exception as exc:  # noqa: BLE001 -- any failure here means "no fill"
-        logger.error(f"[wallet_client] order submission FAILED: {spec.describe()} -- {exc}")
+    except Exception as exc:  # noqa: BLE001 -- never left this process: certainly no fill
+        logger.error(f"[wallet_client] order signing FAILED: {spec.describe()} -- {exc}")
         return OrderResult(
-            submitted=True, filled=False, simulated=False, spec=spec,
+            submitted=False, filled=False, simulated=False, spec=spec,
             error=f"{type(exc).__name__}: {exc}",
         )
 
+    # The balance BEFORE posting, so a missing or lost response can be
+    # reconciled against what the exchange actually moved. None = unreadable.
+    before = _held_shares(client, spec.token_id)
+
+    try:
+        resp = client.post_order(signed, lib.OrderType.FOK)
+    except Exception as exc:  # noqa: BLE001
+        # HONEST FILLS: the order may have reached the exchange. Not "no fill"
+        # until the balance says so -- and a balance can only say "filled".
+        logger.error(f"[wallet_client] order post FAILED: {spec.describe()} -- {exc}; reconciling")
+        return _reconciled_result(client, spec, before, error=f"{type(exc).__name__}: {exc}")
+
     filled, fill_price, fill_shares = _interpret_fill(resp, spec)
+    order_id = _extract(resp, "orderID", "orderId", "order_id", "id")
+    raw = resp if isinstance(resp, dict) else {"response": str(resp)}
     logger.info(
         f"[wallet_client] LIVE order {'FILLED' if filled else 'NOT FILLED'}: "
         f"{spec.describe()} -- response={resp}"
     )
+    if filled and (fill_price is None or fill_shares is None):
+        return _reconciled_result(client, spec, before, order_id=order_id, raw=raw,
+                                  fill_price=fill_price, fill_shares=fill_shares)
     return OrderResult(
         submitted=True, filled=filled, simulated=False, spec=spec,
-        order_id=_extract(resp, "orderID", "orderId", "order_id", "id"),
-        fill_price=fill_price, fill_shares=fill_shares,
-        raw=resp if isinstance(resp, dict) else {"response": str(resp)},
+        order_id=order_id, fill_price=fill_price, fill_shares=fill_shares, raw=raw,
     )
 
 
@@ -1065,22 +1129,25 @@ def _interpret_fill(resp, spec: OrderSpec) -> tuple:
     if status not in ("matched", "filled") or matched <= 0:
         return False, None, None
 
+    # WHAT THE RESPONSE SAYS, AND NOTHING IT DOES NOT. This used to fall back
+    # to (limit, requested shares) -- a full fill at the worst price -- when
+    # the amounts were missing. submit_order() now reconciles a gap against
+    # the token balance instead (HONEST FILLS), so a None here is honest.
     fill_shares = None
     fill_price = None
     taking = resp.get("takingAmount")
     making = resp.get("makingAmount")
     try:
-        if taking is not None and making is not None:
-            taking, making = float(taking), float(making)
-            # BUY: taking = shares received, making = USDC paid.
-            if spec.side == "BUY" and taking > 0:
-                fill_shares, fill_price = taking, making / taking
-            elif spec.side == "SELL" and making > 0:
-                fill_shares, fill_price = making, taking / making
+        # BUY: taking = shares received, making = USDC paid. SELL: the reverse.
+        shares_raw, usd_raw = (taking, making) if spec.side == "BUY" else (making, taking)
+        if shares_raw is not None and float(shares_raw) > 0:
+            fill_shares = float(shares_raw)
+            if usd_raw is not None:
+                fill_price = float(usd_raw) / fill_shares
     except (TypeError, ValueError, ZeroDivisionError):
         fill_shares, fill_price = None, None
 
-    return True, fill_price or spec.limit_price, fill_shares or spec.size_shares
+    return True, fill_price, fill_shares
 
 
 # --------------------------------------------------------------------------

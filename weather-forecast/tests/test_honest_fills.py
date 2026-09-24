@@ -233,3 +233,220 @@ def test_paper_entry_with_no_slippage_is_the_ask(monkeypatch):
     executor.open_position(_paper_decision(slip=0.0))
 
     assert captured[0].entry_price == pytest.approx(0.30)
+
+
+# ---------------------------------------------------------------------------
+# 3. Live fill accounting fails safe: reconcile from the exchange, else UNKNOWN
+# ---------------------------------------------------------------------------
+
+from clients import wallet_client  # noqa: E402
+
+
+class _Lib:
+    class Side:
+        BUY, SELL = "BUY", "SELL"
+
+    class OrderType:
+        FOK = "FOK"
+
+    class AssetType:
+        CONDITIONAL = "CONDITIONAL"
+
+    class MarketOrderArgs:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    class BalanceAllowanceParams:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+
+class _Client:
+    """post_order returns `response` (or raises it); balances are served in order."""
+
+    def __init__(self, response, balances, sign_error=None):
+        self.response, self.balances, self.sign_error = response, list(balances), sign_error
+
+    def create_market_order(self, args):
+        if self.sign_error:
+            raise self.sign_error
+        return {"signed": True}
+
+    def post_order(self, signed, order_type):
+        if isinstance(self.response, Exception):
+            raise self.response
+        return self.response
+
+    def get_balance_allowance(self, params):
+        b = self.balances.pop(0)
+        if isinstance(b, Exception):
+            raise b
+        return {"balance": str(int(b * wallet_client.BALANCE_BASE_UNITS))}
+
+
+def _wire(monkeypatch, client):
+    monkeypatch.setattr(wallet_client, "_clob", lambda: _Lib)
+    monkeypatch.setattr(wallet_client, "get_client", lambda: client)
+    monkeypatch.setattr(wallet_client, "_wait_for_balance", lambda c: True)
+    monkeypatch.setattr(wallet_client, "live_trading_enabled", lambda: True)
+
+
+def _buy_spec(shares=5.0, limit=0.30):
+    return wallet_client.OrderSpec(
+        ok=True, token_id="TOK", side="BUY", limit_price=limit,
+        size_shares=shares, notional_usd=round(shares * limit, 2),
+        expected_price=limit, tick_size="0.01",
+    )
+
+
+def test_exception_after_post_with_a_balance_increase_is_a_fill(monkeypatch):
+    _wire(monkeypatch, _Client(TimeoutError("read timed out"), balances=[0.0, 5.0]))
+    r = wallet_client.submit_order(_buy_spec(), live=True)
+    assert r.filled and not r.unknown
+    assert r.fill_shares == pytest.approx(5.0)
+    assert r.fill_price == pytest.approx(0.30)          # worst-case bound, alerted by executor
+
+
+def test_exception_after_post_with_no_balance_change_is_unknown_not_no_fill(monkeypatch):
+    # A lagging balance cannot prove the FOK was killed.
+    _wire(monkeypatch, _Client(TimeoutError("read timed out"), balances=[0.0, 0.0]))
+    r = wallet_client.submit_order(_buy_spec(), live=True)
+    assert r.unknown and not r.filled
+
+
+def test_exception_after_post_with_an_unreadable_balance_is_unknown(monkeypatch):
+    _wire(monkeypatch, _Client(TimeoutError("x"), balances=[0.0, RuntimeError("403")]))
+    r = wallet_client.submit_order(_buy_spec(), live=True)
+    assert r.unknown and not r.filled
+
+
+def test_a_signing_failure_never_reached_the_exchange(monkeypatch):
+    _wire(monkeypatch, _Client({}, balances=[0.0], sign_error=ValueError("bad key")))
+    r = wallet_client.submit_order(_buy_spec(), live=True)
+    assert not r.submitted and not r.filled and not r.unknown
+
+
+def test_a_matched_response_missing_amounts_is_reconciled_by_balance(monkeypatch):
+    _wire(monkeypatch, _Client({"success": True, "status": "matched", "size_matched": "5"},
+                               balances=[1.0, 6.0]))
+    r = wallet_client.submit_order(_buy_spec(), live=True)
+    assert r.filled and not r.unknown
+    assert r.fill_shares == pytest.approx(5.0)
+
+
+def test_a_matched_response_missing_amounts_and_balance_is_unknown(monkeypatch):
+    _wire(monkeypatch, _Client({"success": True, "status": "matched", "size_matched": "5"},
+                               balances=[RuntimeError("403"), RuntimeError("403")]))
+    r = wallet_client.submit_order(_buy_spec(), live=True)
+    assert r.unknown and not r.filled
+
+
+def test_a_partial_fill_books_what_matched_not_what_was_asked(monkeypatch):
+    _wire(monkeypatch, _Client({"success": True, "status": "matched",
+                                "takingAmount": "3.0", "makingAmount": "0.87"},
+                               balances=[0.0]))
+    r = wallet_client.submit_order(_buy_spec(shares=5.0), live=True)
+    assert r.filled and not r.unknown
+    assert r.fill_shares == pytest.approx(3.0)
+    assert r.fill_price == pytest.approx(0.29)
+
+
+# --- executor: an UNKNOWN attempt is recorded, alerted, and blocks the token --
+
+@pytest.fixture
+def live_wsss(monkeypatch, tmp_db):
+    import executor
+    monkeypatch.setattr(
+        executor, "EXECUTION_MODE",
+        {icao: ("manual_review" if icao != "WSSS" else "live") for icao in config.STATIONS},
+    )
+    monkeypatch.setattr(market_client, "estimate_slippage", lambda t, s: 0.0)
+    monkeypatch.setattr(market_client, "get_available_depth_usd", lambda t: 1000.0)
+    monkeypatch.setattr(wallet_client, "_book_constraints", lambda token_id: ("0.01", 5.0))
+    monkeypatch.setattr(
+        wallet_client, "reconcile_cached",
+        lambda positions, **_: wallet_client.Reconciliation(ok=True, checked=True, reason="stubbed"),
+    )
+    alerts_sent = []
+    import alerts
+    monkeypatch.setattr(alerts, "send", lambda t, m, priority="default": alerts_sent.append((t, m)) or True)
+    return alerts_sent
+
+
+def _live_decision():
+    from models import EntryDecision
+    return EntryDecision(
+        station_icao="WSSS", target_date=date(2026, 9, 3), bucket_c=32, side="YES",
+        kelly_fraction_raw=0.4, kelly_fraction_applied=0.1,
+        recommended_size_usd=1.50, available_depth_usd=1000.0,
+        slippage_at_size_pct=0.0, net_ev_at_size=0.30, min_net_ev=0.0,
+        approved=True, reason="test", station_maturity="mature",
+        entry_price=0.30, token_id="TOK",
+    )
+
+
+def _submit_returns(monkeypatch, **kw):
+    calls = []
+
+    def _submit(spec, live):
+        calls.append(spec)
+        return wallet_client.OrderResult(submitted=True, simulated=False, spec=spec, **kw)
+
+    monkeypatch.setattr(wallet_client, "submit_order", _submit)
+    return calls
+
+
+def test_an_unknown_live_entry_books_nothing_records_unknown_alerts_and_blocks(monkeypatch, live_wsss):
+    import executor
+    import storage
+    calls = _submit_returns(monkeypatch, filled=False, unknown=True, error="TimeoutError")
+
+    executor.open_position(_live_decision())
+
+    assert storage.load_open_positions() == []
+    rows = storage.load_live_order_attempts()
+    assert [r["outcome"] for r in rows] == ["unknown"]
+    assert any("UNKNOWN" in t for t, _ in live_wsss)
+
+    # the next entry on the same token is refused before it reaches the exchange
+    executor.open_position(_live_decision())
+    assert len(calls) == 1
+    assert storage.load_live_order_attempts()[0]["detail"].startswith("unknown_order_unreconciled")
+
+    # an operator's 'reconciled' row lifts the block
+    storage.record_live_order_attempt(kind="entry", station_icao="WSSS", outcome="reconciled",
+                                      target_date=date(2026, 9, 3), bucket_c=32, side="YES",
+                                      detail="operator: checked exchange, no fill")
+    executor.open_position(_live_decision())
+    assert len(calls) == 2
+
+
+def test_a_fill_with_missing_details_is_never_booked_at_the_limit(monkeypatch, live_wsss):
+    import executor
+    import storage
+    _submit_returns(monkeypatch, filled=True, fill_price=None, fill_shares=None, order_id="0x1")
+
+    executor.open_position(_live_decision())
+
+    assert storage.load_open_positions() == []
+    assert storage.load_live_order_attempts()[0]["outcome"] == "unknown"
+
+
+def test_a_partial_live_fill_is_booked_at_its_real_size(monkeypatch, live_wsss):
+    import executor
+    import storage
+    _submit_returns(monkeypatch, filled=True, fill_price=0.29, fill_shares=3.0, order_id="0x1")
+
+    executor.open_position(_live_decision())
+
+    (pos,) = storage.load_open_positions()
+    assert pos.size_shares == pytest.approx(3.0)
+    assert pos.entry_price == pytest.approx(0.29)
+    assert pos.size_usd == pytest.approx(0.87)
+
+
+def test_reconciled_rows_do_not_count_against_the_daily_order_cap(tmp_db):
+    import storage
+    storage.record_live_order_attempt(kind="entry", station_icao="WSSS", outcome="reconciled",
+                                      target_date=date(2026, 9, 3), bucket_c=32, side="YES")
+    assert storage.count_live_order_attempts("entry", "2000-01-01") == 0
