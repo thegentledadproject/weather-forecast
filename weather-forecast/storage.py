@@ -1356,17 +1356,23 @@ def update_high_water_mark(position_id: str, new_high_water_mark: float) -> None
 
 
 def close_position(position_id: str, exit_price: float, exit_time: str, status: str,
-                   reason: str, trigger_price: Optional[float] = None) -> None:
-    """Mark a position closed -- status should be one of 'closed_take_profit', 'closed_stop_loss', 'closed_resolution', or 'closed_trailing_stop' (historical rows only; see models.Position.status)."""
+                   reason: str, trigger_price: Optional[float] = None) -> bool:
+    """Mark a position closed -- status should be one of 'closed_take_profit', 'closed_stop_loss', 'closed_resolution', or 'closed_trailing_stop' (historical rows only; see models.Position.status).
+
+    Returns True if a row changed. Only an OPEN row is closed: a second close
+    used to silently rewrite the first one's exit price (gap audit
+    2026-09-24, gap 2), so it is now a no-op the caller must report.
+    """
     with _db() as conn:
-        conn.execute(
+        cur = conn.execute(
             # trigger_price uses COALESCE so a caller that does not know it
             # cannot blank one already recorded. Only stop closes pass it.
             "UPDATE positions SET status = ?, exit_price = ?, exit_time = ?, "
             "exit_reason = ?, trigger_price = COALESCE(?, trigger_price) "
-            "WHERE position_id = ?",
+            "WHERE position_id = ? AND status = 'open'",
             (status, exit_price, exit_time, reason, trigger_price, position_id),
         )
+        return cur.rowcount > 0
 
 
 def load_open_positions(station_icao: Optional[str] = None, is_paper: Optional[bool] = None) -> List[Position]:
@@ -1646,6 +1652,22 @@ def record_entry_decisions(
             rows,
         )
     return len(rows)
+
+
+def latest_cycle_write_ts() -> Optional[str]:
+    """
+    Newest UTC ISO timestamp the daemon wrote on a cycle, or None. Read by
+    watchdog.py. forecasts.fetched_at is written by every pipeline.run --
+    primary cycles AND the hourly collection that rides along in monitor
+    windows -- so it moves all day; entry_decisions.cycle_ts only in entry
+    windows. Both are UTC isoformat, so the string max is the time max.
+    """
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT MAX(ts) FROM (SELECT MAX(fetched_at) AS ts FROM forecasts "
+            "UNION ALL SELECT MAX(cycle_ts) FROM entry_decisions)"
+        ).fetchone()
+    return row[0] if row else None
 
 
 def load_entry_decisions(

@@ -438,9 +438,11 @@ def test_readiness_gate2_not_running_renders_no_not_unknown(monkeypatch, isolate
 
 
 def test_readiness_maturity_says_when_it_is_an_override(monkeypatch, isolated_stores):
-    """Both live stations are mature only by MATURITY_OVERRIDE, and RCSS fails
-    the measured beats_market criterion. A bare 'mature' would misreport the
-    single most important caveat on the real-money track."""
+    """A station mature only by MATURITY_OVERRIDE must say so. A bare 'mature'
+    would misreport the single most important caveat on the real-money track.
+    (The shipped override is empty since 2026-09-24, so the test sets one.)"""
+    import config
+    monkeypatch.setattr(config, "MATURITY_OVERRIDE", {"WSSS": ("mature", "test")})
     gen = load_gen()
     monkeypatch.setattr(gen, "gate2_state", lambda unit="polyweather": "present")
     from datetime import datetime, timezone

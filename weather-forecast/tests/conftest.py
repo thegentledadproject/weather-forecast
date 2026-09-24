@@ -397,6 +397,15 @@ def _deterministic_maturity(monkeypatch):
     import config
 
     monkeypatch.setattr(config, "_maturity_cache", dict(config.MATURITY_SNAPSHOT))
+    # The live fixture (WSSS) also needs the redemption lock open. Tests
+    # about that lock set it back to None explicitly (test_live_rearm_gate).
+    monkeypatch.setattr(config, "REDEMPTION_PROVEN_TX", "0xtest-fixture")
+    # No test may reach ntfy.sh; tests of alerts.py set the topic themselves.
+    monkeypatch.delenv("NTFY_TOPIC", raising=False)
+    # The live brakes memoise per UTC day; never across tests.
+    import executor
+    monkeypatch.setattr(executor, "_kill_cache", {})
+    monkeypatch.setattr(executor, "_brake_alerted", set())
 
 
 @pytest.fixture(scope="session", autouse=True)

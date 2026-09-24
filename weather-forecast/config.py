@@ -3049,6 +3049,13 @@ LIVE_MAX_CONCURRENT_POSITIONS = 5        # across all live stations
 LIVE_MAX_TOTAL_EXPOSURE_USD = 8.00       # sum of open live size_usd
 LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
 
+# --- Automatic live brakes (gap audit 2026-09-24, gap 6) -------------------
+# executor._live_brake() refuses every new LIVE entry while any of these
+# holds; paper is untouched. RESEARCH PARAMETERS, not fitted: $4 is half the
+# $8 live exposure cap, and 2 days is past any normal settle-and-close lag.
+LIVE_DAILY_LOSS_LIMIT_USD = 4.0          # realised live P&L, trailing 24h
+LIVE_STRANDED_AFTER_DAYS = 2             # open live position this far past target_date
+
 # --- Per-region LIVE blast radius -----------------------------------------
 # A SEPARATE MECHANISM from REGION_BANKROLL_USD, and the distinction is the
 # whole reason this block exists. Live orders never pass through Kelly
@@ -4205,6 +4212,8 @@ def live_mode_is_permitted(station_icao: str, execution_mode: str) -> bool:
     now gates. A station demoted by the measured criteria therefore keeps
     building its record and stops being able to spend, which is the correct
     direction for both.
+
+    Live additionally requires REDEMPTION_PROVEN_TX (gap audit 2026-09-24).
     """
     if execution_mode not in ("simulation", "live"):
         return True
@@ -4212,6 +4221,8 @@ def live_mode_is_permitted(station_icao: str, execution_mode: str) -> bool:
         return False
     if execution_mode == "simulation":
         return True
+    if not REDEMPTION_PROVEN_TX:
+        return False
     return station_maturity(station_icao) == "mature"
 
 
@@ -4664,12 +4675,20 @@ MATURITY_MIN_SIMULATED_ORDERS = 3
 # REMOVE THIS once brier_model < brier_market for RCSS on n >=
 # MATURITY_MIN_BRIER_ENTRIES under current code -- or sooner, if that gap
 # stays where it is.
-MATURITY_OVERRIDE: dict = {
-    "WSSS": ("mature", "buying execution-path evidence, not edge"),
-    "RCSS": ("mature", "operator decision 2026-08-19, mirroring WSSS: buying "
-                       "execution-path evidence, not edge -- the market outscores "
-                       "the model 0.062 to 0.145 on the 9 entries scored so far"),
-}
+#
+# BOTH ENTRIES REMOVED 2026-09-24 per the plan gap audit (gap 1,
+# docs/validation/2026-09-24-plan-gap-audit.md): with them in place,
+# restoring mode.env re-armed live on stations that fail beats_market. Live
+# now requires the measured criteria (plus REDEMPTION_PROVEN_TX below). The
+# mechanism stays for deliberate, dated, one-off decisions -- the history
+# above is kept so the next override has to argue against it.
+MATURITY_OVERRIDE: dict = {}
+
+# The tx hash of the first successful REAL redemption, set by hand once one
+# has landed on-chain. live_mode_is_permitted(..., "live") is False while it
+# is None: re-arming live is pointless while winners cannot be collected, and
+# as of 2026-09-24 redeem.py had never redeemed anything.
+REDEMPTION_PROVEN_TX: Optional[str] = None
 
 # Frozen snapshot for the BACKTEST replica only. backtest/entry_sim.py must
 # stay a pure function of its injected state -- it cannot read storage
