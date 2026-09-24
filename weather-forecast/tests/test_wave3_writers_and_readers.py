@@ -103,7 +103,7 @@ def test_boot_migrates_then_sets_writable_then_primes_the_sha(tmp_path, monkeypa
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "boot.sqlite3"))
     monkeypatch.setattr(storage, "_WRITABLE", False)
     monkeypatch.setattr(scheduler, "_config_sha_cache", {})
-    monkeypatch.setattr(config, "_current_git_sha", lambda: "abc123")
+    monkeypatch.setattr(config, "config_fingerprint", lambda mode=None: "abc123")
     # No stations -> run_forever returns right after booting.
     monkeypatch.setattr(scheduler, "stations_by_utc_offset", lambda station_icaos=None: {})
 

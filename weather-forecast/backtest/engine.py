@@ -92,7 +92,6 @@ backtest/{settings,simclock,price_store,portfolio,resolution,
 
 import hashlib
 import os
-import subprocess
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Tuple
@@ -294,21 +293,12 @@ def _make_run_id(
 
 
 def _git_sha() -> str:
-    """Current commit, or "unknown". Never fatal -- provenance, not a gate."""
-    repo_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    """config.config_fingerprint() -- `<sha>[+dirty]:<mode hash>`. Never fatal: provenance, not a gate.
+    config.calibration_vs_market compares only the sha part (config.git_sha_of)."""
     try:
-        out = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if out.returncode == 0 and out.stdout.strip():
-            return out.stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        pass
-    return "unknown"
+        return config.config_fingerprint()
+    except Exception:  # noqa: BLE001
+        return "unknown"
 
 
 class _PriceReader:

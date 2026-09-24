@@ -4880,6 +4880,49 @@ def _current_git_sha() -> Optional[str]:
         return None
 
 
+def _git_dirty() -> bool:
+    """Tracked files differ from HEAD (untracked scratch is ignored)."""
+    import subprocess
+
+    try:
+        return bool(subprocess.check_output(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=str(Path(__file__).resolve().parent), stderr=subprocess.DEVNULL, text=True,
+        ).strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def config_fingerprint(effective_mode: Optional[dict] = None) -> str:
+    """
+    THE one provenance stamp (entry_decisions.config_sha, backtest manifest
+    git_sha): `<git sha>[+dirty]:<8 hex>`. The prefix is still the git sha,
+    so every older row (a bare sha) and every sha-prefix join keeps working;
+    read the commit back with git_sha_of(). The hash covers what HEAD does
+    not: the effective per-station mode after CLI resolution, the host's
+    POLYWEATHER_* env (systemd loads /etc/polyweather/mode.env into it),
+    POLYMARKET_LIVE_TRADING, and argv. No other POLYMARKET_* var -- those
+    hold keys.
+    """
+    import hashlib
+    import json
+    import os
+    import sys
+
+    env = {k: v for k, v in os.environ.items()
+           if k.startswith("POLYWEATHER_") or k == "POLYMARKET_LIVE_TRADING"}
+    payload = json.dumps({"mode": dict(effective_mode or {}), "env": env, "argv": sys.argv[1:]},
+                         sort_keys=True, default=str)
+    sha = _current_git_sha() or "unknown"
+    dirty = "+dirty" if sha != "unknown" and _git_dirty() else ""
+    return f"{sha}{dirty}:{hashlib.sha256(payload.encode()).hexdigest()[:8]}"
+
+
+def git_sha_of(fingerprint: Optional[str]) -> Optional[str]:
+    """The commit part of a config_fingerprint() (or of a legacy bare sha)."""
+    return fingerprint.split(":")[0].split("+")[0] if fingerprint else fingerprint
+
+
 def calibration_vs_market(station_icao: str) -> tuple:
     """
     (passed, detail) for "does this station's model beat the market?"
@@ -4930,7 +4973,7 @@ def calibration_vs_market(station_icao: str) -> tuple:
                        f"need {MATURITY_MIN_BRIER_ENTRIES}")
 
     if MATURITY_BRIER_REQUIRE_CURRENT_CODE:
-        run_sha = manifest.get("git_sha")
+        run_sha = git_sha_of(manifest.get("git_sha"))
         head = _current_git_sha()
         if not run_sha or not head:
             return False, "cannot confirm the run was produced by the current code"
