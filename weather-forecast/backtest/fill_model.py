@@ -82,10 +82,22 @@ on thin-book ticks.
 
 ENTRY PRICE PARITY -- READ THIS BEFORE COMPARING P&L
 ----------------------------------------------------
-Live paper mode records the QUOTE as the entry price, not a slipped
-fill: executor.open_position() writes Position.entry_price =
+KNOWN DIFFERENCE SINCE 2026-09-25 (honest fills). Live paper mode now
+books the VWAP of walking the real entry book for the stake:
+executor.open_position() writes entry_price = ask x (1 +
+slippage_at_size_pct), both from one /book snapshot. The replay has no
+book to walk, so it still records the QUOTE (below) and carries the
+modelled slipped price in entry_records. Paper rows from 2026-09-25 on
+are therefore priced a little WORSE than the replay's for the same trade
+-- by the real book walk, typically a fraction of a percent at the
+depth-capped sizes used. Compare paper vs replay on entry_records'
+slipped price, or accept that gap; the parity tests were not changed
+because they pin the replay's own recording rule, which did not move.
+
+Before that date live paper recorded the QUOTE as the entry price, not a
+slipped fill: executor.open_position() wrote Position.entry_price =
 decision.entry_price, and entry_manager sets that to
-ev_result.market_price. Slippage is used to GATE the trade
+ev_result.market_price. Slippage was used to GATE the trade
 (entry_manager's re-check at size) and never to move the recorded fill.
 
 So the replay records the quote too -- entry_fill_price() exists and is

@@ -1010,12 +1010,21 @@ def open_position(decision: EntryDecision) -> None:
         return
 
     if mode == "paper":
+        # HONEST FILLS: booked at the VWAP of walking the entry book for this
+        # stake, not at the top ask for the full size. slippage_at_size_pct is
+        # that walk, measured from the SAME snapshot's best ask (entry_manager
+        # / market_client.get_entry_book), which is <= entry_price because a
+        # worse ask is refused -- so this is the exact VWAP when the two asks
+        # agree and a slight over-estimate when the book improved. The entry
+        # fee follows (storage charges it on the price it is handed).
+        fill_price = min(decision.entry_price * (1.0 + (decision.slippage_at_size_pct or 0.0)), 1.0)
         print(
             f"[executor] PAPER FILL: {decision.station_icao} {decision.bucket_c}°{decision.side} "
-            f"@ {decision.entry_price:.3f}, size=${decision.recommended_size_usd:.2f} "
+            f"@ {fill_price:.4f} VWAP (ask {decision.entry_price:.3f}), "
+            f"size=${decision.recommended_size_usd:.2f} "
             f"(net EV at entry: {_fmt_net_ev(decision.net_ev_at_size)}) -- zero real risk, auto-filled."
         )
-        storage.open_position(_position(decision.recommended_size_usd))
+        storage.open_position(_position(decision.recommended_size_usd, entry_price=fill_price))
         return
 
     _open_via_order_path(decision, mode, _position)

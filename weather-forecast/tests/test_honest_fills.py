@@ -188,3 +188,48 @@ def test_executor_refuses_a_crossed_book_at_submission_with_a_code(one_book):
     ok, note = executor._resolved_size_ok(spec, decision, out=out)
     assert not ok
     assert out["refusal_code"] == "resolved_book_crossed"
+
+
+# ---------------------------------------------------------------------------
+# 2. A paper fill is booked at the VWAP of the walked book, not the top ask
+# ---------------------------------------------------------------------------
+
+def _paper_decision(price=0.30, slip=0.02, size=10.0):
+    from models import EntryDecision
+    return EntryDecision(
+        station_icao="WSSS", target_date=date(2026, 9, 3), bucket_c=32, side="YES",
+        kelly_fraction_raw=0.4, kelly_fraction_applied=0.1,
+        recommended_size_usd=size, available_depth_usd=1000.0,
+        slippage_at_size_pct=slip, net_ev_at_size=0.30,
+        approved=True, reason="test", station_maturity="mature",
+        entry_price=price, token_id="TOK",
+    )
+
+
+def test_paper_entry_is_booked_at_the_walked_vwap_and_fee_follows_it(monkeypatch):
+    import executor
+    import risk_manager
+    import storage
+    monkeypatch.setitem(executor.EXECUTION_MODE, "WSSS", "paper")
+    captured = []
+    monkeypatch.setattr(storage, "open_position", captured.append)
+
+    executor.open_position(_paper_decision(price=0.30, slip=0.02, size=10.0))
+
+    (pos,) = captured
+    assert pos.entry_price == pytest.approx(0.306)          # 0.30 x (1 + 2%)
+    assert pos.size_usd == pytest.approx(10.0)               # the stake is unchanged
+    # storage charges the entry fee on the price it is handed -- the VWAP
+    assert storage._entry_fee_for(pos) == pytest.approx(risk_manager.taker_fee_per_share(0.306))
+
+
+def test_paper_entry_with_no_slippage_is_the_ask(monkeypatch):
+    import executor
+    import storage
+    monkeypatch.setitem(executor.EXECUTION_MODE, "WSSS", "paper")
+    captured = []
+    monkeypatch.setattr(storage, "open_position", captured.append)
+
+    executor.open_position(_paper_decision(slip=0.0))
+
+    assert captured[0].entry_price == pytest.approx(0.30)
