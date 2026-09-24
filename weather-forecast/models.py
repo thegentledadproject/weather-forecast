@@ -134,6 +134,21 @@ class StationConfig:
     #                   settlement station and would bias the observation blend)
     metar_ingest_mode: str = "resolution"
 
+    # Which settlement source the market's OWN rules text must cite -- the
+    # source half of the contract fingerprint contract_rules.check_contract()
+    # compares every event against before it may produce entries. The
+    # station half is derived, not stored: "noaa" expects
+    # weather.gov/wrh/timeseries?site=<icao>, "wunderground" expects
+    # wunderground.com/history/daily/<wunderground_slug>, "hko" expects the
+    # HK Observatory climate extract. Unit and precision come from
+    # bucket_unit and bucket_edge_mode.
+    #
+    # Default "noaa": read 2026-09-25 off all 35 live events, 33 cite NOAA
+    # (with Wunderground as a no-data fallback, no URL). The Asian markets
+    # cited Wunderground when registered on 2026-08-05; every one except
+    # RCSS and VHHH has since been re-pointed to NOAA for the SAME ICAO.
+    contract_source: str = "noaa"
+
     # How many METARs this station files per LOCAL day when reporting
     # normally. A half-hourly-filing airport (most of the Asia/Europe
     # registry) files ~48/day; an hourly-filing one (every US ASOS

@@ -547,6 +547,14 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
                 f"({ev_run.veto_reason}) -- no entries this cycle, exits still checked below."
             )
             primary_ok = True
+        elif ev_run.contract_status != "VALID":
+            # GAP 7: fail closed. Paper is refused too -- it is the evidence book.
+            print(
+                f"[scheduler] {station_icao}: entries REFUSED -- market rules check "
+                f"{ev_run.contract_status} ({', '.join(ev_run.contract_reasons) or 'no detail'}); "
+                f"exits unaffected."
+            )
+            primary_ok = True
         elif ev_results:
             best = ev_engine.best_opportunities(ev_results, min_net_ev=min_net_ev)
             if best:
@@ -583,7 +591,7 @@ def _run_full_cycle(station_icao: str, min_net_ev: float) -> None:
     if executor.EXECUTION_MODE.get(station_icao) == "live":
         if not primary_ok:
             print(f"[scheduler] {station_icao}: paper shadow pass skipped -- the primary pass raised.")
-        elif ev_run is None or ev_run.veto_reason or not ev_run.ev_results:
+        elif ev_run is None or ev_run.veto_reason or ev_run.contract_status != "VALID" or not ev_run.ev_results:
             print(f"[scheduler] {station_icao}: paper shadow pass skipped -- no EV table this cycle.")
         else:
             try:

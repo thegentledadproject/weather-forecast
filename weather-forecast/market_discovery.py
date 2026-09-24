@@ -72,11 +72,35 @@ def build_event_slug(station: StationConfig, target_date: date) -> str:
     return f"highest-temperature-in-{station.polymarket_city_slug}-on-{month_name}-{target_date.day}-{target_date.year}"
 
 
+# GAP 7: the event each slug's most recent fetch returned (None on failure),
+# so contract_rules can read the SAME event the token map was built from
+# without a second Gamma call. FIFO-capped: an event is ~60KB.
+_LAST_EVENT: Dict[str, Optional[dict]] = {}
+_LAST_EVENT_CAP = 128
+
+
+def _remember(slug: str, event: Optional[dict]) -> Optional[dict]:
+    _LAST_EVENT.pop(slug, None)
+    _LAST_EVENT[slug] = event
+    while len(_LAST_EVENT) > _LAST_EVENT_CAP:
+        _LAST_EVENT.pop(next(iter(_LAST_EVENT)))
+    return event
+
+
+def last_fetched_event(slug: str) -> Optional[dict]:
+    """The event this process last fetched for slug; None if never, or if that fetch failed."""
+    return _LAST_EVENT.get(slug)
+
+
 def fetch_event(slug: str, timeout: int = 10) -> Optional[dict]:
     """
     Fetch one event by slug from Gamma. Returns the event dict (with
     its nested "markets" array) or None on failure/not-found.
     """
+    return _remember(slug, _fetch_event(slug, timeout))
+
+
+def _fetch_event(slug: str, timeout: int) -> Optional[dict]:
     try:
         resp = requests.get(
             f"{GAMMA_API_BASE}/events",

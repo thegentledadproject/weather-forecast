@@ -763,6 +763,30 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # the migrated `positions` shape rather than a short one.
     _ensure_position_economics_view(conn)
 
+    # GAP 7: what each event's own rules text said, per station-day, and
+    # whether it matched the station's contract fingerprint. APPEND-ONLY,
+    # written only when (hash, status, reasons) differs from that
+    # station-day's newest row -- so a row is a change, and rules_text keeps
+    # the normalised text that changed for diffing. See contract_rules.py.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS contract_checks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            checked_at TEXT NOT NULL,
+            station_icao TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            slug TEXT,
+            rules_hash TEXT,
+            status TEXT NOT NULL,
+            reasons TEXT NOT NULL,
+            rules_text TEXT
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS ix_cc_station_date ON contract_checks(station_icao, target_date)"
+    )
+
     # GAP 8: append-only revision history. Last, so every ALTER above has
     # already shaped the tables the history twins are copied from.
     for table in HISTORY_TABLES:
@@ -1846,3 +1870,48 @@ def load_shrink_fit_rows(before: date) -> List[dict]:
                     "model_prob": p, "market_price": m, "settled_bucket_c": int(settled),
                 })
     return out
+
+
+def contract_reference_hashes(station_icao: str, target_date: date) -> dict:
+    """
+    GAP 7. What contract_rules compares a station-day's rules hash against:
+      prev     -- the newest non-NULL hash for this station's latest EARLIER target date
+      first    -- the first non-NULL hash seen for THIS target date (a mid-event edit)
+      last_row -- (rules_hash, status, reasons) of this station-day's newest row
+    """
+    td = target_date.isoformat()
+    with _db() as conn:
+        prev = conn.execute(
+            "SELECT rules_hash FROM contract_checks WHERE station_icao = ? AND target_date < ? "
+            "AND rules_hash IS NOT NULL ORDER BY target_date DESC, id DESC LIMIT 1",
+            (station_icao, td),
+        ).fetchone()
+        first = conn.execute(
+            "SELECT rules_hash FROM contract_checks WHERE station_icao = ? AND target_date = ? "
+            "AND rules_hash IS NOT NULL ORDER BY id LIMIT 1",
+            (station_icao, td),
+        ).fetchone()
+        last = conn.execute(
+            "SELECT rules_hash, status, reasons FROM contract_checks WHERE station_icao = ? "
+            "AND target_date = ? ORDER BY id DESC LIMIT 1",
+            (station_icao, td),
+        ).fetchone()
+    return {
+        "prev": prev[0] if prev else None,
+        "first": first[0] if first else None,
+        "last_row": tuple(last) if last else None,
+    }
+
+
+def record_contract_check(
+    station_icao: str, target_date: date, slug: Optional[str], rules_hash: Optional[str],
+    status: str, reasons: str, rules_text: Optional[str],
+) -> None:
+    """GAP 7. Append one contract_checks row. Never updates."""
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO contract_checks (checked_at, station_icao, target_date, slug, "
+            "rules_hash, status, reasons, rules_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (datetime.now(timezone.utc).isoformat(), station_icao, target_date.isoformat(),
+             slug, rules_hash, status, reasons, rules_text),
+        )

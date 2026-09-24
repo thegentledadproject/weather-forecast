@@ -442,6 +442,7 @@ STATIONS = {
         bucket_edge_mode="floor",
         resolution_grade_source="hko_daily_max",
         metar_ingest_mode="skip",
+        contract_source="hko",
     ),
     "RPLL": StationConfig(
         icao="RPLL",
@@ -473,6 +474,8 @@ STATIONS = {
                                        # the city normal is a close stand-in.
         official_client_key="wwis",
         polymarket_city_slug="taipei",
+        # The one market still citing Wunderground's history page (2026-09-25).
+        contract_source="wunderground",
         # Reswept 2026-08-20 (was 28-38): 29-39 through Aug 12-17, then 26-36 from Aug 18 (current).
         # RCSS is on the LIVE track, so keep this one honest.
         bucket_min_c=26,

@@ -579,6 +579,26 @@ class StationEVRun:
     bucket_max_c: Optional[int] = None
     ev_results: List[EVResult] = field(default_factory=list)
     veto_reason: str = ""
+    # GAP 7: the market's own rules text vs the station's fingerprint. Only
+    # "VALID" may produce entries. The default is deliberately NOT valid: a
+    # run that never checked is refused, not waved through. Pricing and
+    # snapshot capture proceed either way -- collection is not a trade.
+    contract_status: str = "UNCHECKED"
+    contract_reasons: List[str] = field(default_factory=list)
+
+
+def _contract_for(station, target_date) -> tuple:
+    """contract_rules.evaluate on the event discovery just fetched. Never raises."""
+    try:
+        import contract_rules
+
+        slug = market_discovery.build_event_slug(station, target_date)
+        return contract_rules.evaluate(
+            station, target_date, market_discovery.last_fetched_event(slug), slug=slug,
+        )
+    except Exception as exc:  # noqa: BLE001 -- must not take a cycle down
+        print(f"[ev_engine] contract check failed for {station.icao}: {type(exc).__name__}: {exc}")
+        return "UNCERTAIN", ["CHECK_ERROR"]
 
 
 def _calibration_for(station_icao: str, target_date):
@@ -692,6 +712,8 @@ def run_for_station_with_map(
             f"stale side and its cross-check bounds want updating."
         )
 
+    contract_status, contract_reasons = _contract_for(station, estimate.target_date)
+
     model_probs = {
         b.bucket_c: b.probability
         for b in bucket_probabilities(
@@ -724,6 +746,8 @@ def run_for_station_with_map(
         bucket_min_c=bucket_min,
         bucket_max_c=bucket_max,
         ev_results=ev_results,
+        contract_status=contract_status,
+        contract_reasons=contract_reasons,
     )
 
 
