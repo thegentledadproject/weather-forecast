@@ -3,7 +3,6 @@
 ## State
 Branch `main`, clean, pushed. Last code commit: `da3a5a1` cohort_monitor --by.
 The EC2 box (`ubuntu@43.216.25.99`) has run daemon code `e31363d` since 2026-09-23 15:52 UTC. Its checkout was pulled to `da3a5a1` on 2026-09-24 without a restart. The later commits are read-only scripts and docs, so the daemon doesn't need them.
-- The box has a stray untracked file, `weather-forecast/None`. It is probably from a script that wrote to a missing path. It's harmless.
 - **The daemon runs in PAPER mode** (`--mode paper --fallback-mode paper`) since 2026-09-23 15:33 UTC.
   - This was set in `/etc/polyweather/mode.env`, not in config. The backup is `mode.env.bak-20260923`.
   - To re-arm live: restore the backup, then restart the daemon.
