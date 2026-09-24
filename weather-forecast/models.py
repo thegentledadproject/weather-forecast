@@ -215,6 +215,9 @@ class CalibratedEstimate:
     # because the station has no measured bias yet or because
     # config.ENABLE_FORECAST_BIAS_CORRECTION is off.
     forecast_bias_c: float = 0.0
+    # GAP 8: fetched_at of every forecast row the central estimate blended
+    # (those with a value), so a decision can be rebuilt from those rows.
+    forecast_fetched_at: list = field(default_factory=list)
 
 
 @dataclass
@@ -492,6 +495,9 @@ class EVResult:
     calibrated_prob: Optional[float] = None
     calibration_source: str = "uncalibrated"
     notes: str = ""
+    # GAP 8: the estimate this row was priced from, carried so the decision
+    # can record its inputs. Out of repr/eq so EV-table comparisons are unchanged.
+    estimate: Optional[CalibratedEstimate] = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -557,6 +563,13 @@ class EntryDecision:
     # decision built outside the gate chain (manual_trigger), and a census
     # test asserts no gate site ever leaves it there.
     rule_id: str = "unspecified"
+    # GAP 8: the estimate behind the decision (entry_manager.deciding_numbers).
+    # forecast_fetched_at is a list; storage writes it as JSON.
+    mu_c: Optional[float] = None
+    sd_c: Optional[float] = None
+    bias_c: Optional[float] = None
+    spread_source: Optional[str] = None
+    forecast_fetched_at: Optional[list] = None
 
 
 @dataclass

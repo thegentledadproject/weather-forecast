@@ -321,6 +321,7 @@ def compute_ev_table(
                     net_ev_per_dollar=None,
                     spread_source=estimate.spread_source,
                     market_bid=bid,
+                    estimate=estimate,
                     notes="No live price available this cycle.",
                 ))
                 continue
@@ -391,6 +392,7 @@ def compute_ev_table(
                 net_ev_per_dollar=net_ev,
                 spread_source=estimate.spread_source,
                 market_bid=bid,
+                estimate=estimate,
             ))
 
     return results

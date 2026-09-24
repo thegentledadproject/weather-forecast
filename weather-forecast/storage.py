@@ -15,6 +15,7 @@ sqlite3 (standard library)
 config.py, models.py (local)
 """
 
+import json
 import os
 import sqlite3
 import sys
@@ -243,6 +244,66 @@ def _ensure_position_economics_view(conn: sqlite3.Connection) -> None:
         "CREATE VIEW ", "CREATE VIEW IF NOT EXISTS ", 1))
 
 
+# GAP 8 (2026-09-24). Evidence tables written with INSERT OR REPLACE, so a
+# re-ingest erased the previous value with no trace. Each gets a
+# `<table>_history` twin fed by AFTER INSERT / AFTER UPDATE triggers: an
+# INSERT OR REPLACE fires AFTER INSERT (its implicit delete fires no delete
+# trigger while recursive_triggers is off, which it is), so every write lands
+# in history and the live table + every reader stay exactly as they were.
+# NOT covered, on purpose:
+#   forecasts    -- fetched_at is in the primary key, already append-only.
+#   ev_snapshots -- generated_at is in the primary key, already append-only;
+#                   a twin would double the largest table (~24k rows/day,
+#                   ~100MB+/month) on a box with ~2GB free.
+#   positions    -- UPDATEs there are the position lifecycle, not revisions.
+HISTORY_TABLES = ("observations", "settled_buckets", "ensemble_spread")
+
+# history_op/history_recorded_at are prefixed because settled_buckets already
+# has its own recorded_at. Same shape as datetime.now(timezone.utc).isoformat() -- microsecond field,
+# '+00:00' suffix -- so history timestamps sort and compare as strings
+# against fetched_at/recorded_at. sqlite only has millisecond precision.
+_HISTORY_NOW_SQL = "(strftime('%Y-%m-%dT%H:%M:%f', 'now') || '000+00:00')"
+
+
+def _ensure_history(conn: sqlite3.Connection, table: str) -> None:
+    """
+    Create/sync `<table>_history` and its two triggers. Idempotent and
+    schema-write-free when nothing changed. Columns are read from the live
+    table, so a column added to it later is added to the history table and
+    the triggers are rebuilt on the next migrate(). On first creation the
+    history is seeded from the table's current rows with op='backfill'.
+    """
+    hist = f"{table}_history"
+    cols = [(r[1], r[2]) for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    hist_cols = {r[1] for r in conn.execute(f"PRAGMA table_info({hist})").fetchall()}
+    names = ", ".join(c for c, _ in cols)
+    if not hist_cols:
+        col_ddl = "".join(f", {c} {t}" for c, t in cols)
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {hist} (history_id INTEGER PRIMARY KEY, "
+            f"history_recorded_at TEXT NOT NULL DEFAULT {_HISTORY_NOW_SQL}, "
+            f"history_op TEXT NOT NULL{col_ddl})"
+        )
+        conn.execute(f"INSERT INTO {hist} (history_op, {names}) SELECT 'backfill', {names} FROM {table}")
+    else:
+        for c, t in cols:
+            if c not in hist_cols:
+                conn.execute(f"ALTER TABLE {hist} ADD COLUMN {c} {t}")
+    new_vals = ", ".join(f"NEW.{c}" for c, _ in cols)
+    for suffix, event, op in (("ai", "INSERT", "insert"), ("au", "UPDATE", "update")):
+        name = f"{hist}_{suffix}"
+        # sqlite_master stores the text without IF NOT EXISTS (see the view).
+        sql = (f"CREATE TRIGGER {name} AFTER {event} ON {table} BEGIN "
+               f"INSERT INTO {hist} (history_op, {names}) VALUES ('{op}', {new_vals}); END")
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?", (name,)
+        ).fetchone()
+        if row is not None and row[0] == sql:
+            continue
+        conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+        conn.execute(sql.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ", 1))
+
+
 # WAVE 1 (2026-09-17). One row per EntryDecision per cycle, approved or not,
 # in the column order record_entry_decisions() writes them. The dataclass
 # fields these mirror are named identically so tests/test_wave1_entry_
@@ -256,6 +317,8 @@ ENTRY_DECISION_COLUMNS = (
     "raw_edge", "admission_edge", "sizing_edge", "net_ev_at_size",
     "kelly_size_preclamp_usd", "recommended_size_usd", "min_net_ev",
     "station_maturity", "config_sha",
+    # GAP 8: the estimate behind the decision; forecast_fetched_at is JSON.
+    "mu_c", "sd_c", "bias_c", "spread_source", "forecast_fetched_at",
 )
 
 
@@ -553,6 +616,15 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    # GAP 8: the estimate behind each decision. ALTER-only so fresh and
+    # deployed databases take the same path; NULL on every earlier row.
+    existing_ed_columns = {r[1] for r in conn.execute("PRAGMA table_info(entry_decisions)")}
+    for column_name, column_type in (
+        ("mu_c", "REAL"), ("sd_c", "REAL"), ("bias_c", "REAL"),
+        ("spread_source", "TEXT"), ("forecast_fetched_at", "TEXT"),
+    ):
+        if column_name not in existing_ed_columns:
+            conn.execute(f"ALTER TABLE entry_decisions ADD COLUMN {column_name} {column_type}")
     conn.execute("CREATE INDEX IF NOT EXISTS ix_ed_cycle ON entry_decisions(cycle_ts)")
     # The shadow-twin pairing key (spec 1d): entry_decisions(book='paper_shadow')
     # joined to positions(execution_mode='live') on (station, date, bucket, side).
@@ -670,6 +742,11 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # After the ALTER TABLE migration above, so the view is defined against
     # the migrated `positions` shape rather than a short one.
     _ensure_position_economics_view(conn)
+
+    # GAP 8: append-only revision history. Last, so every ALTER above has
+    # already shaped the tables the history twins are copied from.
+    for table in HISTORY_TABLES:
+        _ensure_history(conn, table)
 
     # WAVE 1 (2026-09-17) found that the entry-fee backfill above is a DML
     # statement (UPDATE) whose implicit transaction covered every CREATE /
@@ -1640,6 +1717,8 @@ def record_entry_decisions(
                     f"field -- ENTRY_DECISION_COLUMNS and EntryDecision have drifted"
                 )
             row[col] = getattr(d, col)
+        if isinstance(row["forecast_fetched_at"], list):
+            row["forecast_fetched_at"] = json.dumps(row["forecast_fetched_at"])
         missing = [c for c in ENTRY_DECISION_COLUMNS if c not in row]
         if missing:
             raise ValueError(f"entry_decisions row missing column(s): {missing}")
