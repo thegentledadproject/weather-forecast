@@ -19,7 +19,7 @@ import os
 import sqlite3
 import sys
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -256,6 +256,8 @@ ENTRY_DECISION_COLUMNS = (
     "raw_edge", "admission_edge", "sizing_edge", "net_ev_at_size",
     "kelly_size_preclamp_usd", "recommended_size_usd", "min_net_ev",
     "station_maturity", "config_sha",
+    # GAP 4 (shrink toward the ask): added by _add_missing_columns below.
+    "lambda_hat", "lambda_se", "lambda_days", "p_robust",
 )
 
 
@@ -305,6 +307,14 @@ def schema_summary() -> str:
     tables = [n for t, n in rows if t == "table"]
     views = [n for t, n in rows if t == "view"]
     return f"{len(tables)} tables: {', '.join(tables)}; {len(views)} view(s): {', '.join(views)}"
+
+
+def _add_missing_columns(conn: sqlite3.Connection, table: str, columns) -> None:
+    """ALTER TABLE ADD COLUMN for each (name, ddl) the table lacks."""
+    have = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name, ddl in columns:
+        if name not in have:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
@@ -549,7 +559,11 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
             recommended_size_usd REAL,
             min_net_ev REAL,
             station_maturity TEXT,
-            config_sha TEXT
+            config_sha TEXT,
+            lambda_hat REAL,
+            lambda_se REAL,
+            lambda_days INTEGER,
+            p_robust REAL
         )
         """
     )
@@ -666,6 +680,14 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+    # GAP 4 (2026-09-24): columns added to tables that already exist on the
+    # box. Idempotent, like the positions/settled_buckets lists above.
+    _add_missing_columns(conn, "ev_snapshots", (("config_sha", "config_sha TEXT"),))
+    _add_missing_columns(conn, "entry_decisions", (
+        ("lambda_hat", "lambda_hat REAL"), ("lambda_se", "lambda_se REAL"),
+        ("lambda_days", "lambda_days INTEGER"), ("p_robust", "p_robust REAL"),
+    ))
 
     # After the ALTER TABLE migration above, so the view is defined against
     # the migrated `positions` shape rather than a short one.
@@ -1125,20 +1147,23 @@ def save_ev_snapshot_rows(
     target_date: date,
     generated_at: str,
     results,
+    config_sha: Optional[str] = None,
 ) -> None:
-    """Persist one cycle's EV table, one row per (bucket, side)."""
+    """Persist one cycle's EV table, one row per (bucket, side), stamped
+    with the code revision that priced it (GAP 4/5: the lock score's unit
+    filter reads config_sha)."""
     with _db() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO ev_snapshots "
             "(station_icao, target_date, bucket_c, side, generated_at, "
             " model_prob, market_price, market_bid, raw_edge, slippage_pct, "
-            " fee_rate_pct, net_ev_per_dollar, spread_source, notes) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " fee_rate_pct, net_ev_per_dollar, spread_source, notes, config_sha) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 (station_icao, target_date.isoformat(), int(r.bucket_c), r.side,
                  generated_at, r.model_prob, r.market_price, r.market_bid,
                  r.raw_edge, r.estimated_slippage_pct, r.fee_rate_pct,
-                 r.net_ev_per_dollar, r.spread_source, r.notes)
+                 r.net_ev_per_dollar, r.spread_source, r.notes, config_sha)
                 for r in results
             ],
         )
@@ -1691,3 +1716,56 @@ def load_entry_decisions(
     with _db() as conn:
         rows = conn.execute(query, params).fetchall()
     return [dict(zip(ENTRY_DECISION_COLUMNS, r)) for r in rows]
+
+
+# --------------------------------------------------------------------------
+# Shrink-toward-ask fit set (GAP 4)
+# --------------------------------------------------------------------------
+
+def load_shrink_fit_rows(before: date) -> List[dict]:
+    """
+    The fit set for probability_calibration.shrink_for_day(before): for every
+    SETTLED station-day with target_date < `before`, the YES rows of the first
+    ev_snapshots cycle inside the entry window (config.SHRINK_FIT_WINDOW_LOCAL,
+    local hours), every listed bucket including unpriced ones (market_price
+    None) so the caller can tell a full book from a partial one.
+
+    One cycle per station-day, not the first quote per bucket: the ask is
+    normalised across buckets, and buckets from different cycles would be
+    normalised against a book that never existed at one instant.
+
+    Keys: station_icao, target_date (str), bucket_c, model_prob, market_price,
+    settled_bucket_c. Read-only.
+    """
+    lo_h, hi_h = config.SHRINK_FIT_WINDOW_LOCAL
+    with _db() as conn:
+        cycles = conn.execute(
+            "SELECT DISTINCT e.station_icao, e.target_date, e.generated_at, s.bucket_c "
+            "FROM ev_snapshots e JOIN settled_buckets s "
+            "ON s.station_icao = e.station_icao AND s.target_date = e.target_date "
+            "WHERE e.target_date < ? AND e.side = 'YES'",
+            (before.isoformat(),),
+        ).fetchall()
+        first: Dict[tuple, tuple] = {}
+        for st, td, gen, settled in cycles:
+            try:
+                start, _ = config.local_day_bounds_utc(st, date.fromisoformat(td))
+            except Exception:  # noqa: BLE001 -- a retired station has no offset
+                continue
+            if not (start + timedelta(hours=lo_h) <= datetime.fromisoformat(gen)
+                    < start + timedelta(hours=hi_h)):
+                continue
+            if (st, td) not in first or gen < first[(st, td)][0]:
+                first[(st, td)] = (gen, settled)
+        out = []
+        for (st, td), (gen, settled) in sorted(first.items()):
+            for bucket_c, p, m in conn.execute(
+                "SELECT bucket_c, model_prob, market_price FROM ev_snapshots "
+                "WHERE station_icao = ? AND target_date = ? AND generated_at = ? AND side = 'YES'",
+                (st, td, gen),
+            ):
+                out.append({
+                    "station_icao": st, "target_date": td, "bucket_c": int(bucket_c),
+                    "model_prob": p, "market_price": m, "settled_bucket_c": int(settled),
+                })
+    return out

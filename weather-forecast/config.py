@@ -2271,6 +2271,11 @@ MIN_ABS_RAW_EDGE = 0.03
 # False restores the pre-change rule exactly, with no other behaviour attached.
 ADMIT_ON_CALIBRATED_EDGE = True
 
+# GAP 4: the fit set for probability_calibration.shrink_for_day is the first
+# ev_snapshots cycle per settled station-day inside these LOCAL hours
+# [start, end) -- the primary entry window in SCHEDULE_WINDOWS.
+SHRINK_FIT_WINDOW_LOCAL = (5, 8)
+
 # WHICH QUANTITY THE ADMISSION BAR IS KEYED ON. Ships "ratio", which is what
 # this book has always run: net_ev_per_dollar >= min_net_ev, where
 # net_ev_per_dollar = (raw_edge / price) - slippage - fee. "per_share" tests
@@ -4878,6 +4883,17 @@ def _current_git_sha() -> Optional[str]:
         ).strip()
     except Exception:  # noqa: BLE001
         return None
+
+
+_git_sha_memo: dict = {}
+
+
+def cached_git_sha() -> Optional[str]:
+    """_current_git_sha(), resolved once per process. Stamped on ev_snapshots
+    rows (GAP 4/5), which are written every cycle."""
+    if "sha" not in _git_sha_memo:
+        _git_sha_memo["sha"] = _current_git_sha()
+    return _git_sha_memo["sha"]
 
 
 def calibration_vs_market(station_icao: str) -> tuple:

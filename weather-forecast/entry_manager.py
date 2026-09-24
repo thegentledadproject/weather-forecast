@@ -401,6 +401,7 @@ def deciding_numbers(ev_result: EVResult) -> dict:
         "calibration_source": getattr(ev_result, "calibration_source", probability_calibration.NO_TIER),
         "admission_edge": admission_edge(ev_result),
         "sizing_edge": sizing_edge(ev_result),
+        **{k: getattr(ev_result, k, None) for k in ("p_robust", "lambda_hat", "lambda_se", "lambda_days")},
     }
 
 

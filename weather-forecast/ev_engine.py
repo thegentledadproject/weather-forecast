@@ -960,6 +960,7 @@ def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
         try:
             storage.save_ev_snapshot_rows(
                 station_icao, results[0].target_date, payload["generated_at"], results,
+                config_sha=config.cached_git_sha(),
             )
         except Exception as exc:
             # Broader than the OSError above on purpose. The file write can

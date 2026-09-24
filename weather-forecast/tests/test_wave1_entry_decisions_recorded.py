@@ -196,6 +196,7 @@ def test_record_and_load_round_trip(temp_db):
         entry_price=0.60, entry_bid=0.58, model_prob=0.60, raw_edge=0.0, min_net_ev=0.15,
         rule_id="00c", calibrated_prob=0.42, calibration_source="isotonic",
         admission_edge=0.11, sizing_edge=0.09, kelly_size_preclamp_usd=20.0,
+        p_robust=0.55, lambda_hat=0.1, lambda_se=0.04, lambda_days=14,
     )
     d_defaults = EntryDecision(
         station_icao=STATION, target_date=TARGET, bucket_c=33, side="YES",
@@ -220,6 +221,7 @@ def test_record_and_load_round_trip(temp_db):
         "net_ev_at_size": 0.05, "kelly_size_preclamp_usd": 20.0,
         "recommended_size_usd": 12.5, "min_net_ev": 0.15,
         "station_maturity": "mature", "config_sha": "deadbeef",
+        "p_robust": 0.55, "lambda_hat": 0.1, "lambda_se": 0.04, "lambda_days": 14,
     }
     assert set(expected_full) == set(storage.ENTRY_DECISION_COLUMNS)
     for col, val in expected_full.items():
@@ -235,6 +237,7 @@ def test_record_and_load_round_trip(temp_db):
         "net_ev_at_size": 0.2, "kelly_size_preclamp_usd": None,
         "recommended_size_usd": 5.0, "min_net_ev": None,
         "station_maturity": "exploratory", "config_sha": "deadbeef",
+        "p_robust": None, "lambda_hat": None, "lambda_se": None, "lambda_days": None,
     }
     assert set(expected_defaults) == set(storage.ENTRY_DECISION_COLUMNS)
     for col, val in expected_defaults.items():
