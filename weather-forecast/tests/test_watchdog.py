@@ -73,3 +73,84 @@ def test_the_shipped_station_set_is_never_all_closed():
     for minute in range(0, 24 * 60, 15):
         at = datetime(2026, 9, 24, tzinfo=timezone.utc) + timedelta(minutes=minute)
         assert watchdog._some_group_open_throughout(at, watchdog.STALE_AFTER), at
+
+
+# --- clock drift ---------------------------------------------------------
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def test_clock_synced_is_ok(monkeypatch):
+    monkeypatch.setattr(watchdog.subprocess, "run",
+                        lambda *a, **kw: _FakeCompleted(0, "yes\n"))
+    status, detail = watchdog._clock_drift_status()
+    assert status == "ok"
+
+
+def test_clock_not_synced_alerts(monkeypatch):
+    monkeypatch.setattr(watchdog.subprocess, "run",
+                        lambda *a, **kw: _FakeCompleted(0, "no\n"))
+    status, detail = watchdog._clock_drift_status()
+    assert status == "alert"
+    assert "NTPSynchronized" in detail
+
+
+def test_missing_timedatectl_and_chronyc_is_unknown_not_alert(monkeypatch):
+    def boom(*a, **kw):
+        raise FileNotFoundError("no such tool")
+    monkeypatch.setattr(watchdog.subprocess, "run", boom)
+    status, detail = watchdog._clock_drift_status()
+    assert status == "unknown"
+
+
+def test_timedatectl_timeout_falls_back_to_unknown(monkeypatch):
+    import subprocess as sp
+
+    def timeout(*a, **kw):
+        raise sp.TimeoutExpired(cmd="timedatectl", timeout=5)
+    monkeypatch.setattr(watchdog.subprocess, "run", timeout)
+    status, detail = watchdog._clock_drift_status()
+    assert status == "unknown"
+
+
+def test_chrony_offset_beyond_threshold_alerts(monkeypatch):
+    def fake_run(cmd, **kw):
+        if cmd[0] == "timedatectl":
+            return _FakeCompleted(0, "yes\n")
+        return _FakeCompleted(0, "System time     : 3.500000000 seconds fast of NTP time\n")
+    monkeypatch.setattr(watchdog.subprocess, "run", fake_run)
+    status, detail = watchdog._clock_drift_status()
+    assert status == "alert"
+    assert "3.5" in detail
+
+
+def test_chrony_offset_within_threshold_is_ok(monkeypatch):
+    def fake_run(cmd, **kw):
+        if cmd[0] == "timedatectl":
+            return _FakeCompleted(0, "yes\n")
+        return _FakeCompleted(0, "System time     : 0.100000000 seconds fast of NTP time\n")
+    monkeypatch.setattr(watchdog.subprocess, "run", fake_run)
+    status, detail = watchdog._clock_drift_status()
+    assert status == "ok"
+
+
+def test_check_never_crashes_when_clock_tools_are_missing(monkeypatch, sent):
+    def boom(*a, **kw):
+        raise FileNotFoundError("no such tool")
+    monkeypatch.setattr(watchdog.subprocess, "run", boom)
+    monkeypatch.setattr(storage, "latest_cycle_write_ts",
+                        lambda: (NOW - timedelta(minutes=5)).isoformat())
+    assert watchdog.check(now=NOW) == 0
+    assert sent == []
+
+
+def test_check_alerts_and_returns_nonzero_on_clock_drift(monkeypatch, sent):
+    monkeypatch.setattr(watchdog.subprocess, "run",
+                        lambda *a, **kw: _FakeCompleted(0, "no\n"))
+    monkeypatch.setattr(storage, "latest_cycle_write_ts",
+                        lambda: (NOW - timedelta(minutes=5)).isoformat())
+    assert watchdog.check(now=NOW) == 1
+    assert len(sent) == 1
