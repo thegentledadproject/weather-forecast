@@ -16,7 +16,13 @@ import storage
 PKG = pathlib.Path(__file__).resolve().parents[1]
 REPO = PKG.parent
 
-WRITERS = {"scheduler.py", "manual_trigger.py", "bucket_bias.py", "main.py"}
+WRITERS = {"scheduler.py", "manual_trigger.py", "bucket_bias.py", "main.py",
+           "../deploy/restore_rehearsal.py"}
+# restore_rehearsal.py (ops hardening, gap audit item 2) is the one exception
+# to "only the daemon migrates": it runs storage.migrate() against a throwaway
+# TEMP COPY of a backup, never the live DB (it redirects config.DB_PATH to the
+# temp path before calling either). See its own module docstring.
+MIGRATORS = {"scheduler.py", "../deploy/restore_rehearsal.py"}
 
 
 def _py_files():
@@ -96,7 +102,7 @@ def test_only_the_daemon_migrates_in_code():
         rel for rel, path in _py_files()
         if rel != "storage.py" and _qualified_calls(path, "storage", "migrate")
     }
-    assert found == {"scheduler.py"}, f"storage.migrate() call sites: {sorted(found)}"
+    assert found == MIGRATORS, f"storage.migrate() call sites: {sorted(found)}"
 
 
 def test_boot_migrates_then_sets_writable_then_primes_the_sha(tmp_path, monkeypatch, capsys):

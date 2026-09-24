@@ -37,6 +37,11 @@ if [ -z "${POLYWEATHER_DEPLOY_REEXEC:-}" ]; then
     exec bash "$APP_DIR/deploy/deploy_daemon.sh" "$@"
 fi
 
+echo "== secrets permissions check (gap audit item 4, warns only, never aborts) =="
+# shellcheck source=./check_secrets_perms.sh
+source "$APP_DIR/deploy/check_secrets_perms.sh"
+check_secrets_permissions
+
 echo "== Python venv + deps =="
 if ! python3 -m venv "$VENV" 2>/dev/null; then
     sudo apt-get update -q && sudo apt-get install -y -q python3-venv
