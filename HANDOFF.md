@@ -56,10 +56,13 @@ The EC2 box (`ubuntu@43.216.25.99`) has run daemon code `e31363d` since 2026-09-
        - These are per-entry SEs over 9–11 days, so they are optimistic.
      - Since `e31363d` the calibrated gate already refuses all 110 of their candidates (EDDM 0/45, ZSPD 0/37, RKPK 0/28), so a named stop changes nothing today.
      - Selecting stations on past P&L doesn't persist (split-half about −0.1; see config's `MAX_ERROR_RMSE_PER_BUCKET` note).
-   - **EDDM's real defect is probably the spread floor, not the station.** It has the best forecast in Europe yet the worst Brier gap. That matches memory `spread-floor-underconfidence`:
-     - Its corrected RMSE is 0.65C, but `SPREAD_FLOOR_C` 0.70 is a `max()`, so Wave 2's floor exemption is inert for it.
-     - The too-wide spread underprices the winning bucket, and the model then sells it as NO.
-     - A fix would lower or exempt the floor where measured RMSE is small. The replay can't test it, because `backtest/engine.py` sets `allow_measured_spread=False`, so it needs its own safety argument. Not scoped.
+   - **EDDM spread-floor fix: scoped 2026-09-24, NOTHING TO BUILD.** The earlier "floor is inert" claim was wrong.
+     - Since Wave 2, the `corrected_error` tier is floored at `MEASURED_SPREAD_MIN_C` (0.30), not at 0.70, and EDDM prices on that tier. So 0.70 does not bind.
+     - Its width matches its own error: the model's top bucket averages p=0.51, and a correctly centred sd=0.65C on a 1C bucket gives ~0.56.
+     - The real gap is ACCURACY. The model's top bucket hit 7/17 (41%) versus the market's 10/17 (59%), with first snapshot per day, 09-03..19. From 09-20: 2/4 versus 4/4.
+     - So the model is slightly OVERconfident on its top pick; narrowing the spread would make it worse.
+     - The same holds at every European station plus ZSPD and RKPK: the market is both sharper (top-bucket p 0.52-0.70 vs 0.38-0.51) and more often right.
+     - The remedy is the edge-logic review's "shrink toward the ask". The calibration map already does that in effect: 0 approvals at these stations since `e31363d`.
    - **The Task 5 re-check of the 2026-09-09 named stops is now runnable** (their ratios exist):
      - CYYZ 0.98 and KHOU 0.95 now PASS. The config note says to drop any that pass, but CYYZ's model loses to the ask (Brier 0.202 vs 0.129). Operator decision, pending.
      - SBGR 2.00, KSEA 1.19, KMIA 1.05 and MMMX 1.02 still fail. Keep them stopped.
