@@ -4,7 +4,8 @@ Gap 4, step 3: admit on P_robust = m + lambda_robust * (p - m).
 m is the bucket's YES ask normalised over the station-day's listed buckets, p
 the raw model probability, and lambda_robust = max(0, lambda_hat - 1.645 SE)
 from ONE pooled fit over settled station-days strictly before the target day
-(date-clustered SE). NO = 1 - the YES value. Walk-forward comparison
+(date-clustered SE). ADMISSION applies lambda per side on the side's own raw
+ask: p_robust = ask + lambda (p_side - ask). Walk-forward comparison
 (scratchpad step1): the ask is the best forecaster and lambda_robust has been 0
 since 2026-09-08, so the rule admits ~nothing today. The user accepted that.
 """
@@ -118,12 +119,6 @@ def test_points_normalise_the_yes_asks_and_drop_partial_books():
     ]
 
 
-def test_robust_yes_probs():
-    q = pc.robust_yes_probs({30: 0.30, 31: 0.90}, {30: 0.2, 31: 0.8}, 0.5)
-    assert q == {30: pytest.approx(0.25 + 0.5 * (0.2 - 0.25)), 31: pytest.approx(0.75 + 0.5 * (0.8 - 0.75))}
-    assert pc.robust_yes_probs({30: 0.30, 31: None}, {30: 0.2, 31: 0.8}, 0.5) is None
-
-
 # --- shrink_for_day: causal, cached, fails closed ------------------------------
 
 def _seed_day(con, td, settled, p_by_bucket, m_by_bucket, st="WSSS"):
@@ -199,13 +194,36 @@ def no_slippage(monkeypatch):
     monkeypatch.setattr(ev_engine.market_client, "estimate_slippage", lambda t, s: 0.0)
 
 
-def test_the_no_side_is_priced_from_the_yes_fit_without_any_no_rows(no_slippage):
+def test_each_side_is_anchored_on_its_own_raw_ask_without_any_no_rows(no_slippage):
     quotes = {30: MarketQuote(30, 0.50, 0.55), 31: MarketQuote(31, 0.50, 0.55)}
     rows = {(r.bucket_c, r.side): r for r in _table(quotes, (0.5, 0.6, 0.06, 20))}
-    q30 = 0.5 + 0.5 * (0.6 - 0.5)
-    assert rows[(30, "YES")].p_robust == pytest.approx(q30)
-    assert rows[(30, "NO")].p_robust == pytest.approx(1 - q30)
+    assert rows[(30, "YES")].p_robust == pytest.approx(0.50 + 0.5 * (0.6 - 0.50))
+    assert rows[(30, "NO")].p_robust == pytest.approx(0.55 + 0.5 * (0.4 - 0.55))
     assert (rows[(30, "NO")].lambda_hat, rows[(30, "NO")].lambda_se, rows[(30, "NO")].lambda_days) == (0.6, 0.06, 20)
+
+
+def test_lambda_zero_admits_nothing_on_either_side_even_when_the_asks_sum_past_one(no_slippage, monkeypatch):
+    """lambda_robust 0 means trade at market = no edge, on BOTH sides, whatever
+    the overround. The old normalised-YES anchor let NO on a favourite through
+    here (1 - 0.60/1.20 = 0.50 against a 0.42 NO ask)."""
+    monkeypatch.setattr(entry_manager.market_client, "get_available_depth_usd", lambda t: 100_000.0)
+    monkeypatch.setattr(entry_manager, "count_open_positions_for_bucket", lambda *a, **k: 0)
+    estimate = CalibratedEstimate(
+        station_icao="WSSS", target_date=DAY, central_estimate_c=30.5,
+        std_dev_c=1.0, monsoon_phase="southwest", spread_source="measured_error",
+    )
+    asks = {30: (0.60, 0.42), 31: (0.30, 0.72), 32: (0.20, 0.82), 33: (0.10, 0.92)}   # YES sum 1.20
+    probs = {30: 0.90, 31: 0.05, 32: 0.03, 33: 0.02}                                  # model far off the market
+    token_map = {b: {"yes_token_id": f"y{b}", "no_token_id": f"n{b}"} for b in asks}
+    quotes = {b: MarketQuote(b, y, n) for b, (y, n) in asks.items()}
+    rows = ev_engine.compute_ev_table(estimate, token_map, quotes=quotes, model_probs=probs,
+                                      shrink=(0.0, -0.02, 0.06, 20))
+    assert len(rows) == 8
+    for r in rows:
+        assert r.p_robust == r.market_price
+        for mode in ("paper", "live"):
+            d = entry_manager.evaluate_entry(r, token_id="tok", min_net_ev=-9.0, execution_mode=mode)
+            assert not d.approved, (r.bucket_c, r.side, mode, d.reason)
 
 
 def test_a_partial_book_prices_p_robust_at_the_own_ask(no_slippage):

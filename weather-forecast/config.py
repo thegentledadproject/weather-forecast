@@ -2277,7 +2277,8 @@ ADMIT_ON_CALIBRATED_EDGE = True
 SHRINK_FIT_WINDOW_LOCAL = (5, 8)
 
 # GAP 4 (2026-09-24, user decision: switch now). Veto 0a2 AND the final
-# net-EV bar read P_robust = m + lambda_robust * (p - m) instead of the
+# net-EV bar read P_robust = ask + lambda_robust * (p - ask), per side on the
+# side's own raw ask (lambda 0 = trade at market = no edge), instead of the
 # calibrated probability; Kelly sizes on min(calibrated edge, robust edge).
 # See probability_calibration's "shrink toward the ask" block for the fit.
 #

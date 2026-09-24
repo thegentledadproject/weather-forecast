@@ -491,12 +491,12 @@ class EVResult:
     # buffer.
     calibrated_prob: Optional[float] = None
     calibration_source: str = "uncalibrated"
-    # GAP 4: shrink toward the ask. p_robust = m + lambda_robust * (p - m),
-    # m = this bucket's YES ask normalised over the station-day's listed
-    # buckets (NO side: 1 - the YES value). lambda_* describe the pooled fit
-    # it came from (probability_calibration.shrink_for_day). None = this
-    # caller did not compute it (tests, the replay), never "failed": a failed
-    # fit is lambda_robust 0, i.e. p_robust = m.
+    # GAP 4: shrink toward the ask. p_robust = ask + lambda_robust *
+    # (model_prob - ask), both for THIS side, raw ask (not normalised).
+    # lambda_* describe the pooled fit it came from
+    # (probability_calibration.shrink_for_day). None = this caller did not
+    # compute it (tests, the replay), never "failed": a failed fit is
+    # lambda_robust 0, i.e. p_robust = the ask, zero edge.
     p_robust: Optional[float] = None
     lambda_hat: Optional[float] = None
     lambda_se: Optional[float] = None

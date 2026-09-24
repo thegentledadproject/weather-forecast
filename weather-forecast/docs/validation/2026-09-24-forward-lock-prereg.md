@@ -32,7 +32,7 @@ Each forecaster gives one probability per listed bucket:
 
 - **P**: the raw model (YES `model_prob`), renormalised.
 - **M**: the YES asks, normalised.
-- **Q**: P_robust = m + λ_robust(D)·(p − m), renormalised. λ comes from `probability_calibration.shrink_for_day(D)`, which uses dates before D only. When λ = 0, Q is exactly M.
+- **Q**: P_robust = m + λ_robust(D)·(p − m), renormalised. λ comes from `probability_calibration.shrink_for_day(D)`, which uses dates before D only. When λ = 0, Q is exactly M. Q is a scoring distribution only. Trading ADMISSION uses the same λ but applies it to each side's own raw ask: P_robust_side = ask_side + λ·(p_side − ask_side). So at λ = 0 no side has any edge.
 - **U**: uniform.
 - **E30**: the station's settled-bucket counts over the 30 target dates before D, plus 0.5 per listed bucket.
 

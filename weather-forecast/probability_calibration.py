@@ -379,7 +379,8 @@ def calibration_for(station_icao: str, target_day: date, side: Optional[str] = N
 # m = the bucket's YES ask normalised over the station-day's listed buckets,
 # p = the raw model probability. lambda = 0 says "the ask is the forecast";
 # 1 says "the model is". Least squares on the outcome, pooled over every
-# station, one number:
+# station, one number (the FIT uses normalised YES asks; ADMISSION applies
+# lambda to each side's own raw ask -- see ev_engine.compute_ev_table):
 #
 #     A_d = sum over date d of (o - m)(p - m),   B_d = sum of (p - m)^2
 #     lambda_hat = sum A_d / sum B_d
@@ -444,21 +445,6 @@ def shrink_points(rows) -> List[tuple]:
             o = 1.0 if r["bucket_c"] == r["settled_bucket_c"] else 0.0
             out.append((d, o, r["market_price"] / total, r["model_prob"]))
     return out
-
-
-def robust_yes_probs(yes_asks: Dict[int, Optional[float]], model_yes: Dict[int, float],
-                     lam: float) -> Optional[Dict[int, float]]:
-    """{bucket: m + lam (p - m)} with m the normalised YES ask, or None when
-    any listed bucket is unpriced (the caller then fails closed)."""
-    if not yes_asks or any(v is None for v in yes_asks.values()):
-        return None
-    total = sum(yes_asks.values())
-    if total <= 0:
-        return None
-    return {
-        b: (ask / total) + lam * (model_yes[b] - ask / total)
-        for b, ask in yes_asks.items()
-    }
 
 
 def shrink_for_day(day: date) -> tuple:

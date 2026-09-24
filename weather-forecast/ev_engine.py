@@ -395,26 +395,25 @@ def compute_ev_table(
             ))
 
     # GAP 4: P_robust on every priced row, from the day's pooled lambda
-    # (probability_calibration.shrink_for_day). YES = m + lambda (p - m) with
-    # m the YES ask normalised over this book; NO = 1 - that. A book with any
-    # unpriced YES bucket cannot be normalised, so p_robust = the row's own
-    # ask: zero edge, fail closed. None `shrink` = caller did not ask.
+    # (probability_calibration.shrink_for_day, fitted on normalised YES asks).
+    # ADMISSION anchors each side on its OWN raw ask:
+    #     p_robust = ask_side + lambda_robust * (p_side - ask_side)
+    # so lambda_robust 0 means exactly "trade at market": zero edge before
+    # fees on both sides. (Anchoring NO on 1 - the normalised YES ask made NO
+    # on favourites look cheap at lambda 0, because normalising moves the
+    # overround's mass onto the long shots.) A book with any unpriced YES
+    # bucket keeps p_robust = the own ask: fail closed. None `shrink` =
+    # caller did not ask.
     if shrink is not None:
-        import probability_calibration
-
         lam_robust, lam_hat, lam_se, lam_days = shrink
-        q_yes = probability_calibration.robust_yes_probs(
-            {b: quotes[b].yes_price for b in token_map},
-            {b: model_probs.get(b, 0.0) for b in token_map},
-            lam_robust,
-        )
+        full_book = all(quotes[b].yes_price is not None for b in token_map)
         for r in results:
             if r.market_price is None:
                 continue
-            if q_yes is None:
-                r.p_robust = r.market_price
-            else:
-                r.p_robust = q_yes[r.bucket_c] if r.side == "YES" else 1 - q_yes[r.bucket_c]
+            r.p_robust = (
+                r.market_price + lam_robust * (r.model_prob - r.market_price)
+                if full_book else r.market_price
+            )
             r.lambda_hat, r.lambda_se, r.lambda_days = lam_hat, lam_se, lam_days
 
     return results
