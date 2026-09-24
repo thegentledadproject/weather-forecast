@@ -47,7 +47,23 @@ The EC2 box (`ubuntu@43.216.25.99`) has run daemon code `e31363d` since 2026-09-
      - The other 26 stations net about −$140.
    - Americas without KATL and KLGA is about −$3. Europe: 6 of 7 stations lost; only LFPB is positive (+$31). Asia traded far less than before (69 trades vs Europe's 124).
    - Every station has at most 15 days since 09-03, so none of this is separable yet. KATL is also the one station where raw beats calibrated (see memory `regional-calibration-replay`). Don't act on one station.
-   - Candidate next step: check whether EDDM, ZSPD and RKPK should join `FORCE_COLLECTION_ONLY_STATIONS`, with a structural reason like RPLL's spread, not just a bad fortnight.
+   - **Collection-only for EDDM, ZSPD and RKPK: checked 2026-09-24, answer NO.** Nothing was changed.
+     - All three pass the structural gate (error ÷ bucket, stop above 1.00): EDDM 0.65, ZSPD 0.78, RKPK 0.95.
+     - Model-minus-ask Brier gap since 09-03 (negative = the ask wins):
+       - EDDM −0.140 ± 0.024
+       - RKPK −0.080 ± 0.031
+       - ZSPD −0.050 ± 0.037 (not separable)
+       - These are per-entry SEs over 9–11 days, so they are optimistic.
+     - Since `e31363d` the calibrated gate already refuses all 110 of their candidates (EDDM 0/45, ZSPD 0/37, RKPK 0/28), so a named stop changes nothing today.
+     - Selecting stations on past P&L doesn't persist (split-half about −0.1; see config's `MAX_ERROR_RMSE_PER_BUCKET` note).
+   - **EDDM's real defect is probably the spread floor, not the station.** It has the best forecast in Europe yet the worst Brier gap. That matches memory `spread-floor-underconfidence`:
+     - Its corrected RMSE is 0.65C, but `SPREAD_FLOOR_C` 0.70 is a `max()`, so Wave 2's floor exemption is inert for it.
+     - The too-wide spread underprices the winning bucket, and the model then sells it as NO.
+     - A fix would lower or exempt the floor where measured RMSE is small. The replay can't test it, because `backtest/engine.py` sets `allow_measured_spread=False`, so it needs its own safety argument. Not scoped.
+   - **The Task 5 re-check of the 2026-09-09 named stops is now runnable** (their ratios exist):
+     - CYYZ 0.98 and KHOU 0.95 now PASS. The config note says to drop any that pass, but CYYZ's model loses to the ask (Brier 0.202 vs 0.129). Operator decision, pending.
+     - SBGR 2.00, KSEA 1.19, KMIA 1.05 and MMMX 1.02 still fail. Keep them stopped.
+     - Re-run with the scratch script's logic: `calibration.error_width_ratio` plus `promotion_dossier.live_calibration` per station.
    - Re-run `--by region --since 2026-09-03` and `--by station` at the ~10-04 checkpoint.
    - To split by station within one region, build the `--station` list from `config.region_of`:
      `PY=~/weather-forecast/.venv/bin/python; $PY cohort_monitor.py --by station --since 2026-09-03 $($PY -c 'import config; print(" ".join("--station "+s for s in sorted(config.STATIONS) if config.region_of(s)=="europe"))')`
