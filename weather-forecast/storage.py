@@ -1294,14 +1294,19 @@ def _entry_fee_for(position: Position) -> Optional[float]:
 
 
 def open_position(position: Position) -> None:
-    """Persist a newly-entered position. position.status should be 'open'."""
+    """Persist a newly-entered position. position.status should be 'open'.
+
+    A REPLAYED record for a position_id that is already CLOSED is dropped with
+    a warning (acceptance test #11): INSERT OR REPLACE used to let a second
+    write of the same fill reopen the row and wipe its exit.
+    """
     with _db() as conn:
         # Columns NAMED, not positional. A bare VALUES(...) list binds by
         # ordinal, so it depends on the CREATE TABLE order matching the tuple
         # below -- and the migration above appends columns over time, which is
         # exactly how that pairing drifts. Naming them makes a mismatch a
         # loud error instead of a silent column swap.
-        conn.execute(
+        cur = conn.execute(
             """
             INSERT OR REPLACE INTO positions (
                 position_id, station_icao, target_date, bucket_c, side,
@@ -1312,8 +1317,9 @@ def open_position(position: Position) -> None:
                 exit_blocked_reason, entry_fee_per_share,
                 calibrated_prob, calibration_source, admission_edge,
                 sizing_edge, kelly_size_preclamp_usd
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                      ?, ?, ?, ?, ?)
+            ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                     ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (SELECT 1 FROM positions WHERE position_id = ? AND status != 'open')
             """,
             (
                 position.position_id,
@@ -1351,8 +1357,12 @@ def open_position(position: Position) -> None:
                 position.admission_edge,
                 position.sizing_edge,
                 position.kelly_size_preclamp_usd,
+                position.position_id,
             ),
         )
+        if cur.rowcount == 0:
+            print(f"[storage] WARNING: {position.position_id} is already closed -- replayed "
+                  f"open/fill record NOT written; the closed row stands.")
 
 
 def update_high_water_mark(position_id: str, new_high_water_mark: float) -> None:
