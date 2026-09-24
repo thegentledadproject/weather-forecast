@@ -100,7 +100,36 @@ def get_as_of() -> Optional[datetime]:
     return _AS_OF
 
 
+@contextmanager
+def read_only():
+    """Run a block with this process NON-writable (restored after). Only ever
+    narrows what the process may do; the replay wraps itself in it so the
+    as-of pins are legal even inside a writer's process (tests)."""
+    global _WRITABLE
+    was = _WRITABLE
+    _WRITABLE = False
+    try:
+        yield
+    finally:
+        _WRITABLE = was
+
+
+# (as_of, DB_PATH) -> the DDL; built once per pin, not per connection (the
+# per-station offsets cost a tz lookup each, and the replay opens hundreds of
+# connections per tick). Holds only the latest pin.
+_AS_OF_DDL: Optional[tuple] = None
+
+
 def _apply_as_of_views(conn: sqlite3.Connection, as_of: datetime) -> None:
+    global _AS_OF_DDL
+    key = (as_of, str(config.DB_PATH))
+    if _AS_OF_DDL is None or _AS_OF_DDL[0] != key:
+        _AS_OF_DDL = (key, _as_of_view_sql(conn, as_of))
+    for stmt in _AS_OF_DDL[1]:
+        conn.execute(stmt)
+
+
+def _as_of_view_sql(conn: sqlite3.Connection, as_of: datetime) -> List[str]:
     """
     TEMP views (temp schema shadows main for unqualified names, and a temp
     object is legal on a mode=ro connection) hiding what did not exist yet:
@@ -126,9 +155,10 @@ def _apply_as_of_views(conn: sqlite3.Connection, as_of: datetime) -> None:
     from backtest import settings  # lazy: only the replay ever gets here
 
     cut = f"julianday('{as_of.isoformat()}')"
+    stmts = []
     for table, col in (("forecasts", "fetched_at"), ("ensemble_spread", "fetched_at"),
                        ("settled_buckets", "recorded_at")):
-        conn.execute(f"CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} "
+        stmts.append(f"CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} "
                      f"WHERE julianday({col}) <= {cut}")
 
     # Column ORDER preserved: _row_to_position indexes SELECT * by ordinal.
@@ -141,7 +171,7 @@ def _apply_as_of_views(conn: sqlite3.Connection, as_of: datetime) -> None:
             cols.append(f"CASE WHEN {reopened} THEN NULL ELSE {name} END AS {name}")
         else:
             cols.append(name)
-    conn.execute(f"CREATE TEMP VIEW positions AS SELECT {', '.join(cols)} FROM main.positions "
+    stmts.append(f"CREATE TEMP VIEW positions AS SELECT {', '.join(cols)} FROM main.positions "
                  f"WHERE julianday(entry_time) <= {cut}")
 
     lag = timedelta(days=settings.OBS_PUBLISH_LAG_DAYS)
@@ -151,10 +181,11 @@ def _apply_as_of_views(conn: sqlite3.Connection, as_of: datetime) -> None:
         last = ((as_of + timedelta(hours=offset)).date() - lag).isoformat()
         cases.append(f"WHEN '{icao}' THEN '{last}'")
         fallback = last if fallback is None else min(fallback, last)
-    conn.execute(
+    stmts.append(
         "CREATE TEMP VIEW observations AS SELECT * FROM main.observations "
         f"WHERE target_date <= CASE station_icao {' '.join(cases)} ELSE '{fallback}' END"
     )
+    return stmts
 
 
 def _process_name() -> str:

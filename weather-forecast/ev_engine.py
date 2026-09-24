@@ -359,21 +359,9 @@ def compute_ev_table(
             # Passed in rather than fetched: probability_calibration reads the
             # cohort through cohort_monitor, which imports this module, so
             # fitting here would be circular. run_for_station_with_map fetches.
-            calibrated_prob = None
-            calibration_source = "uncalibrated"
-            # A {side: (map, source, n)} dict from _calibration_for, or one
-            # tuple for both sides (tests, callers that fit it themselves).
-            side_calibration = (
-                calibration.get(side) if isinstance(calibration, dict) else calibration
+            calibrated_prob, calibration_source = apply_side_calibration(
+                calibration, side, side_model_prob
             )
-            if side_calibration is not None:
-                import probability_calibration
-
-                fitted, calibration_source, _n = side_calibration
-                if calibration_source in probability_calibration.CALIBRATED_TIERS:
-                    calibrated_prob = probability_calibration.apply_map(
-                        fitted, side_model_prob
-                    )
 
             results.append(EVResult(
                 station_icao=estimate.station_icao,
@@ -394,6 +382,25 @@ def compute_ev_table(
             ))
 
     return results
+
+
+def apply_side_calibration(calibration, side: str, side_model_prob: float):
+    """
+    (calibrated_prob, calibration_source) for one priced row. `calibration` is
+    a {side: (map, source, n)} dict from _calibration_for, or one tuple for
+    both sides (tests, callers that fit it themselves), or None. Shared by
+    compute_ev_table and backtest/engine.py so the replay calibrates its rows
+    exactly as live does (GAP 3).
+    """
+    side_calibration = calibration.get(side) if isinstance(calibration, dict) else calibration
+    if side_calibration is None:
+        return None, "uncalibrated"
+    import probability_calibration
+
+    fitted, calibration_source, _n = side_calibration
+    if calibration_source in probability_calibration.CALIBRATED_TIERS:
+        return probability_calibration.apply_map(fitted, side_model_prob), calibration_source
+    return None, calibration_source
 
 
 def reprice_for_mode(results: List[EVResult], execution_mode: Optional[str]) -> List[EVResult]:

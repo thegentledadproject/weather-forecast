@@ -1003,30 +1003,39 @@ class TestBacktestEngineIsRegionAware:
         tick = Tick(ts=clock.ts, mode="primary", min_net_ev=0.15, interval_min=10)
         portfolio = PortfolioState(bankroll_usd=config.region_bankroll_usd("EUTEST"))
 
-        engine._entry_pass(
-            station=eu,
-            day=day,
-            clock=clock,
-            tick=tick,
-            token_map={},
-            portfolio=portfolio,
-            fill_model=None,
-            prices=None,
-            forecast_history={},
-            all_observations=[],
-            fee_rate_pct=0.02,
-            counters={
-                "n_candidates_screened": 0,
-                "n_decisions": 0,
-                "n_entries": 0,
-                "n_entries_missing_token": 0,
-                "n_ev_rows_no_price": 0,
-            },
-            rejections={},
-            entry_records={},
-            decisions_log=[],
-            last_observed={},
-        )
+        # GAP 3: _entry_pass pins storage/clock as of the tick, which is only
+        # legal read-only; engine.run() does both of these itself.
+        import storage
+        from backtest import as_of
+
+        with storage.read_only():
+            try:
+                engine._entry_pass(
+                    station=eu,
+                    day=day,
+                    clock=clock,
+                    tick=tick,
+                    token_map={},
+                    portfolio=portfolio,
+                    fill_model=None,
+                    prices=None,
+                    forecast_history={},
+                    all_observations=[],
+                    fee_rate_pct=0.02,
+                    counters={
+                        "n_candidates_screened": 0,
+                        "n_decisions": 0,
+                        "n_entries": 0,
+                        "n_entries_missing_token": 0,
+                        "n_ev_rows_no_price": 0,
+                    },
+                    rejections={},
+                    entry_records={},
+                    decisions_log=[],
+                    last_observed={},
+                )
+            finally:
+                as_of.release()
 
         assert "max_portfolio_usd" in captured, "decide_portfolio_entries_sim was never called"
         assert captured["max_portfolio_usd"] == 0.0

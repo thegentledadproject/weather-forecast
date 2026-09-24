@@ -100,12 +100,14 @@ from typing import Callable, Dict, List, Optional, Tuple
 import bucket_axis
 import calibration
 import config
+import entry_manager
 import ev_engine
 import probability
 import risk_manager
 import storage
 from models import CalibratedEstimate, EVResult, ObservedReading, Position
 
+from backtest import as_of
 from backtest import entry_sim
 from backtest import fill_model as fill_model_mod
 from backtest import price_store
@@ -442,7 +444,36 @@ def _pick_observation(candidates: List[ObservedReading], station) -> Optional[Ob
 # --------------------------------------------------------------------------
 
 
-def run(
+# GAP 3 (P3): observation sources that publish in ARREARS. A replay pinned
+# to an instant cannot know when such a row became readable (VHHH's HKO
+# CLMMAXT extract lands a month at a time, ~46 days late -- see
+# config.HKO_INGEST_LOOKBACK_DAYS), so the publish-lag approximation in
+# storage's observations view would hand it rows the live cycle never had.
+ARREARS_OBSERVATION_SOURCES = ("hko_daily_max",)
+
+
+def run(station_icao: str, *args, **kwargs) -> BacktestRun:
+    """
+    Replay [start_date, end_date]; see _run. GAP 3: the whole run reads the
+    trading database READ-ONLY and point-in-time -- storage is made
+    non-writable for its duration (the as-of pins refuse otherwise) and
+    both pins are released however it ends.
+    """
+    station = config.get_station(station_icao)
+    if station.resolution_grade_source in ARREARS_OBSERVATION_SOURCES:
+        raise ValueError(
+            f"{station.icao} settles on {station.resolution_grade_source}, which publishes in "
+            f"arrears; a point-in-time replay cannot reconstruct when its observations became "
+            f"readable. Refused (ARREARS_OBSERVATION_SOURCES)."
+        )
+    with storage.read_only():
+        try:
+            return _run(station_icao, *args, **kwargs)
+        finally:
+            as_of.release()
+
+
+def _run(
     station_icao: str,
     start_date: date,
     end_date: date,
@@ -599,6 +630,11 @@ def run(
                 if ids.get(key):
                     tokens_seen.add(ids[key])
 
+        # GAP 3: production memoises its storage-derived readers per local
+        # day (calibration map, error-width ratio) or longer; drop them at
+        # each simulated day so no day is served another day's answer.
+        as_of.clear_caches()
+
         day_offset = simclock.utc_offset_for(station, day)
         clock.retune(day_offset)
         for tick in simclock.generate_ticks(day, day_offset):
@@ -723,12 +759,28 @@ def run(
             "observations only and replays of earlier dates were better "
             "informed than the live trader that traded them."
         ),
-        "ensemble_members": None,
+        "ensemble_members": "stored ensemble_spread std_dev_c as [s/sqrt2, -s/sqrt2], fetched_at <= tick",
         "ensemble_note": (
-            "No historical ensemble spread exists, so calibration.estimate_std_dev falls "
-            "back to forecast spread, then observed spread, then its 1.2C default. Live "
-            "passes openmeteo_client.get_ensemble_spread(); spreads will differ."
+            "calibrate() reads only stdev(members), so the two-member stand-in reproduces the "
+            "stored spread exactly. The table is REPLACEd per scan: a tick earlier than the "
+            "day's last stored fetch finds no row (ensemble_unavailable)."
         ),
+        # GAP 3 flags: what the point-in-time replay could NOT reconstruct.
+        "point_in_time": {
+            "as_of_views": ["forecasts", "ensemble_spread", "settled_buckets", "positions", "observations"],
+            "observations_approx": True,
+            "observations_approx_note": (
+                "observations carry no fetch time: a row is visible from local date >= "
+                "target_date + OBS_PUBLISH_LAG_DAYS, and a value later overwritten in place "
+                "cannot be un-revised"
+            ),
+            "ensemble_unavailable": int(counters.get("n_entry_cycles_ensemble_unavailable", 0)),
+            "calibration_from_production_book": True,
+            "calibration_note": (
+                "probability_calibration.calibration_for fits on the PRODUCTION book's closed "
+                "positions as of the tick (not on replayed trades), exactly as the live cycle does"
+            ),
+        },
         "fill_model": fill_model.describe(),
         "config_constants": {
             "BANKROLL_USD": config.BANKROLL_USD,
@@ -973,28 +1025,31 @@ def _entry_pass(
         all_observations, clock, day - timedelta(days=OBSERVATION_WINDOW_DAYS)
     )
 
+    # GAP 3: production's OWN readers, answered as of this tick. The whole
+    # run is pinned (backtest/as_of.py): storage reads see only rows that
+    # existed at sim_utc and config's clock reads sim_utc, so the bias, the
+    # measured spread tiers, the error-width gate and the calibration map are
+    # the ones the live cycle would have computed here. Until 2026-09-24 the
+    # replay pinned bias to 0.0 and the spread to a constant instead.
+    as_of.pin(sim_utc, clear=False)
+    bias_c, bias_n, bias_stderr = entry_manager.forecast_bias_stats(station.icao)
+    ensemble_members = _stored_ensemble_members(station.icao, day)
+    if ensemble_members is None:
+        counters["n_entry_cycles_ensemble_unavailable"] = (
+            int(counters.get("n_entry_cycles_ensemble_unavailable", 0)) + 1
+        )
+
     estimate: CalibratedEstimate = calibration.calibrate(
         station=station,
         target_date=day,
         forecasts=forecasts,
         observations=observations,
-        ensemble_members=None,  # no historical ensemble spread exists -- see manifest
-        # forecast_bias_c deliberately left at its 0.0 default: correcting
-        # by a bias measured over the whole record would leak the future
-        # into every replayed day. Doing this honestly means reconstructing
-        # the bias as of each simulated instant (only forecasts fetched on
-        # or before each past target date, only observations visible then),
-        # which is its own piece of work. Until that exists, replays model
-        # the UNCORRECTED calibration -- and the same reasoning is why
-        # enforce_bias_quality stays off for the gate below.
-        #
-        # allow_measured_spread=False for the IDENTICAL reason, one level
-        # down: calibration.estimate_std_dev's measured and pooled tiers
-        # both read the whole stored error record, so either would price a
-        # replayed Aug-3 tick using errors from Aug-10. Replays get the
-        # measured pooled constant instead, reported as "replay_constant".
-        allow_measured_spread=False,
+        ensemble_members=ensemble_members,
+        # exactly scheduler._run_full_cycle's expression
+        forecast_bias_c=bias_c or 0.0,
     )
+    # ev_engine.run_for_station_with_map's call, point-in-time.
+    row_calibration = ev_engine._calibration_for(station.icao, day)
 
     # Station's own bucket bounds + edge mode (B4): the legacy
     # config.BUCKET_MIN_C/MAX_C globals are Singapore/KL-era defaults and
@@ -1048,6 +1103,7 @@ def _entry_pass(
                     else ev_engine.taker_fee_pct_of_notional(None),
                     net_ev_per_dollar=None,
                     market_bid=prices.price(token_id, tick.ts),
+                    spread_source=estimate.spread_source,
                     notes="No live price available this cycle.",
                 ))
                 continue
@@ -1066,6 +1122,9 @@ def _entry_pass(
             )
             raw_edge = side_model_prob - price
             net_ev = (raw_edge / price) - slippage - fee_pct if price > 0 else None
+            calibrated_prob, calibration_source = ev_engine.apply_side_calibration(
+                row_calibration, side, side_model_prob
+            )
 
             rows.append(EVResult(
                 station_icao=estimate.station_icao,
@@ -1085,80 +1144,25 @@ def _entry_pass(
                 # the OLD basis while the live book used the new one, which is
                 # the divergence Position.model_prob exists to expose.
                 market_bid=prices.price(token_id, tick.ts),
+                spread_source=estimate.spread_source,
+                calibrated_prob=calibrated_prob,
+                calibration_source=calibration_source,
             ))
 
     screened = ev_engine.best_opportunities(rows, min_net_ev=tick.min_net_ev)
     counters["n_candidates_screened"] = int(counters["n_candidates_screened"]) + len(screened)
 
-    # --- candidates: token lookup exactly as entry_manager.decide_entries -
-    candidates: List[Tuple[EVResult, str]] = []
-    for result in screened:
-        bucket_ids = token_map.get(result.bucket_c)
-        if not bucket_ids:
-            continue
-        token_id = bucket_ids.get("yes_token_id") if result.side == "YES" else bucket_ids.get("no_token_id")
-        if not token_id:
-            continue
-        candidates.append((result, token_id))
-
-    # Dollars already deployed into this station/day by earlier cycles --
-    # open positions plus same-day closed ones (a stopped-out leg still
-    # spent budget). Mirrors entry_manager.station_day_exposure_usd().
-    existing_exposure_usd = portfolio.total_open_exposure(station.icao, day) + sum(
-        p.size_usd
-        for p in portfolio.closed
-        if p.station_icao == station.icao and p.target_date == day
-    )
-
-    # Portfolio-wide (ALL stations) same-day exposure, mirroring
-    # entry_manager.portfolio_day_exposure_usd() -- what makes
-    # config.MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD actually bind in a
-    # replay instead of only the per-station cap. station_icao=None so
-    # total_open_exposure sums every station's open positions, not just
-    # this one. A single-station run() only ever holds this one station's
-    # positions in `portfolio` anyway (see the C5 guard above), so this
-    # collapses to existing_exposure_usd in practice -- but it's computed
-    # honestly rather than assumed, so a future multi-station replay
-    # doesn't silently under-count the cap.
-    portfolio_exposure_usd = portfolio.total_open_exposure(None, day) + sum(
-        p.size_usd for p in portfolio.closed if p.target_date == day
-    )
-
-    # Point-in-time count of this station's OWN settlement-grade
-    # observations (D1/D2's resolution_grade_source), for the
-    # collection-first gate (F2). Reuses `observations` -- the same
-    # _visible_observations() list _entry_pass already built above for
-    # calibration -- rather than a fresh, wider query: that list is
-    # already scoped to what THIS simulated instant could legitimately
-    # know (no lookahead), which is exactly the count the live gate reads
-    # from storage as of "now". Counting anything broader would let a
-    # replay see observations its own sim clock hasn't reached yet.
-    resolution_obs_count = sum(
-        1 for o in observations if o.source == station.resolution_grade_source
-    )
-
-    decisions = entry_sim.decide_portfolio_entries_sim(
-        candidates=candidates,
+    candidates, decisions = decide_entries(
+        station=station,
+        day=day,
+        screened=screened,
+        token_map=token_map,
+        forecast_sources=estimate.inputs_used,
         portfolio=portfolio,
         fill_model=fill_model,
         price_lookup=lambda token_id: prices.snapshot(token_id, tick.ts),
         min_net_ev=tick.min_net_ev,
-        sizing_bankroll=portfolio.sizing_bankroll(),
-        existing_exposure_usd=existing_exposure_usd,
-        portfolio_exposure_usd=portfolio_exposure_usd,
-        # Region-scoped, mirroring entry_manager.decide_portfolio_entries():
-        # without this, apply_portfolio_budget() falls back to its own
-        # global default (Asia's MAX_TOTAL_EXPOSURE_PORTFOLIO_PER_DAY_USD),
-        # which is wrong for any station outside Asia.
-        max_portfolio_usd=config.region_max_daily_exposure_usd(station.icao),
-        resolution_obs_count=resolution_obs_count,
-        enforce_collection_gate=True,
-        # Off until point-in-time bias reconstruction exists (see the
-        # calibrate() call above). Replays therefore model the OLD
-        # counting-only gate, not the live bias-quality one -- a known and
-        # deliberate live/replay divergence, recorded here rather than
-        # papered over with a whole-record bias that would be lookahead.
-        enforce_bias_quality=False,
+        bias_stats=(bias_c, bias_n, bias_stderr),
     )
     counters["n_decisions"] = int(counters["n_decisions"]) + len(decisions)
 
@@ -1270,6 +1274,104 @@ def _entry_pass(
         "rejections": cycle_rejections,
         "opened_position_ids": opened_ids,
     })
+
+
+def decide_entries(
+    station,
+    day: date,
+    screened: List[EVResult],
+    token_map,
+    forecast_sources,
+    portfolio,
+    fill_model,
+    price_lookup,
+    min_net_ev: float,
+    bias_stats: Optional[tuple] = None,
+):
+    """
+    The engine's entry decision for one tick: candidates -> (candidates,
+    decisions). The replay's twin of entry_manager.decide_portfolio_entries,
+    and the unit tests/test_replay_parity.py part (b) holds to it.
+
+    Stage 0 is fed by production's own readers, which the caller has pinned
+    to the simulated instant (backtest/as_of.py): the all-time settlement-
+    grade count, the bias and its quality, the fitted source mix, today's mix
+    and the error-width ratio -- enforce_bias_quality=True, as live. Open
+    positions, cooldowns and the station/day budget come from the replay's
+    own PortfolioState; the cross-station (region) budget sees only this
+    station, which is the known single-station limit (see the gap-3 P4 note).
+    """
+    # --- candidates: token lookup exactly as entry_manager.decide_entries -
+    candidates: List[Tuple[EVResult, str]] = []
+    for result in screened:
+        bucket_ids = token_map.get(result.bucket_c)
+        if not bucket_ids:
+            continue
+        token_id = bucket_ids.get("yes_token_id") if result.side == "YES" else bucket_ids.get("no_token_id")
+        if not token_id:
+            continue
+        candidates.append((result, token_id))
+
+    # Dollars already deployed into this station/day by earlier cycles --
+    # open positions plus same-day closed ones (a stopped-out leg still
+    # spent budget). Mirrors entry_manager.station_day_exposure_usd().
+    existing_exposure_usd = portfolio.total_open_exposure(station.icao, day) + sum(
+        p.size_usd
+        for p in portfolio.closed
+        if p.station_icao == station.icao and p.target_date == day
+    )
+    # Portfolio-wide same-day exposure, mirroring
+    # entry_manager.portfolio_day_exposure_usd(). A single-station run only
+    # ever holds this station's positions, so it collapses to the figure
+    # above -- computed honestly so a multi-station replay would not
+    # under-count the cap.
+    portfolio_exposure_usd = portfolio.total_open_exposure(None, day) + sum(
+        p.size_usd for p in portfolio.closed if p.target_date == day
+    )
+
+    if bias_stats is None:
+        bias_stats = entry_manager.forecast_bias_stats(station.icao)
+    _bias_c, bias_n, bias_stderr = bias_stats
+
+    decisions = entry_sim.decide_portfolio_entries_sim(
+        candidates=candidates,
+        portfolio=portfolio,
+        fill_model=fill_model,
+        price_lookup=price_lookup,
+        min_net_ev=min_net_ev,
+        sizing_bankroll=portfolio.sizing_bankroll(),
+        existing_exposure_usd=existing_exposure_usd,
+        portfolio_exposure_usd=portfolio_exposure_usd,
+        # Region-scoped, mirroring entry_manager.decide_portfolio_entries().
+        max_portfolio_usd=config.region_max_daily_exposure_usd(station.icao),
+        # Live's reader, all-time, as of the pin -- not a count over the
+        # 30-day calibration window as before GAP 3.
+        resolution_obs_count=entry_manager.resolution_obs_count(station.icao),
+        enforce_collection_gate=True,
+        bias_n=bias_n,
+        bias_stderr=bias_stderr,
+        enforce_bias_quality=True,
+        bias_source_mix=entry_manager.forecast_bias_source_mix(station.icao),
+        today_source_mix=entry_manager.today_source_mix_for(forecast_sources),
+        error_width_ratio=entry_manager.station_error_width_ratio(station.icao),
+    )
+    return candidates, decisions
+
+
+def _stored_ensemble_members(station_icao: str, day: date) -> Optional[List[float]]:
+    """
+    GAP 3 (P3). The stored ECMWF spread for `day`, as two members whose
+    sample stdev reproduces it: calibration.estimate_std_dev reads only
+    statistics.stdev(members), and stdev([s/sqrt2, -s/sqrt2]) == s. None when
+    no row fetched at or before the pinned instant exists -- the table is
+    REPLACEd per scan, so an earlier fetch overwritten by a later one is gone
+    (counted in the manifest as ensemble_unavailable).
+    """
+    row = storage.load_ensemble_spreads(station_icao).get(day)
+    if row is None:
+        return None
+    half = float(row[0]) / (2 ** 0.5)
+    return [half, -half]
 
 
 def _model_prob_for(rows: List[EVResult], bucket_c: int, side: str) -> Optional[float]:

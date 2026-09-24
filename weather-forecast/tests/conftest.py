@@ -212,6 +212,20 @@ def build_scenario(
                 max_temp_c=temp, fetched_at=fetched, raw_note="synthetic",
             ))
 
+    # GAP 3: the replay now runs live's stage-0 gate (bias quality, source
+    # mix) on the production readers, so the station needs a measured bias
+    # before D1: morning forecasts for the nine observed history days below,
+    # centred on the 32.0 truth with a small alternating error.
+    for dom in range(1, 10):
+        day = date(2026, 8, dom)
+        fetched = simclock.SimClock(simclock.local_minute_to_ts(day, 4 * 60 + 50)).now_iso()
+        wobble = 0.2 if dom % 2 else -0.2
+        for source, temp in (("open_meteo_ecmwf", 31.53 + wobble), ("open_meteo_gfs", 32.47 + wobble)):
+            storage.save_forecast(PointForecast(
+                station_icao=STATION_ICAO, source=source, target_date=day,
+                max_temp_c=temp, fetched_at=fetched, raw_note="synthetic history",
+            ))
+
     # IN-WINDOW TRIPWIRE (never poisoned): an absurd 40C forecast published
     # at 06:30 local on D1. Ticks BEFORE 06:30 that let it into calibration
     # are reading the future, and the recorded central estimate says so.

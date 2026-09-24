@@ -293,8 +293,14 @@ def test_replay_constant_is_not_penalised_as_low_confidence():
     assert "replay_constant" not in config.LOW_CONFIDENCE_SPREAD_SOURCES
 
 
-def test_engine_opts_out_of_the_measured_spread():
-    """Structural: the opt-out is only useful if the engine actually passes it."""
+def test_engine_prices_on_the_point_in_time_measured_spread():
+    """
+    GAP 3 (2026-09-24) inverted this pin. The engine used to pass
+    allow_measured_spread=False because the measured tiers read the whole
+    record; it now pins storage as of the tick (backtest/as_of.py), so it
+    must NOT opt out -- an opt-out would re-open the replay/live divergence.
+    tests/test_replay_parity.py proves the readers are point-in-time.
+    """
     import ast
     from pathlib import Path
 
@@ -310,11 +316,11 @@ def test_engine_opts_out_of_the_measured_spread():
     assert calls, "no calibration.calibrate() call found in the engine"
     for call in calls:
         kw = {k.arg: k.value for k in call.keywords}
-        assert "allow_measured_spread" in kw, (
-            f"engine.py:{call.lineno} calls calibrate() without opting out of the "
-            f"measured spread -- that is lookahead"
+        assert "allow_measured_spread" not in kw, (
+            f"engine.py:{call.lineno} opts calibrate() out of the measured spread; "
+            f"the replay prices on production's point-in-time tiers since GAP 3"
         )
-        assert kw["allow_measured_spread"].value is False
+    assert "as_of.pin(" in Path(engine.__file__).read_text(encoding="utf-8")
 
 
 # --------------------------------------------------------------------------

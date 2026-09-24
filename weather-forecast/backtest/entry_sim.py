@@ -292,12 +292,11 @@ def evaluate_entry_sim(
         min_abs_edge *= config.LOW_CONFIDENCE_EDGE_MULTIPLIER
 
     # Same helper as live (config.ADMIT_ON_CALIBRATED_EDGE), so the two cannot
-    # drift on what "calibrated" means. IN PRACTICE THE REPLAY STAYS RAW: the
-    # rows the engine feeds this carry no fitted map, so admission_edge() falls
-    # through to raw_edge. That means a sweep CANNOT score the calibrated gate,
-    # which is a limitation of the replay's inputs and not of this line -- see
-    # tests/test_calibrated_admission.py, which pins it so nobody reads a sweep
-    # as evidence about a rule it never ran.
+    # drift on what "calibrated" means. Since GAP 3 (2026-09-24) the engine's
+    # rows carry production's point-in-time map (ev_engine._calibration_for
+    # under backtest/as_of.py), so the replay admits on the calibrated edge as
+    # live does. A row with NO map still falls through to raw_edge --
+    # tests/test_calibrated_admission.py pins that fallthrough.
     gate_edge = deciding["admission_edge"]
     if gate_edge is not None and edge_misses_bar(gate_edge, min_abs_edge):
         low_conf_note = f" (raised: spread_source={spread_source})" if min_abs_edge != config.MIN_ABS_RAW_EDGE else ""
@@ -611,6 +610,9 @@ def decide_portfolio_entries_sim(
     bias_n: Optional[int] = None,
     bias_stderr: Optional[float] = None,
     enforce_bias_quality: bool = False,
+    bias_source_mix: Optional[frozenset] = None,
+    today_source_mix: Optional[frozenset] = None,
+    error_width_ratio: Optional[float] = None,
 ) -> List[EntryDecision]:
     """
     Replica of entry_manager.decide_portfolio_entries(), in the same
@@ -671,6 +673,11 @@ def decide_portfolio_entries_sim(
             bias_n=bias_n,
             bias_stderr=bias_stderr,
             enforce_bias_quality=enforce_bias_quality,
+            # GAP 3: the remaining stage-0 inputs live passes; None (the
+            # default) skips each check exactly as live's None does.
+            bias_source_mix=bias_source_mix,
+            today_source_mix=today_source_mix,
+            error_width_ratio=error_width_ratio,
         )
         if gate_reason is not None:
             return [collection_only_decision(ev, token_id, gate_reason) for ev, token_id in candidates]
