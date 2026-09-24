@@ -65,8 +65,9 @@ def test_migrate_builds_the_whole_schema_once(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DB_PATH", str(tmp_path / "fresh.sqlite3"))
     storage.migrate()
     assert {"forecasts", "observations", "positions", "live_order_attempts",
-            "entry_decisions", "settled_buckets", "ensemble_spread", "ev_snapshots"} <= _tables(config.DB_PATH)
-    assert "8 tables" in storage.schema_summary() and "position_economics" in storage.schema_summary()
+            "entry_decisions", "settled_buckets", "ensemble_spread", "ev_snapshots",
+            "contract_checks"} <= _tables(config.DB_PATH)
+    assert "9 tables" in storage.schema_summary() and "position_economics" in storage.schema_summary()
 
 
 def test_migrate_on_a_pre_wave1_schema_adds_columns_and_tables_idempotently(tmp_path, monkeypatch):
