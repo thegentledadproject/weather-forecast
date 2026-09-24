@@ -397,6 +397,9 @@ def _deterministic_maturity(monkeypatch):
     import config
 
     monkeypatch.setattr(config, "_maturity_cache", dict(config.MATURITY_SNAPSHOT))
+    # The live fixture (WSSS) also needs the redemption lock open. Tests
+    # about that lock set it back to None explicitly (test_live_rearm_gate).
+    monkeypatch.setattr(config, "REDEMPTION_PROVEN_TX", "0xtest-fixture")
 
 
 @pytest.fixture(scope="session", autouse=True)

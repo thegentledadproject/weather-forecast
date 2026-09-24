@@ -127,7 +127,8 @@ def _validated_mode(station_icao: str) -> str:
         raise ValueError(
             f"Station {station_icao} is set to '{mode}' but has not earned it: "
             f"a station may only run in simulation/live if it is BOTH listed in "
-            f"config.LIVE_TRADING_STATIONS AND has STATION_MATURITY == 'mature'. "
+            f"config.LIVE_TRADING_STATIONS AND has STATION_MATURITY == 'mature' "
+            f"(live also needs config.REDEMPTION_PROVEN_TX). "
             f"Refusing to run the real order path for it."
         )
     return mode

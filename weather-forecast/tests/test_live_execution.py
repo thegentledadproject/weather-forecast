@@ -149,12 +149,15 @@ def test_allowlisting_an_immature_station_does_nothing(monkeypatch):
     assert config.live_mode_is_permitted("WMKK", "live") is False
 
 
-def test_every_allowlisted_station_is_mature():
-    """Guards the shipped config itself, not just the helper."""
+def test_an_allowlisted_station_that_is_not_mature_cannot_go_live():
+    """
+    Guards the shipped config itself. Since the 2026-09-24 override removal an
+    allowlisted station need not be mature (RCSS is not); it must then be
+    refused live, never silently allowed.
+    """
     for icao in config.LIVE_TRADING_STATIONS:
-        assert config.STATION_MATURITY.get(icao) == "mature", (
-            f"{icao} is allowlisted for real money but is not a mature station"
-        )
+        if config.STATION_MATURITY.get(icao) != "mature":
+            assert config.live_mode_is_permitted(icao, "live") is False, icao
 
 
 # --------------------------------------------------------------------------

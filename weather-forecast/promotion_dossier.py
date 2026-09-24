@@ -387,6 +387,7 @@ def _print_standing(station_icao: str) -> None:
         print(f"  MATURITY_OVERRIDE: forced '{override[0]}' -- {override[1]}")
     else:
         print("  MATURITY_OVERRIDE: none (maturity is whatever the criteria measure)")
+    print(f"  REDEMPTION_PROVEN_TX: {config.REDEMPTION_PROVEN_TX or 'none -- live blocked until a real redemption lands'}")
 
     for mode, permitted in permissions:
         print(f"  --mode {mode:<11} {'PERMITTED' if permitted else 'blocked'}")
