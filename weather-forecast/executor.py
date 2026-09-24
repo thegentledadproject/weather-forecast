@@ -1259,6 +1259,11 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
 # Exits
 # --------------------------------------------------------------------------
 
+# Positions an unknown-execution-mode close refusal has been alerted for, so a
+# stuck row alerts once per process rather than every cycle.
+_unknown_mode_alerted: set = set()
+
+
 def close_position(
     position: Position,
     decision: ExitDecision,
@@ -1311,9 +1316,20 @@ def close_position(
     #
     # A position's execution mode is a fact about that position, fixed at the
     # moment it was opened. It is not a runtime setting.
-    mode = getattr(position, "execution_mode", None) or "paper"
+    #
+    # FAILS CLOSED (honest fills, item 4). An unknown or missing mode used to
+    # be treated as paper, which writes a close with no order -- for a real
+    # position, exactly the invisible-live-shares failure described above.
+    # Now it is refused (left OPEN, still monitored) and alerted once.
+    mode = getattr(position, "execution_mode", None)
     if mode not in VALID_MODES:
-        mode = "paper"
+        if position.position_id not in _unknown_mode_alerted:
+            _unknown_mode_alerted.add(position.position_id)
+            msg = (f"{position.position_id}: execution_mode {mode!r} is not one of {VALID_MODES} -- "
+                   f"close ({decision.reason}) REFUSED, position left open. Fix the row's mode.")
+            print(f"[executor] ACTION NEEDED: {msg}")
+            alerts.send("Close refused: unknown execution mode", msg, priority="high")
+        return
 
     # A live position may only be closed by a process authorized for live.
     # Leaving it open is the safe failure: it stays visible, stays monitored,

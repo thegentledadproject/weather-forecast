@@ -445,6 +445,36 @@ def test_a_partial_live_fill_is_booked_at_its_real_size(monkeypatch, live_wsss):
     assert pos.size_usd == pytest.approx(0.87)
 
 
+# ---------------------------------------------------------------------------
+# 4. close_position fails CLOSED on an execution mode it does not know
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("bad_mode", ["auto", "", None, "LIVE"])
+def test_close_position_refuses_an_unknown_mode_and_alerts_once(monkeypatch, bad_mode):
+    import alerts
+    import executor
+    import storage
+    from models import ExitDecision, Position
+    closes, sent = [], []
+    monkeypatch.setattr(storage, "close_position", lambda **kw: closes.append(kw) or True)
+    monkeypatch.setattr(wallet_client, "submit_order",
+                        lambda *a, **k: pytest.fail("must not trade an unknown-mode position"))
+    monkeypatch.setattr(alerts, "send", lambda t, m, priority="default": sent.append(t) or True)
+    monkeypatch.setattr(executor, "_unknown_mode_alerted", set())
+    pos = Position(position_id=f"p-{bad_mode}", station_icao="WSSS", target_date=date(2026, 9, 3),
+                   bucket_c=32, side="YES", entry_price=0.3, size_usd=1.0,
+                   entry_time="2026-09-03T00:00:00+00:00", status="open", token_id="TOK",
+                   execution_mode=bad_mode)
+    decision = ExitDecision(position_id=pos.position_id, should_exit=True, reason="stop_loss",
+                            current_price=0.2, pnl_pct=-0.33)
+
+    executor.close_position(pos, decision)
+    executor.close_position(pos, decision)
+
+    assert closes == []
+    assert len(sent) == 1
+
+
 def test_reconciled_rows_do_not_count_against_the_daily_order_cap(tmp_db):
     import storage
     storage.record_live_order_attempt(kind="entry", station_icao="WSSS", outcome="reconciled",
