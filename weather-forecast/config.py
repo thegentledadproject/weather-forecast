@@ -3049,6 +3049,13 @@ LIVE_MAX_CONCURRENT_POSITIONS = 5        # across all live stations
 LIVE_MAX_TOTAL_EXPOSURE_USD = 8.00       # sum of open live size_usd
 LIVE_MAX_ORDERS_PER_DAY = 10             # submitted entries per UTC day
 
+# --- Automatic live brakes (gap audit 2026-09-24, gap 6) -------------------
+# executor._live_brake() refuses every new LIVE entry while any of these
+# holds; paper is untouched. RESEARCH PARAMETERS, not fitted: $4 is half the
+# $8 live exposure cap, and 2 days is past any normal settle-and-close lag.
+LIVE_DAILY_LOSS_LIMIT_USD = 4.0          # realised live P&L, trailing 24h
+LIVE_STRANDED_AFTER_DAYS = 2             # open live position this far past target_date
+
 # --- Per-region LIVE blast radius -----------------------------------------
 # A SEPARATE MECHANISM from REGION_BANKROLL_USD, and the distinction is the
 # whole reason this block exists. Live orders never pass through Kelly

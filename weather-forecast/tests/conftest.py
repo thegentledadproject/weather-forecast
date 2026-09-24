@@ -402,6 +402,10 @@ def _deterministic_maturity(monkeypatch):
     monkeypatch.setattr(config, "REDEMPTION_PROVEN_TX", "0xtest-fixture")
     # No test may reach ntfy.sh; tests of alerts.py set the topic themselves.
     monkeypatch.delenv("NTFY_TOPIC", raising=False)
+    # The live brakes memoise per UTC day; never across tests.
+    import executor
+    monkeypatch.setattr(executor, "_kill_cache", {})
+    monkeypatch.setattr(executor, "_brake_alerted", set())
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -256,6 +256,67 @@ def _live_budget_breach(size_usd: float, station_icao: str, out: Optional[dict] 
     return None
 
 
+# UTC day -> kill_criterion "fired"; (reason, UTC day) pairs already alerted.
+_kill_cache: Dict[str, Optional[bool]] = {}
+_brake_alerted: set = set()
+
+
+def _live_brake() -> Optional[tuple]:
+    """
+    (code, reason) if an automatic brake forbids new LIVE entries, else None
+    (gap audit 2026-09-24, gap 6). Entries only: an exit is never braked, for
+    the same reason _live_budget_breach never blocks one.
+
+    FAILS CLOSED: a brake that cannot be evaluated is a brake that is on.
+    No held-exposure brake here -- _live_budget_breach's region cap already
+    sums the size_usd of OPEN live positions, i.e. held exposure.
+    """
+    try:
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        # 1. Realised live P&L over the trailing 24h.
+        cutoff = now.timestamp() - 24 * 3600
+        realised = 0.0
+        for icao in config.STATIONS:
+            for p in storage.load_position_history(icao, limit=50, is_paper=False):
+                if (getattr(p, "execution_mode", "") == "live" and p.exit_price is not None
+                        and p.exit_time
+                        and datetime.fromisoformat(p.exit_time).timestamp() >= cutoff):
+                    realised += p.size_usd * risk_manager.compute_pnl_pct(p.entry_price, p.exit_price)
+        if realised <= -config.LIVE_DAILY_LOSS_LIMIT_USD:
+            return ("daily_loss", f"realised live P&L ${realised:+.2f} over the trailing 24h is at "
+                                  f"or below -${config.LIVE_DAILY_LOSS_LIMIT_USD:.2f}")
+
+        # 2. The cohort kill criterion. None = not enough evidence = no trip.
+        day = today.isoformat()
+        if day not in _kill_cache:
+            import cohort_monitor  # lazy: it imports ev_engine, which imports config
+            rows, _ = cohort_monitor.load_cohort()
+            _kill_cache[day] = cohort_monitor.kill_criterion(
+                cohort_monitor.windows(rows, as_of=today))["fired"]
+        if _kill_cache[day] is True:
+            return ("kill_criterion", "cohort_monitor.kill_criterion() has FIRED "
+                                      "(config.COHORT_KILL_*)")
+
+        # 3. A live position stranded well past its market day.
+        for p in storage.load_open_positions(is_paper=False):
+            if (getattr(p, "execution_mode", "") == "live"
+                    and (today - p.target_date).days > config.LIVE_STRANDED_AFTER_DAYS):
+                return ("stranded", f"live position {p.position_id} is still open "
+                                    f"{(today - p.target_date).days} days past its target date")
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        return ("error", f"brake check failed ({type(exc).__name__}: {exc}) -- failing closed")
+    return None
+
+
+def _alert_brake_once(code: str, reason: str) -> None:
+    key = (code, datetime.now(timezone.utc).date().isoformat())
+    if key not in _brake_alerted:
+        _brake_alerted.add(key)
+        alerts.send(f"LIVE brake: {code}", f"New live entries refused -- {reason}", priority="high")
+
+
 def _fmt_net_ev(value) -> str:
     """
     Net EV for display, tolerating None.
@@ -1044,6 +1105,13 @@ def _open_via_order_path(decision: EntryDecision, mode: str, make_position) -> N
         print(f"[executor] {tag}: {label} resized -- {size_note}")
 
     if mode == "live":
+        brake = _live_brake()
+        if brake:
+            code, why = brake
+            print(f"[executor] LIVE: {label} entry BRAKED -- {why}")
+            _record_refusal(decision, f"brake_{code}", why, mode=mode, spec=spec)
+            _alert_brake_once(code, why)
+            return
         backstop = {}
         breach = _live_budget_breach(spec.notional_usd, decision.station_icao, out=backstop)
         if breach:

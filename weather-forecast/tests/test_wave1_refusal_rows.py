@@ -29,9 +29,11 @@ def _decision(price=0.30, token_id="TOK", net_ev=0.30, slip=0.01):
     )
 
 
-def _live_position(size_usd=1.0):
+def _live_position(size_usd=1.0, target_date=None):
+    # Today by default: an open live position long past its date trips the
+    # stranded brake (gap 6) before the region caps these rows exercise.
     return Position(
-        position_id="p", station_icao="WSSS", target_date=date(2026, 8, 10),
+        position_id="p", station_icao="WSSS", target_date=target_date or date.today(),
         bucket_c=33, side="NO", entry_price=0.30, size_usd=size_usd,
         entry_time="2026-08-10T00:00:00+00:00", status="open", token_id="T2",
         is_paper=False, size_shares=3.33, execution_mode="live",
@@ -150,6 +152,12 @@ def _setup_region_exposure(mp):
     return _decision()
 
 
+def _setup_brake_stranded(mp):
+    mp.setattr(storage, "load_open_positions",
+               _wsss_only([_live_position(target_date=date(2026, 8, 10))]))
+    return _decision()
+
+
 def _setup_orders_per_day_unreadable(mp):
     mp.setattr(storage, "count_live_order_attempts", lambda kind, since, station_icaos=None: None)
     return _decision()
@@ -173,6 +181,7 @@ SITES = [
     ("resolved_net_ev", _setup_resolved_net_ev),
     ("day_budget", _setup_day_budget),
     ("recon", _setup_recon),
+    ("brake_stranded", _setup_brake_stranded),
     ("region_concurrent", _setup_region_concurrent),
     ("region_exposure", _setup_region_exposure),
     ("orders_per_day_unreadable", _setup_orders_per_day_unreadable),

@@ -1654,6 +1654,22 @@ def record_entry_decisions(
     return len(rows)
 
 
+def latest_cycle_write_ts() -> Optional[str]:
+    """
+    Newest UTC ISO timestamp the daemon wrote on a cycle, or None. Read by
+    watchdog.py. forecasts.fetched_at is written by every pipeline.run --
+    primary cycles AND the hourly collection that rides along in monitor
+    windows -- so it moves all day; entry_decisions.cycle_ts only in entry
+    windows. Both are UTC isoformat, so the string max is the time max.
+    """
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT MAX(ts) FROM (SELECT MAX(fetched_at) AS ts FROM forecasts "
+            "UNION ALL SELECT MAX(cycle_ts) FROM entry_decisions)"
+        ).fetchone()
+    return row[0] if row else None
+
+
 def load_entry_decisions(
     book: Optional[str] = None,
     cycle_ts: Optional[str] = None,
