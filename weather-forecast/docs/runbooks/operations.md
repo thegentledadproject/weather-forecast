@@ -185,20 +185,23 @@ Manual run:
 bash deploy/pull_backup.sh
 ```
 
-**Scheduled run — UNVERIFIED / not installed by this commit.** To run it
-daily at 01:30 local time (17:30 UTC) via Windows Task Scheduler, with
-"run as soon as possible after a missed start" enabled:
+**Scheduled run — INSTALLED 2026-09-25** as Windows task
+`PolyweatherPullBackup`: daily 01:30 local (17:30 UTC), "run as soon as
+possible after a missed start" on. It was created with PowerShell, because
+`schtasks /Create` cannot set StartWhenAvailable (its `/Z` flag means
+"delete the task after its final run", not that):
 
-```
-schtasks /Create /TN "PolyweatherPullBackup" /TR "\"C:\Program Files\Git\bin\bash.exe\" -lc \"cd /c/Users/user/Downloads/weather-forecast && deploy/pull_backup.sh\"" /SC DAILY /ST 01:30 /RL LIMITED /Z
+```powershell
+$action = New-ScheduledTaskAction -Execute "C:\Program Files\Git\bin\bash.exe" -Argument '-lc "cd /c/Users/user/Downloads/weather-forecast && deploy/pull_backup.sh"'
+$trigger = New-ScheduledTaskTrigger -Daily -At "01:30"
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 1) -DontStopIfGoingOnBatteries -AllowStartIfOnBatteries
+Register-ScheduledTask -TaskName "PolyweatherPullBackup" -Action $action -Trigger $trigger -Settings $settings
 ```
 
-`/Z` (StartWhenAvailable) is the "run as soon as possible after a missed
-start" flag for `schtasks /Create`; verify the Git Bash path
-(`C:\Program Files\Git\bin\bash.exe`) matches the actual install before
-using this. **This task is not created by this commit** — the operator
-creates it, and runs the first `pull_backup.sh` against the real server,
-by hand.
+Check it: `Get-ScheduledTaskInfo PolyweatherPullBackup` (LastRunTime,
+LastTaskResult 0 = ok) and `C:\Users\user\polyweather-backups\pull_backup.log`.
+Run it now: `Start-ScheduledTask PolyweatherPullBackup`. Remove it:
+`Unregister-ScheduledTask PolyweatherPullBackup`.
 
 Offline test (no network, no server) for the fetch/verify/retention logic:
 ```
