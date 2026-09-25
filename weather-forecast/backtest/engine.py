@@ -1139,6 +1139,15 @@ def _entry_pass(
                 calibration_source=calibration_source,
             ))
 
+    # GAP 4 parity: P_robust exactly as run_for_station_with_map stamps it,
+    # so ADMIT_ON_ROBUST_EDGE gates the replay as it gates live instead of
+    # falling back to the calibrated edge. shrink_for_day(day) fits on target
+    # dates < day only, and reads settled_buckets through the as-of view, so
+    # it is causal. Full book = every listed bucket has a priced YES row
+    # (live: every token_map bucket has a YES ask).
+    yes_priced = {r.bucket_c for r in rows if r.side == "YES" and r.market_price is not None}
+    ev_engine.stamp_p_robust(rows, ev_engine._shrink_for(day), set(token_map) <= yes_priced)
+
     screened = ev_engine.best_opportunities(rows, min_net_ev=tick.min_net_ev)
     counters["n_candidates_screened"] = int(counters["n_candidates_screened"]) + len(screened)
 

@@ -395,18 +395,28 @@ def compute_ev_table(
     # bucket keeps p_robust = the own ask: fail closed. None `shrink` =
     # caller did not ask.
     if shrink is not None:
-        lam_robust, lam_hat, lam_se, lam_days = shrink
-        full_book = all(quotes[b].yes_price is not None for b in token_map)
-        for r in results:
-            if r.market_price is None:
-                continue
-            r.p_robust = (
-                r.market_price + lam_robust * (r.model_prob - r.market_price)
-                if full_book else r.market_price
-            )
-            r.lambda_hat, r.lambda_se, r.lambda_days = lam_hat, lam_se, lam_days
+        stamp_p_robust(results, shrink, all(quotes[b].yes_price is not None for b in token_map))
 
     return results
+
+
+def stamp_p_robust(results: List[EVResult], shrink: tuple, full_book: bool) -> None:
+    """
+    GAP 4: set p_robust / lambda_* on every priced row, in place, from a
+    shrink_for_day() tuple (see compute_ev_table's comment for the formula).
+    `full_book` False = some listed bucket has no YES ask: p_robust = the own
+    ask, fail closed. Shared by compute_ev_table and backtest/engine.py so the
+    replay admits on the robust edge exactly as live does (GAP 3).
+    """
+    lam_robust, lam_hat, lam_se, lam_days = shrink
+    for r in results:
+        if r.market_price is None:
+            continue
+        r.p_robust = (
+            r.market_price + lam_robust * (r.model_prob - r.market_price)
+            if full_book else r.market_price
+        )
+        r.lambda_hat, r.lambda_se, r.lambda_days = lam_hat, lam_se, lam_days
 
 
 def apply_side_calibration(calibration, side: str, side_model_prob: float):

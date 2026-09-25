@@ -238,11 +238,17 @@ def _ev_rows(icao, day):
     return rows
 
 
+# GAP 4 on replay rows: a fixed shrink so the robust gate binds (the fixture
+# has no ev_snapshots to fit one on); None = rows without p_robust.
+ROBUST_SHRINK = (0.3, 0.3, 0.1, 30)
+
+
+@pytest.mark.parametrize("shrink", [None, ROBUST_SHRINK], ids=["calibrated", "robust"])
 @pytest.mark.parametrize("sources", [
     ["open_meteo_ecmwf", "open_meteo_gfs"],   # the fitted mix: stage 0 passes
     ["open_meteo_ecmwf"],                     # a different mix: stage 0 refuses
 ], ids=["gate_open", "gate_mix_refuses"])
-def test_b_engine_entry_decisions_equal_production(dbs, monkeypatch, sources):
+def test_b_engine_entry_decisions_equal_production(dbs, monkeypatch, sources, shrink):
     import executor
     import ev_engine
     from backtest import engine
@@ -269,7 +275,11 @@ def test_b_engine_entry_decisions_equal_production(dbs, monkeypatch, sources):
     try:
         station = config.get_station("WSSS")
         min_net_ev = 0.10
-        screened = ev_engine.best_opportunities(_ev_rows("WSSS", day), min_net_ev=min_net_ev)
+        rows = _ev_rows("WSSS", day)
+        if shrink is not None:
+            ev_engine.stamp_p_robust(rows, shrink, full_book=True)
+            assert config.ADMIT_ON_ROBUST_EDGE and all(r.p_robust is not None for r in rows)
+        screened = ev_engine.best_opportunities(rows, min_net_ev=min_net_ev)
         token_map = {b: {"yes_token_id": f"y{b}", "no_token_id": f"n{b}"} for b in range(30, 35)}
 
         live = entry_manager.decide_portfolio_entries(
@@ -286,9 +296,11 @@ def test_b_engine_entry_decisions_equal_production(dbs, monkeypatch, sources):
     finally:
         as_of_mod.release()
 
-    key = lambda ds: [(d.bucket_c, d.side, d.approved, d.rule_id, d.recommended_size_usd)  # noqa: E731
-                      for d in ds]
+    key = lambda ds: [(d.bucket_c, d.side, d.approved, d.rule_id, d.recommended_size_usd,  # noqa: E731
+                       d.p_robust, d.admission_edge, d.sizing_edge) for d in ds]
     assert key(replay) == key(live)
+    if shrink is not None:
+        assert all(d.p_robust is not None for d in live)
     assert len(live) >= 3
     rules = {d.rule_id for d in live}
     if sources == ["open_meteo_ecmwf"]:
@@ -303,3 +315,37 @@ def test_engine_run_is_pinned_and_refuses_arrears_stations():
     with pytest.raises(ValueError, match="arrears"):
         engine.run("VHHH", date(2026, 9, 1), date(2026, 9, 2))
     assert storage.get_as_of() is None and config._PINNED_NOW is None
+
+
+def test_replay_rows_carry_p_robust_exactly_as_live_stamps_it(synthetic_scenario, quiet_run, monkeypatch):
+    """GAP 4 x GAP 3: the engine stamps P_robust on its EV rows through the
+    SAME helper compute_ev_table uses, with the day's shrink_for_day fit, so
+    ADMIT_ON_ROBUST_EDGE gates the replay as it gates live."""
+    import ev_engine
+
+    fits, stamped = [], []
+    monkeypatch.setattr(ev_engine, "_shrink_for", lambda day: fits.append(day) or ROBUST_SHRINK)
+    real = ev_engine.stamp_p_robust
+
+    def spy(rows, shrink, full_book):
+        real(rows, shrink, full_book)
+        stamped.append((list(rows), shrink, full_book))
+
+    monkeypatch.setattr(ev_engine, "stamp_p_robust", spy)
+    run = quiet_run(synthetic_scenario)
+
+    assert stamped and fits, "the replay never stamped P_robust"
+    lam = ROBUST_SHRINK[0]
+    n_moved = 0
+    for rows, shrink, full_book in stamped:
+        assert shrink == ROBUST_SHRINK
+        for r in rows:
+            if r.market_price is None:
+                assert r.p_robust is None
+                continue
+            want = r.market_price + lam * (r.model_prob - r.market_price) if full_book else r.market_price
+            assert r.p_robust == pytest.approx(want)
+            assert (r.lambda_hat, r.lambda_se, r.lambda_days) == ROBUST_SHRINK[1:]
+            n_moved += r.p_robust != r.market_price
+    assert n_moved, "every stamped row sat at the ask -- the check has no teeth"
+    assert run is not None

@@ -162,6 +162,16 @@ def build_scenario(
 
     monkeypatch.setattr(config, "DB_PATH", str(trading_db))
 
+    # GAP 4 on replay rows: the scenario seeds no ev_snapshots, so the real
+    # shrink_for_day fit fails CLOSED (lambda 0, p_robust = the ask) and the
+    # replay -- faithfully -- admits nothing. Pin the identity shrink
+    # (lambda 1, p_robust = model_prob): the robust edge equals the raw edge,
+    # the basis these map-less scenarios admitted and sized on before, so
+    # every scenario keeps its meaning. test_replay_parity covers lambda < 1.
+    import ev_engine
+
+    monkeypatch.setattr(ev_engine, "_shrink_for", lambda day: (1.0, 1.0, 0.0, 0))
+
     import storage
     from models import ObservedReading, PointForecast
     from backtest import price_store, simclock
