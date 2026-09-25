@@ -156,7 +156,7 @@ def test_decisions_are_identical_with_recording_on_and_off(cycle, monkeypatch):
 def test_config_sha_is_recorded_and_cached(cycle, temp_db, monkeypatch):
     calls = []
     monkeypatch.setattr(config, "config_fingerprint", lambda mode=None: calls.append(1) or "abc123")
-    monkeypatch.setattr(scheduler, "_config_sha_cache", {})
+    monkeypatch.setattr(scheduler.executor, "_config_fingerprint_cache", {})
 
     scheduler._run_full_cycle(STATION, min_net_ev=0.15)
     scheduler._run_full_cycle(STATION, min_net_ev=0.15)

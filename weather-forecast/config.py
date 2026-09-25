@@ -4908,17 +4908,6 @@ def _current_git_sha() -> Optional[str]:
         return None
 
 
-_git_sha_memo: dict = {}
-
-
-def cached_git_sha() -> Optional[str]:
-    """_current_git_sha(), resolved once per process. Stamped on ev_snapshots
-    rows (GAP 4/5), which are written every cycle."""
-    if "sha" not in _git_sha_memo:
-        _git_sha_memo["sha"] = _current_git_sha()
-    return _git_sha_memo["sha"]
-
-
 def _git_dirty() -> bool:
     """Tracked files differ from HEAD (untracked scratch is ignored)."""
     import subprocess
@@ -4934,7 +4923,8 @@ def _git_dirty() -> bool:
 
 def config_fingerprint(effective_mode: Optional[dict] = None) -> str:
     """
-    THE one provenance stamp (entry_decisions.config_sha, backtest manifest
+    THE one provenance stamp (entry_decisions.config_sha AND ev_snapshots.config_sha
+    via executor.config_fingerprint(), backtest manifest
     git_sha): `<git sha>[+dirty]:<8 hex>`. The prefix is still the git sha,
     so every older row (a bare sha) and every sha-prefix join keeps working;
     read the commit back with git_sha_of(). The hash covers what HEAD does

@@ -53,6 +53,10 @@ def test_every_stamping_site_uses_the_one_helper(monkeypatch):
     from backtest import engine
 
     monkeypatch.setattr(config, "config_fingerprint", lambda mode=None: "c" * 40 + ":deadbeef")
-    monkeypatch.setattr(scheduler, "_config_sha_cache", {})
+    import ev_engine
+    import executor
+
+    monkeypatch.setattr(executor, "_config_fingerprint_cache", {})
     assert scheduler._config_sha() == "c" * 40 + ":deadbeef"
+    assert ev_engine._config_fingerprint() == scheduler._config_sha()
     assert engine._git_sha() == "c" * 40 + ":deadbeef"

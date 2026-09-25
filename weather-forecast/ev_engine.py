@@ -1021,7 +1021,7 @@ def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
         try:
             storage.save_ev_snapshot_rows(
                 station_icao, results[0].target_date, payload["generated_at"], results,
-                config_sha=config.cached_git_sha(),
+                config_sha=_config_fingerprint(),
             )
         except Exception as exc:
             # Broader than the OSError above on purpose. The file write can
@@ -1030,6 +1030,15 @@ def save_ev_snapshot(station_icao: str, results: List[EVResult]) -> None:
             # this inherits is absolute: the EV table drives trading, this
             # record only drives reporting.
             print(f"[ev_engine] could not record EV snapshot rows for {station_icao}: {exc}")
+
+
+def _config_fingerprint() -> Optional[str]:
+    """executor.config_fingerprint(), imported late (executor is heavier than
+    this module needs at import time). The SAME value entry_decisions rows
+    carry, so lock_score can lock on exact equality."""
+    import executor
+
+    return executor.config_fingerprint()
 
 
 def print_ev_table(results: List[EVResult]) -> None:

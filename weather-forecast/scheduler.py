@@ -96,22 +96,10 @@ MIN_SLEEP_SECONDS = 30
 # _collection_due() for why that is the right direction to be wrong in.
 _last_collection_ts: Dict[str, float] = {}
 
-# WAVE 1. The git sha stamped on every entry_decisions row, resolved once per
-# process: config._current_git_sha() shells out to git, and a subprocess per
-# station-cycle is not a cost the entry leg should carry. Keyed dict rather
-# than a bare Optional so "not yet asked" and "asked, no git" stay distinct.
-_config_sha_cache: Dict[str, Optional[str]] = {}
-
-
 def _config_sha() -> Optional[str]:
-    if "sha" not in _config_sha_cache:
-        try:
-            # git sha + dirty flag + hash of the effective mode (resolved by
-            # the CLI into executor.EXECUTION_MODE before run_forever primes this).
-            _config_sha_cache["sha"] = config.config_fingerprint(dict(executor.EXECUTION_MODE))
-        except Exception:  # noqa: BLE001 -- provenance must never break a cycle
-            _config_sha_cache["sha"] = None
-    return _config_sha_cache["sha"]
+    """The stamp on every entry_decisions row: executor.config_fingerprint(),
+    the one per-process value ev_snapshots is stamped with too."""
+    return executor.config_fingerprint()
 
 
 def _boot_storage() -> None:

@@ -73,11 +73,18 @@ def test_ev_snapshot_rows_carry_the_config_sha(tmp_db):
     assert con.execute("SELECT config_sha FROM ev_snapshots").fetchall() == [("abc123",)]
 
 
-def test_save_ev_snapshot_stamps_the_running_sha(tmp_db, monkeypatch):
-    monkeypatch.setattr(config, "cached_git_sha", lambda: "deadbeef")
+def test_save_ev_snapshot_stamps_the_config_fingerprint(tmp_db, monkeypatch):
+    """ev_snapshots carries the SAME stamp as entry_decisions: the full
+    config_fingerprint, not a bare sha (lock_score locks on exact equality)."""
+    import executor
+    import scheduler
+
+    fp = "d" * 40 + "+dirty:0badf00d"
+    monkeypatch.setattr(executor, "_config_fingerprint_cache", {"fp": fp})
     ev_engine.save_ev_snapshot("WSSS", [_ev()])
     con = sqlite3.connect(tmp_db)
-    assert con.execute("SELECT config_sha FROM ev_snapshots").fetchall() == [("deadbeef",)]
+    assert con.execute("SELECT config_sha FROM ev_snapshots").fetchall() == [(fp,)]
+    assert scheduler._config_sha() == fp
 
 
 def test_entry_decision_fields_and_columns_exist():

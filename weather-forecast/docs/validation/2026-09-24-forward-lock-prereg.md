@@ -11,7 +11,7 @@ The model, the calibration map, K=40 and the NO map were all chosen on the same 
 | Period | Dates | Allowed |
 |---|---|---|
 | TRAIN | < 2026-09-25 | Anything. |
-| VALIDATION | 2026-09-25 .. 2026-10-05 | ONE frozen tuning pass. The Wave 2 falsifier (~10-04) runs here. On 2026-10-05, fill `LOCK_SHA` in `lock_score.py` with the revision the box runs from then on, and commit it. |
+| VALIDATION | 2026-09-25 .. 2026-10-05 | ONE frozen tuning pass. The Wave 2 falsifier (~10-04) runs here. On 2026-10-05, fill `LOCK_SHA` in `lock_score.py` with the FULL config fingerprint the box stamps from then on (read it off the newest `ev_snapshots.config_sha` on the box: `<git sha>[+dirty]:<8-hex mode hash>`), and commit it. |
 | TEST | 2026-10-06 .. 2026-11-02 | Nobody reads or tunes on TEST outcomes. No deploys to the box. Restarts are OK (DST: EGLC 10-25, KLGA 11-01). |
 | Read | on or after 2026-11-05 | `python lock_score.py --start 2026-10-06 --end 2026-11-02 --locked-read` |
 
@@ -24,7 +24,7 @@ One station-day, if all of these hold:
 - It uses the FIRST `ev_snapshots` cycle whose `generated_at` falls on the target LOCAL date.
 - Every bucket listed in that cycle has a YES ask and a model probability.
 - A `settled_buckets` row exists, and the settled bucket is one of the listed ones.
-- Every row of that cycle has `config_sha == LOCK_SHA`.
+- Every row of that cycle has `config_sha == LOCK_SHA`, EXACT string equality on the full fingerprint (`config.config_fingerprint()`: git sha, `+dirty` flag, and a hash of the effective per-station mode, the `POLYWEATHER_*` env loaded from `/etc/polyweather/mode.env`, `POLYMARKET_LIVE_TRADING` and argv). `ev_snapshots` and `entry_decisions` carry the same value. **Deliberately strict:** any `mode.env` / env / argv edit, or a dirty tree on the box, during TEST changes the stamp and splits the lock; rows priced under the changed stamp drop out of the TEST read instead of being scored as locked. A plain restart with unchanged code and env keeps the same stamp.
 
 ## Forecasters
 

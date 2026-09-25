@@ -4,7 +4,9 @@ docs/validation/2026-09-24-forward-lock-prereg.md. READ-ONLY, stdlib only.
 
 Unit: a station-day whose FIRST ev_snapshots cycle on the target LOCAL date
 lists a YES ask for every bucket, has a settled_buckets row, and (once
-LOCK_SHA is filled on 2026-10-05) was priced by config_sha == LOCK_SHA.
+LOCK_SHA is filled on 2026-10-05) was priced by config_sha == LOCK_SHA -- EXACT
+equality on the full config_fingerprint `<sha>[+dirty]:<mode hash>`, not the
+git part: any mode.env / env / argv / dirty-tree change splits the lock.
 
 Forecasters (each a distribution over the unit's listed buckets):
   P    the raw model, YES model_prob renormalised
@@ -33,7 +35,10 @@ from pathlib import Path
 
 TEST = (date(2026, 10, 6), date(2026, 11, 2))
 READ_DATE = date(2026, 11, 5)
-LOCK_SHA = None                          # filled on 2026-10-05, then never edited
+# The FULL config_fingerprint the box stamps (ev_snapshots.config_sha ==
+# entry_decisions.config_sha), e.g. '<40-hex sha>:<8 hex>'. Filled on
+# 2026-10-05 from the box's own rows, then never edited.
+LOCK_SHA = None
 DRAWS, SEED, CI = 10_000, 20261006, 0.9833
 MIN_DATES, MIN_UNITS, EXTEND_DAYS = 20, 400, 14
 LOG_FLOOR = 1e-3
@@ -108,7 +113,7 @@ def refuses(start, end, locked_read, today):
     if today < READ_DATE:
         return f"TEST is sealed until {READ_DATE} (today {today})"
     if LOCK_SHA is None:
-        return "LOCK_SHA is not filled in; the TEST read needs the frozen revision"
+        return "LOCK_SHA is not filled in; the TEST read needs the frozen config fingerprint"
     return None
 
 

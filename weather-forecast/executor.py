@@ -91,6 +91,23 @@ EXECUTION_MODE = {
 
 VALID_MODES = ("manual_review", "paper", "simulation", "live")
 
+# THE provenance stamp for this process: config.config_fingerprint() of the
+# effective mode, resolved once (it shells out to git). Every row stamped
+# config_sha -- entry_decisions AND ev_snapshots -- reads this, so the two
+# tables carry the identical value for one process. Keyed dict so "not yet
+# asked" and "asked, failed" (None) stay distinct. Resolve it only after the
+# CLI has written EXECUTION_MODE (scheduler._boot_storage primes it).
+_config_fingerprint_cache: Dict[str, Optional[str]] = {}
+
+
+def config_fingerprint() -> Optional[str]:
+    if "fp" not in _config_fingerprint_cache:
+        try:
+            _config_fingerprint_cache["fp"] = config.config_fingerprint(dict(EXECUTION_MODE))
+        except Exception:  # noqa: BLE001 -- provenance must never break a cycle
+            _config_fingerprint_cache["fp"] = None
+    return _config_fingerprint_cache["fp"]
+
 # Modes that represent a real position on the exchange. Only "live" does.
 REAL_MONEY_MODES = ("live",)
 

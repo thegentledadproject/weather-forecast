@@ -71,3 +71,27 @@ def test_lambda_zero_makes_q_exactly_m():
             "p": [0.1, 0.7, 0.2], "m": [0.13, 0.61, 0.37], "k": 1}
     f = ls.forecasts(unit, {}, 0.0)
     assert f["Q"] == f["M"]
+
+
+def test_the_lock_is_exact_equality_on_the_full_fingerprint(tmp_path):
+    """Same git sha but a different mode hash, or +dirty, is NOT locked:
+    the lock splits on any env/mode/dirty change, deliberately."""
+    import sqlite3
+    from datetime import timedelta
+
+    lock = "a" * 40 + ":11111111"
+    con = sqlite3.connect(str(tmp_path / "l.sqlite3"))
+    con.execute("CREATE TABLE ev_snapshots (station_icao, target_date, bucket_c, side, generated_at,"
+                " model_prob, market_price, config_sha)")
+    con.execute("CREATE TABLE settled_buckets (station_icao, target_date, bucket_c)")
+    stamps = {date(2026, 10, 6): lock, date(2026, 10, 7): "a" * 40 + ":22222222",
+              date(2026, 10, 8): "a" * 40 + "+dirty:11111111"}
+    for d, fp in stamps.items():
+        for b in (30, 31):
+            con.execute("INSERT INTO ev_snapshots VALUES ('WSSS', ?, ?, 'YES', ?, 0.5, 0.5, ?)",
+                        (d.isoformat(), b, f"{(d - timedelta(days=1)).isoformat()}T17:00:00+00:00", fp))
+        con.execute("INSERT INTO settled_buckets VALUES ('WSSS', ?, 30)", (d.isoformat(),))
+    units, _ = ls.load_units(con, date(2026, 10, 6), date(2026, 10, 8), lock)
+    assert [u["date"] for u in units] == [date(2026, 10, 6)]
+    units, _ = ls.load_units(con, date(2026, 10, 6), date(2026, 10, 8), None)
+    assert len(units) == 3
