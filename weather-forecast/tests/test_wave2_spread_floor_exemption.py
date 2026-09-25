@@ -234,7 +234,9 @@ def test_priced_measured_spread_is_the_measured_clamp():
     assert calibration.priced_measured_spread(2.6, ASIA) == config.SPREAD_CEILING_C
 
 
-def test_the_replay_path_is_blind_to_this_change_and_says_so():
+def test_the_replay_path_now_sees_this_change():
+    # GAP 3: the replay prices on the point-in-time measured tiers, so it is
+    # no longer blind to the spread-floor exemption.
     import inspect
     from backtest import engine
-    assert "allow_measured_spread=False" in inspect.getsource(engine)
+    assert "allow_measured_spread=False" not in inspect.getsource(engine)

@@ -121,3 +121,38 @@ def test_in_window_late_forecast_does_not_leak_backwards(synthetic_scenario, qui
         f"tripwire never took effect (before={before}, after={after}) -- "
         "the test would pass vacuously"
     )
+
+
+def test_as_of_views_block_rows_the_production_readers_would_use(scenario_builder, quiet_run, monkeypatch):
+    """
+    GAP 3 sentinel. The replay now calls production's own storage readers
+    (bias, spread tiers, calibration map), which read the WHOLE table. Plant
+    rows written after the window that those readers WOULD use -- morning
+    forecasts for the three post-window days, 4C hot against their stored
+    observations, i.e. a bias shift -- and require: (1) the as-of views make
+    them invisible (result == clean), and (2) with the views disabled the
+    result moves, so the trap is live and the views are what block it.
+    """
+    from datetime import timedelta
+
+    import storage
+    from backtest import simclock
+    from models import PointForecast
+
+    clean = quiet_run(scenario_builder(name="clean"))
+
+    trapped = scenario_builder(name="trapped")
+    for offset in (1, 2, 3):
+        day = trapped.end_date + timedelta(days=offset)
+        fetched = simclock.SimClock(simclock.local_minute_to_ts(day, 4 * 60 + 50)).now_iso()
+        for source in ("open_meteo_ecmwf", "open_meteo_gfs"):
+            storage.save_forecast(PointForecast(
+                station_icao=trapped.station_icao, source=source, target_date=day,
+                max_temp_c=36.0, fetched_at=fetched, raw_note="post-window trap",
+            ))
+
+    assert clean.entry_records, "scenario produced no entries -- test is vacuous"
+    assert canonical_run(quiet_run(trapped)) == canonical_run(clean)
+
+    monkeypatch.setattr(storage, "_apply_as_of_views", lambda conn, as_of: None)
+    assert canonical_run(quiet_run(trapped)) != canonical_run(clean)

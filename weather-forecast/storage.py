@@ -68,6 +68,127 @@ def is_writable() -> bool:
     return _WRITABLE
 
 
+# GAP 3 (replay as-of). When set, every connection this process opens reads
+# the database AS IT STOOD at this UTC instant: _connect() lays TEMP VIEWs
+# over the time-stamped tables (see _apply_as_of_views), so every production
+# reader -- the bias, the spread tiers, the error-width gate, the calibration
+# map, maturity -- answers point-in-time without knowing it. Only the replay
+# sets it; set_as_of() refuses in a writable process, so it can never leak
+# into the daemon (which is the one process that calls set_writable(True)).
+_AS_OF: Optional[datetime] = None
+
+
+def set_as_of(ts) -> None:
+    """Pin reads to `ts` (aware datetime or ISO string), or None to unpin.
+    RAISES in a writable process -- the daemon must never read a past DB."""
+    global _AS_OF
+    if ts is None:
+        _AS_OF = None
+        return
+    if _WRITABLE:
+        raise StorageReadOnlyError(
+            "storage.set_as_of() in a writable process: the as-of views are for the "
+            "read-only replay only, never for the daemon or an operator writer."
+        )
+    if isinstance(ts, str):
+        ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    if ts.tzinfo is None:
+        raise ValueError("storage.set_as_of() needs an aware UTC instant")
+    _AS_OF = ts.astimezone(timezone.utc)
+
+
+def get_as_of() -> Optional[datetime]:
+    return _AS_OF
+
+
+@contextmanager
+def read_only():
+    """Run a block with this process NON-writable (restored after). Only ever
+    narrows what the process may do; the replay wraps itself in it so the
+    as-of pins are legal even inside a writer's process (tests)."""
+    global _WRITABLE
+    was = _WRITABLE
+    _WRITABLE = False
+    try:
+        yield
+    finally:
+        _WRITABLE = was
+
+
+# (as_of, DB_PATH) -> the DDL; built once per pin, not per connection (the
+# per-station offsets cost a tz lookup each, and the replay opens hundreds of
+# connections per tick). Holds only the latest pin.
+_AS_OF_DDL: Optional[tuple] = None
+
+
+def _apply_as_of_views(conn: sqlite3.Connection, as_of: datetime) -> None:
+    global _AS_OF_DDL
+    key = (as_of, str(config.DB_PATH))
+    if _AS_OF_DDL is None or _AS_OF_DDL[0] != key:
+        _AS_OF_DDL = (key, _as_of_view_sql(conn, as_of))
+    for stmt in _AS_OF_DDL[1]:
+        conn.execute(stmt)
+
+
+def _as_of_view_sql(conn: sqlite3.Connection, as_of: datetime) -> List[str]:
+    """
+    TEMP views (temp schema shadows main for unqualified names, and a temp
+    object is legal on a mode=ro connection) hiding what did not exist yet:
+
+      forecasts, ensemble_spread  fetched_at  <= as_of
+      settled_buckets             recorded_at <= as_of
+      positions                   entry_time  <= as_of; a row that exited
+                                  AFTER as_of reads as still OPEN (status
+                                  'open', exit fields NULL). That is what the
+                                  caps (load_open_positions) saw then, and it
+                                  drops out of every closed-history read
+                                  (calibration cohort, cooldown, maturity).
+                                  high_water_mark is the final one -- no reader
+                                  on the entry path uses it.
+      observations                APPROXIMATE: no fetch time is stored, so a
+                                  row is visible from local(as_of) date >=
+                                  target_date + OBS_PUBLISH_LAG_DAYS, per
+                                  station, the replay's own visibility rule.
+                                  An observation later overwritten in place
+                                  (INSERT OR REPLACE) cannot be un-revised.
+    Unparseable timestamps compare NULL and are hidden (fail closed).
+    """
+    from backtest import settings  # lazy: only the replay ever gets here
+
+    cut = f"julianday('{as_of.isoformat()}')"
+    stmts = []
+    for table, col in (("forecasts", "fetched_at"), ("ensemble_spread", "fetched_at"),
+                       ("settled_buckets", "recorded_at")):
+        stmts.append(f"CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} "
+                     f"WHERE julianday({col}) <= {cut}")
+
+    # Column ORDER preserved: _row_to_position indexes SELECT * by ordinal.
+    reopened = f"(exit_time IS NOT NULL AND julianday(exit_time) > {cut})"
+    cols = []
+    for _, name, *_rest in conn.execute("PRAGMA main.table_info(positions)").fetchall():
+        if name == "status":
+            cols.append(f"CASE WHEN {reopened} THEN 'open' ELSE status END AS status")
+        elif name in ("exit_price", "exit_time", "exit_reason", "exit_blocked_reason", "trigger_price"):
+            cols.append(f"CASE WHEN {reopened} THEN NULL ELSE {name} END AS {name}")
+        else:
+            cols.append(name)
+    stmts.append(f"CREATE TEMP VIEW positions AS SELECT {', '.join(cols)} FROM main.positions "
+                 f"WHERE julianday(entry_time) <= {cut}")
+
+    lag = timedelta(days=settings.OBS_PUBLISH_LAG_DAYS)
+    cases, fallback = [], None
+    for icao in sorted(config.STATIONS):
+        offset = config.current_utc_offset_hours(icao, at=as_of)
+        last = ((as_of + timedelta(hours=offset)).date() - lag).isoformat()
+        cases.append(f"WHEN '{icao}' THEN '{last}'")
+        fallback = last if fallback is None else min(fallback, last)
+    stmts.append(
+        "CREATE TEMP VIEW observations AS SELECT * FROM main.observations "
+        f"WHERE target_date <= CASE station_icao {' '.join(cases)} ELSE '{fallback}' END"
+    )
+    return stmts
+
+
 def _process_name() -> str:
     return os.path.basename(sys.argv[0] or "") or "python"
 
@@ -332,6 +453,8 @@ def _connect() -> sqlite3.Connection:
     empty root-owned file where the daemon's database should be.
     """
     if _WRITABLE:
+        if _AS_OF is not None:
+            raise StorageReadOnlyError("storage is writable while an as-of pin is set; refusing.")
         return sqlite3.connect(config.DB_PATH)
     path = Path(config.DB_PATH).resolve()
     if not path.exists():
@@ -340,7 +463,14 @@ def _connect() -> sqlite3.Connection:
             f"creates it at boot (scheduler._boot_storage -> storage.migrate()); run that, "
             f"or `python -c \"import storage; storage.migrate()\"` as the daemon's user."
         )
-    return sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+    if _AS_OF is not None:
+        try:
+            _apply_as_of_views(conn, _AS_OF)
+        except Exception:
+            conn.close()
+            raise
+    return conn
 
 
 def migrate() -> None:

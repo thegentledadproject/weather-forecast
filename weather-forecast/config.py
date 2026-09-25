@@ -63,7 +63,22 @@ def _now_utc() -> datetime:
     below are entirely about what time it is, and cannot be tested against
     a real clock that is only in one DST state at a time.
     """
-    return datetime.now(timezone.utc)
+    return _PINNED_NOW if _PINNED_NOW is not None else datetime.now(timezone.utc)
+
+
+# GAP 3: the replay's clock pin (backtest/as_of.py). None = the wall clock.
+_PINNED_NOW: Optional[datetime] = None
+
+
+def pin_now_utc(instant: Optional[datetime]) -> None:
+    """Freeze _now_utc() at `instant` (aware), or None to release. Refuses in a
+    process that writes storage -- only the read-only replay may pin time."""
+    global _PINNED_NOW
+    import sys
+    storage = sys.modules.get("storage")
+    if instant is not None and storage is not None and storage.is_writable():
+        raise RuntimeError("config.pin_now_utc() in a writable (daemon) process")
+    _PINNED_NOW = instant
 
 
 def current_utc_offset_hours(
