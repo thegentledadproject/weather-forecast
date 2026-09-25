@@ -139,6 +139,10 @@ def summarize_positions(positions: List[Position]) -> Optional[dict]:
         "total_return_pct_sum": round(sum(returns), 4),  # naive sum, not compounded -- see print_report note
         "total_staked_usd": round(total_staked, 2),
         "total_pnl_usd": round(total_pnl_usd, 2),
+        # Unrounded, for callers that SUM summaries: adding rounded cents per
+        # station or per day drifts from the true total (the dashboard's tile
+        # and calendar disagreed by $0.03 this way). Round once, at display.
+        "total_pnl_usd_exact": total_pnl_usd,
         # P&L per dollar actually put at risk -- the honest headline number.
         "dollar_weighted_return_pct": round(total_pnl_usd / total_staked, 4) if total_staked else None,
         # ...and the same number once the entry-side taker fee it never paid is

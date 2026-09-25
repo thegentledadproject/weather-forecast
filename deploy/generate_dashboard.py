@@ -152,7 +152,7 @@ if closed_n:
             summary = ptr.summarize_paper_performance(icao)
             if isinstance(summary, dict):
                 station_summaries[icao] = summary
-                pnl_usd += float(summary.get("total_pnl_usd") or 0.0)
+                pnl_usd += float(summary.get("total_pnl_usd_exact") or 0.0)
                 staked_usd += float(summary.get("total_staked_usd") or 0.0)
         # Still dollar-weighted -- what the bankroll actually experienced, not
         # the per-trade percent sum that overweights $1 lottery tickets. The
@@ -227,7 +227,7 @@ if live_closed:
         for _icao, _ps in by_station.items():
             s = ptr.summarize_positions(_ps)
             if isinstance(s, dict):
-                live_pnl_usd += float(s.get("total_pnl_usd") or 0.0)
+                live_pnl_usd += float(s.get("total_pnl_usd_exact") or 0.0)
                 live_staked_usd += float(s.get("total_staked_usd") or 0.0)
     except Exception as exc:  # noqa: BLE001
         warnings.append(f"real-money P&L summary failed: {exc}")
@@ -301,7 +301,7 @@ def _run_probes():
             _probe("Wunderground", primary.wunderground_history_url, timeout=8),
             # CLOB: reachability only -- a garbage token id SHOULD 404/400; any
             # HTTP answer < 500 proves the trading API is up and talking.
-            _probe("CLOB price API", "https://clob.polymarket.com/price?token_id=1&side=buy",
+            _probe("CLOB API (reachability only, quotes not checked)", "https://clob.polymarket.com/price?token_id=1&side=buy",
                    ok_when=lambda r: r.status_code < 500),
         ]
 
@@ -570,7 +570,7 @@ try:
         "&middot; <b>the net price edge is the decay alarm, not Brier</b> &mdash; a bias "
         "exploit closes without any calibration metric moving "
         "&middot; the kill criterion reports NO VERDICT rather than reassurance on a thin "
-        "sample, and implies no action: see config.COHORT_KILL_NET_PRICE_EDGE"
+        "sample &middot; FIRED refuses new LIVE entries (executor._live_brake); paper is unaffected"
     )
 except Exception as exc:  # noqa: BLE001
     warnings.append(f"cohort monitor card failed: {exc}")
@@ -889,7 +889,7 @@ def _daily_pnl(positions):
                 parts.append(f"{icao} {s['total_pnl_usd']:+.2f} ({s['n_trades']} trade"
                              f"{'' if s['n_trades'] == 1 else 's'})")
         days[d] = {
-            "pnl": float(summary["total_pnl_usd"]),
+            "pnl": float(summary["total_pnl_usd_exact"]),
             "n": int(summary["n_trades"]),
             "staked": float(summary["total_staked_usd"]),
             "tip": "  ".join(parts),
@@ -1122,7 +1122,7 @@ region_nav_html = "".join(
     for _r in sorted(config.REGION_BANKROLL_USD)
 )
 
-live_at_risk_display = f"${live_at_risk:,.2f}"
+live_at_risk_display = "unknown" if open_n is None else f"${live_at_risk:,.2f}"
 if live_open:
     live_note = f"{len(live_open)} open"
     if live_cap_usd:
@@ -1131,6 +1131,16 @@ elif live_stations:
     live_note = f"{html.escape(', '.join(live_stations))} armed &middot; ${live_size_usd:,.2f}/entry"
 else:
     live_note = "no live stations armed"
+
+try:
+    import calibration_panel as _attn_panel
+
+    _n_feeds_bad = sum(1 for _p in (probes or []) if _p["state"] != "ok")
+    attention_html = _attn_panel.render_attention_html(
+        *_attn_panel.attention_inputs(), n_warnings=len(warnings), n_feeds_bad=_n_feeds_bad)
+except Exception as exc:  # noqa: BLE001
+    warnings.append(f"attention panel failed: {exc}")
+    attention_html = "<div><b>UNKNOWN</b> &middot; attention panel failed &mdash; see warnings</div>"
 
 warn_html = ""
 if warnings:
@@ -1484,6 +1494,11 @@ page = """<!doctype html>
     </div>
   </header>
 
+  <div class="card">
+    <h2>Needs attention</h2>
+    @@ATTENTION@@
+  </div>
+
   <div class="tiles">
     <div class="tile"><div class="label">Uptime</div><div class="value" id="uptime">&mdash;</div>
       <div class="note">day @@RUNDAY@@ of the 14&ndash;28 day run</div></div>
@@ -1640,6 +1655,7 @@ page = (
     .replace("@@REALMONEYCAP@@", realmoney_cap)
     .replace("@@REALMONEY@@", realmoney_html)
     .replace("@@WARNINGS@@", warn_html)
+    .replace("@@ATTENTION@@", attention_html)
     .replace("@@JOURNAL@@", html.escape(journal))
     .replace("@@DEPLOYMS@@", str(deploy_epoch_ms))
     .replace("@@STATIONCOUNT@@", str(station_count))

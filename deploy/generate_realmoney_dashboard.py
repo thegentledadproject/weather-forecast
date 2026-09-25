@@ -1105,8 +1105,8 @@ def main(argv=None):
         "<b>The net price edge is the decay alarm, not Brier</b> &mdash; this book makes "
         "money on price, not on forecasting, and a bias exploit closes without moving any "
         "calibration metric. Book-wide, not just the armed stations. The kill criterion "
-        "reports NO VERDICT rather than reassurance on a thin sample, and implies no "
-        "action: see config.COHORT_KILL_NET_PRICE_EDGE.",
+        "reports NO VERDICT rather than reassurance on a thin sample; FIRED refuses new "
+        "LIVE entries (executor._live_brake), paper is unaffected.",
         lambda: render_cohort(warnings, now=now_utc),
     )
     _section(

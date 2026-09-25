@@ -580,3 +580,67 @@ def cohort_card(as_of=None, stations=None, regime_split: bool = True) -> str:
     if regime_split:
         card = render_regime_split_html(rows) + card
     return card
+
+
+def render_attention_html(brake, kill_status: Optional[dict],
+                          n_warnings: int = 0, n_feeds_bad: int = 0) -> str:
+    """
+    The "what needs attention" strip that sits under the page header.
+
+    Pure. brake is executor._live_brake()'s (code, reason) or None;
+    kill_status is cohort_monitor.kill_criterion()'s dict, or None when it
+    could not be computed. An input that could not be read renders as
+    UNKNOWN, never as fine -- a quiet panel must mean "checked and clear".
+
+    Every line carries a text label, so no state depends on colour alone.
+    """
+    items = []  # (label, text)
+    if brake is None:
+        items.append(("OK", "New live entries: allowed by the automatic brakes"))
+    else:
+        code, reason = brake
+        label = "UNKNOWN" if code == "unknown" else "REFUSED"
+        items.append((label, f"New live entries: {html.escape(str(code))} &mdash; "
+                             f"{html.escape(str(reason))} (enforced; paper keeps trading)"))
+
+    if kill_status is None:
+        items.append(("UNKNOWN", "Kill criterion: could not be computed"))
+    else:
+        verdict = {None: "NO VERDICT", True: "FIRED", False: "holding"}[kill_status["fired"]]
+        measured = kill_status["net_price_edge"]
+        measured_text = _EM_DASH if measured is None else f"{measured:+.4f}"
+        label = {None: "INFO", True: "FIRED", False: "OK"}[kill_status["fired"]]
+        items.append((label, (
+            f"Kill criterion {verdict}: trailing {kill_status['window_days']}d net price edge "
+            f"{measured_text} vs level {kill_status['level']:+.4f}, "
+            f"{kill_status['n_days']} station-days, book-wide "
+            "&mdash; enforced: FIRED refuses new live entries, paper is unaffected"
+        )))
+
+    if n_feeds_bad:
+        items.append(("CHECK", f"{n_feeds_bad} upstream feed(s) not fully OK &mdash; see Live feeds"))
+    if n_warnings:
+        items.append(("CHECK", f"{n_warnings} page section(s) failed to load &mdash; "
+                               "see Data collection warnings"))
+
+    return "".join(f"<div><b>{label}</b> &middot; {text}</div>" for label, text in items)
+
+
+def attention_inputs() -> tuple:
+    """
+    (brake, kill_status) for render_attention_html() -- the I/O half. The
+    page renders later, once it knows how many of its own sections failed.
+    """
+    try:
+        import executor  # lazy: it imports the order clients, which no other card needs
+        brake = executor._live_brake()  # read-only; its alert is a separate call
+    except Exception as exc:  # noqa: BLE001
+        brake = ("unknown", f"brake check could not run ({type(exc).__name__}: {exc})")
+    try:
+        # ponytail: second load_cohort() per page (cohort_card does its own);
+        # share one read if generation time ever matters.
+        rows, _ = cohort_monitor.load_cohort()
+        kill_status = cohort_monitor.kill_criterion(cohort_monitor.windows(rows))
+    except Exception:  # noqa: BLE001
+        kill_status = None
+    return brake, kill_status
