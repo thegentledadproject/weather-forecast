@@ -1778,7 +1778,15 @@ def record_live_order_attempt(
     APPEND-ONLY, and never updated. `kind` is "entry" or "exit"; only
     entries feed the daily cap (an exit must never be rate-limited), but
     both are recorded because both are real requests to the exchange.
+
+    A `reconciled` row is not a submission: it clears an `unknown` one for the
+    same token. Only the SUBMISSION row carries the idempotency key, so the
+    reconcile row is always stored with client_order_key NULL -- otherwise a
+    reconcile citing the unknown order's key would hit the UNIQUE index and
+    silently not be written, leaving the token blocked for good.
     """
+    if outcome == "reconciled":
+        client_order_key = None
     try:
         with _db() as conn:
             conn.execute(

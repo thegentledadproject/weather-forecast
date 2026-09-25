@@ -523,3 +523,33 @@ def test_reconciled_rows_do_not_count_against_the_daily_order_cap(tmp_db):
     storage.record_live_order_attempt(kind="entry", station_icao="WSSS", outcome="reconciled",
                                       target_date=date(2026, 9, 3), bucket_c=32, side="YES")
     assert storage.count_live_order_attempts("entry", "2000-01-01") == 0
+
+
+def test_a_keyed_unknown_submission_and_its_reconcile_row_do_not_collide(monkeypatch, live_wsss):
+    """ledger-lineage x honest-fills: the UNKNOWN row is the submission and
+    carries client_order_key (UNIQUE); the operator's `reconciled` row is not
+    a submission and is stored with a NULL key even if it cites the order's
+    key, so it is always written and always lifts the block."""
+    import executor
+    import storage
+    calls = _submit_returns(monkeypatch, filled=False, unknown=True, error="TimeoutError")
+    cycle = "2026-09-03T00:10:00+00:00"
+
+    executor.open_position(_live_decision(), cycle_ts=cycle)
+    (unknown,) = storage.load_live_order_attempts()
+    assert unknown["outcome"] == "unknown" and unknown["client_order_key"]
+
+    assert storage.record_live_order_attempt(
+        kind="entry", station_icao="WSSS", outcome="reconciled", target_date=date(2026, 9, 3),
+        bucket_c=32, side="YES", client_order_key=unknown["client_order_key"],
+        detail="operator: checked exchange, no fill") is True
+    rows = storage.load_live_order_attempts()
+    assert sorted(r["outcome"] for r in rows) == ["reconciled", "unknown"]
+    assert [r["client_order_key"] for r in rows if r["outcome"] == "reconciled"] == [None]
+    assert storage.has_unreconciled_unknown_attempt("WSSS", date(2026, 9, 3), 32, "YES") is False
+
+    # same cycle: still a duplicate submission (the key is spent); next cycle: sent
+    executor.open_position(_live_decision(), cycle_ts=cycle)
+    assert len(calls) == 1
+    executor.open_position(_live_decision(), cycle_ts="2026-09-03T00:20:00+00:00")
+    assert len(calls) == 2
