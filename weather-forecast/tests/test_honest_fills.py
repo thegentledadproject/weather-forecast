@@ -475,6 +475,49 @@ def test_close_position_refuses_an_unknown_mode_and_alerts_once(monkeypatch, bad
     assert len(sent) == 1
 
 
+# ---------------------------------------------------------------------------
+# 5. markout_report: read-only, look-back quotes, settlement payoff
+# ---------------------------------------------------------------------------
+
+def test_markout_report_reads_moves_and_settlement_without_writing(tmp_path):
+    import sqlite3
+    import markout_report as mr
+    pw, md = tmp_path / "pw.sqlite3", tmp_path / "md.sqlite3"
+    c = sqlite3.connect(pw)
+    c.execute("CREATE TABLE positions (position_id, station_icao, target_date, bucket_c, side, "
+              "entry_price, entry_time, status, exit_price, token_id, execution_mode)")
+    c.execute("CREATE TABLE settled_buckets (station_icao, target_date, bucket_c)")
+    c.execute("INSERT INTO positions VALUES ('p1','WSSS','2026-09-03',32,'YES',0.31,"
+              "'2026-09-03T00:00:00+00:00','closed_resolution',1.0,'TOK','paper')")
+    c.execute("INSERT INTO settled_buckets VALUES ('WSSS','2026-09-03',32)")
+    c.commit(); c.close()
+    t0 = int(datetime_fromiso("2026-09-03T00:00:00+00:00"))
+    c = sqlite3.connect(md)
+    c.execute("CREATE TABLE price_snapshots (token_id, ts, price, ask_price, source)")
+    c.executemany("INSERT INTO price_snapshots VALUES ('TOK', ?, ?, ?, 'live_snapshot')", [
+        (t0 - 60, 0.29, 0.31),            # entry: mid 0.30
+        (t0 + 14 * 60, 0.31, 0.33),       # at +15m: mid 0.32
+        (t0 + 15 * 60 + 1, 0.99, 0.99),   # AFTER +15m -- must not be read for +15m
+        (t0 + 3600 - 100, 0.35, 0.37),    # +1h: mid 0.36
+    ])
+    c.commit(); c.close()
+
+    (row,) = mr.entry_rows(mr._ro(pw), mr._ro(md))
+
+    assert row["mid_15m"] == pytest.approx(0.02)
+    assert row["markout_15m"] == pytest.approx(0.32 - 0.31)
+    assert row["mid_1h"] == pytest.approx(0.06)
+    assert row["mid_6h"] is None                       # nothing within staleness
+    assert row["markout_settle"] == pytest.approx(1.0 - 0.31)
+    with pytest.raises(sqlite3.OperationalError):
+        mr._ro(pw).execute("INSERT INTO settled_buckets VALUES ('X','2026-01-01',1)")
+
+
+def datetime_fromiso(s):
+    from datetime import datetime
+    return datetime.fromisoformat(s).timestamp()
+
+
 def test_reconciled_rows_do_not_count_against_the_daily_order_cap(tmp_db):
     import storage
     storage.record_live_order_attempt(kind="entry", station_icao="WSSS", outcome="reconciled",
