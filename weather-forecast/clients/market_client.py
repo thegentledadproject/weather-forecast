@@ -79,6 +79,7 @@ requests   (pip install requests)
 models.py (local)
 """
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -99,6 +100,10 @@ _no_orderbook_seen = set()
 # is logged once rather than on every fetch of every scan cycle. In-memory on
 # purpose: the snapshot clears on its own, and a restart re-checking is right.
 _ghost_book_seen = set()
+
+# estimate_slippage()'s fallback, for EntryBook.slippage(). Must equal the
+# literal inside estimate_slippage (tests/test_honest_fills.py pins it).
+_FALLBACK_SLIPPAGE_PCT = 0.05
 
 
 def _now_iso() -> str:
@@ -288,6 +293,14 @@ def get_bid_depth_usd(market_token_id: str, max_price_impact_pct: float = 0.10, 
     if not book["bids"]:
         return 0.0
 
+    # EXITS WARN, NEVER BLOCK. A crossed or stale book is logged here, on the
+    # exit path, and the depth is still returned: refusing to sell a real
+    # position over book quality would strand it, which is worse.
+    problem = book_quality_problem(book, datetime.now(timezone.utc).timestamp(), need="bids")
+    if problem:
+        print(f"[market_client] WARNING: exit-side book for token {market_token_id} is {problem} "
+              f"-- recorded anyway; exits are never blocked on book quality.")
+
     try:
         bids = sorted(book["bids"], key=lambda level: float(level["price"]), reverse=True)
         top_price = float(bids[0]["price"])
@@ -375,6 +388,157 @@ def is_ghost_book(book: Optional[dict]) -> bool:
     return best_bid <= config.GHOST_BOOK_BID_MAX and best_ask >= config.GHOST_BOOK_ASK_MIN
 
 
+# --------------------------------------------------------------------------
+# The entry book: ask, depth and slippage from ONE /book snapshot
+# --------------------------------------------------------------------------
+
+def book_timestamp(book: Optional[dict]) -> Optional[float]:
+    """
+    The book's own server timestamp in epoch SECONDS, or None if it has none.
+
+    /book carries `timestamp` as a millisecond string (captured 2026-09-24:
+    '1790265943981'). Probed on 40 live books that day: every book fetched in
+    the same instant carried the SAME value and it did not move across three
+    fetches 4s apart -- it is the server's snapshot epoch, not a per-book
+    last-trade time, and its age on a healthy API ran 0.1s-106s (median 26s).
+    """
+    try:
+        raw = float((book or {}).get("timestamp"))
+    except (TypeError, ValueError):
+        return None
+    return raw / 1000.0 if raw > 1e11 else raw
+
+
+def book_quality_problem(book: Optional[dict], fetched_at: float, now: Optional[float] = None,
+                         need: str = "asks") -> Optional[str]:
+    """
+    Reason code if this book must not be traded against, else None.
+
+      no_book    the fetch failed (or it was a ghost book -- get_order_book
+                 already maps that to None)
+      empty_ask  / empty_bid -- nothing on the side the caller needs
+      crossed    best bid >= best ask: not a market, a stale or broken book
+      stale      older than config.BOOK_MAX_AGE_S, measured from the book's
+                 own timestamp when it has one, else from our fetch time
+    """
+    if not book:
+        return "no_book"
+    side = book.get(need) or []
+    if not side:
+        return "empty_ask" if need == "asks" else "empty_bid"
+    try:
+        bids, asks = book.get("bids") or [], book.get("asks") or []
+        if bids and asks and max(float(b["price"]) for b in bids) >= min(float(a["price"]) for a in asks):
+            return "crossed"
+    except (KeyError, TypeError, ValueError):
+        return "unparseable"
+    stamp = book_timestamp(book) or fetched_at
+    age = (now if now is not None else datetime.now(timezone.utc).timestamp()) - stamp
+    if age > config.BOOK_MAX_AGE_S:
+        return "stale"
+    return None
+
+
+def _ask_depth_usd(book: dict, max_price_impact_pct: float) -> float:
+    asks = sorted(book["asks"], key=lambda level: float(level["price"]))
+    impact_ceiling = float(asks[0]["price"]) * (1 + max_price_impact_pct)
+    depth_usd = 0.0
+    for level in asks:
+        price = float(level["price"])
+        if price > impact_ceiling:
+            break
+        depth_usd += float(level["size"]) * price
+    return depth_usd
+
+
+def _walk_asks(book: dict, size_usd: float) -> Optional[float]:
+    """VWAP of spending size_usd up the asks, or None if the book cannot fill it."""
+    remaining, cost, shares = size_usd, 0.0, 0.0
+    for level in sorted(book["asks"], key=lambda level: float(level["price"])):
+        price = float(level["price"])
+        fill_usd = min(remaining, float(level["size"]) * price)
+        if fill_usd <= 0:
+            continue
+        cost += fill_usd
+        shares += fill_usd / price
+        remaining -= fill_usd
+        if remaining <= 0:
+            break
+    if shares == 0 or remaining > 0:
+        return None
+    return cost / shares
+
+
+@dataclass
+class EntryBook:
+    """
+    ONE /book snapshot for an entry: its best ask, its depth and its slippage
+    all come from the same response, so they cannot describe two different
+    books. Before this, the ask came from /price and depth and slippage from
+    two further /book calls, never reconciled.
+
+    `refusal` is a reason code (see book_quality_problem, plus `ask_moved`)
+    or None. A refused book reports depth None, which every caller already
+    treats as "cannot size safely".
+    """
+    token_id: str
+    book: Optional[dict]
+    fetched_at: float
+    refusal: Optional[str] = None
+
+    @property
+    def best_ask(self) -> Optional[float]:
+        if not self.book or not self.book.get("asks"):
+            return None
+        return min(float(a["price"]) for a in self.book["asks"])
+
+    def depth_usd(self, max_price_impact_pct: float = 0.10) -> Optional[float]:
+        if self.refusal:
+            return None
+        try:
+            return _ask_depth_usd(self.book, max_price_impact_pct)
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def slippage(self, size_usd: float) -> float:
+        """Same contract as estimate_slippage(), on this snapshot."""
+        if self.refusal:
+            return _FALLBACK_SLIPPAGE_PCT
+        try:
+            vwap = _walk_asks(self.book, size_usd)
+        except (KeyError, TypeError, ValueError):
+            return _FALLBACK_SLIPPAGE_PCT
+        if vwap is None:
+            return _FALLBACK_SLIPPAGE_PCT
+        return max((vwap - self.best_ask) / self.best_ask, 0.0)
+
+
+def get_entry_book(token_id: str, decided_ask: Optional[float] = None, timeout: int = 10) -> EntryBook:
+    """
+    Fetch the one book an entry is sized and checked against.
+
+    `decided_ask` is the ask the EV was computed at (from /price). If this
+    book's best ask is WORSE than that, the edge was priced on a book that is
+    gone: refused as `ask_moved`. A better ask is accepted -- the approved
+    edge only grows, and the recorded price stays the (conservative) decided one.
+
+    Every refusal is printed with its code; nothing here raises.
+    """
+    fetched_at = datetime.now(timezone.utc).timestamp()
+    book = get_order_book(token_id, timeout=timeout)
+    snap = EntryBook(token_id=token_id, book=book, fetched_at=fetched_at)
+    snap.refusal = book_quality_problem(book, fetched_at)
+    if snap.refusal is None and decided_ask is not None and snap.best_ask > decided_ask + 1e-9:
+        snap.refusal = "ask_moved"
+    if snap.refusal:
+        print(
+            f"[market_client] ENTRY BOOK REFUSED ({snap.refusal}) for token {token_id}: "
+            f"best ask {snap.best_ask}, decided ask {decided_ask}, "
+            f"book ts {book_timestamp(book)}, fetched {fetched_at:.0f}"
+        )
+    return snap
+
+
 def get_available_depth_usd(market_token_id: str, max_price_impact_pct: float = 0.10, timeout: int = 10) -> Optional[float]:
     """
     Sum the dollar value of ask-side liquidity available before price
@@ -393,17 +557,7 @@ def get_available_depth_usd(market_token_id: str, max_price_impact_pct: float = 
         return None
 
     try:
-        asks = sorted(book["asks"], key=lambda level: float(level["price"]))
-        top_price = float(asks[0]["price"])
-        impact_ceiling = top_price * (1 + max_price_impact_pct)
-
-        depth_usd = 0.0
-        for level in asks:
-            price = float(level["price"])
-            if price > impact_ceiling:
-                break
-            depth_usd += float(level["size"]) * price
-        return depth_usd
+        return _ask_depth_usd(book, max_price_impact_pct)
     except (KeyError, ValueError) as exc:
         print(f"[market_client] get_available_depth_usd parse failed for token {market_token_id}: {exc}")
         return None
@@ -420,6 +574,8 @@ def estimate_slippage(market_token_id: str, size_usd: float, timeout: int = 10) 
     ev_engine.py's notes) and callers should treat the fallback value
     as a rough floor, not a confident estimate.
     """
+    # A LITERAL on purpose: backtest/fill_model.py reads it out of this
+    # function with `ast`. _FALLBACK_SLIPPAGE_PCT (module level) must match.
     FALLBACK_SLIPPAGE_PCT = 0.05  # conservative default when book data is missing
 
     book = get_order_book(market_token_id, timeout=timeout)
@@ -427,31 +583,12 @@ def estimate_slippage(market_token_id: str, size_usd: float, timeout: int = 10) 
         return FALLBACK_SLIPPAGE_PCT
 
     try:
-        asks = sorted(book["asks"], key=lambda level: float(level["price"]))
-        remaining = size_usd
-        cost_accum = 0.0
-        shares_accum = 0.0
-        top_price = float(asks[0]["price"])
-
-        for level in asks:
-            price = float(level["price"])
-            level_size_usd = float(level["size"]) * price
-            fill_usd = min(remaining, level_size_usd)
-            if fill_usd <= 0:
-                continue
-            shares = fill_usd / price
-            cost_accum += fill_usd
-            shares_accum += shares
-            remaining -= fill_usd
-            if remaining <= 0:
-                break
-
-        if shares_accum == 0 or remaining > 0:
+        avg_fill_price = _walk_asks(book, size_usd)
+        if avg_fill_price is None:
             # Order size exceeds visible book depth -- can't fill it
             # cleanly, so treat as high-slippage rather than guess.
             return FALLBACK_SLIPPAGE_PCT
-
-        avg_fill_price = cost_accum / shares_accum
+        top_price = min(float(level["price"]) for level in book["asks"])
         slippage_pct = (avg_fill_price - top_price) / top_price
         return max(slippage_pct, 0.0)
     except (KeyError, ValueError, ZeroDivisionError) as exc:

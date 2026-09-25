@@ -1856,7 +1856,7 @@ def count_live_order_attempts(
             if station_icaos is None:
                 row = conn.execute(
                     "SELECT COUNT(*) FROM live_order_attempts "
-                    "WHERE kind = ? AND ts >= ? AND outcome != 'refused'",
+                    "WHERE kind = ? AND ts >= ? AND outcome NOT IN ('refused', 'reconciled')",
                     (kind, since_iso),
                 ).fetchone()
             elif not station_icaos:
@@ -1865,7 +1865,7 @@ def count_live_order_attempts(
                 placeholders = ",".join("?" for _ in station_icaos)
                 row = conn.execute(
                     f"SELECT COUNT(*) FROM live_order_attempts "
-                    f"WHERE kind = ? AND ts >= ? AND outcome != 'refused' "
+                    f"WHERE kind = ? AND ts >= ? AND outcome NOT IN ('refused', 'reconciled') "
                     f"AND station_icao IN ({placeholders})",
                     (kind, since_iso, *station_icaos),
                 ).fetchone()
@@ -1873,6 +1873,32 @@ def count_live_order_attempts(
     except Exception as exc:  # noqa: BLE001
         print(f"[storage] could not count live order attempts: {exc}")
         return None
+
+
+def has_unreconciled_unknown_attempt(station_icao: str, target_date, bucket_c: int,
+                                     side: str) -> Optional[bool]:
+    """
+    HONEST FILLS. Whether this bucket/side (i.e. this token) has a live order
+    whose outcome is UNKNOWN and that no later `reconciled` row has cleared.
+    None if the table could not be read -- callers gating an entry must treat
+    that as blocked. An operator clears it by appending a row with
+    outcome='reconciled' for the same station/date/bucket/side (append-only;
+    `reconciled` rows are not submissions and the daily cap ignores them).
+    """
+    day = target_date.isoformat() if hasattr(target_date, "isoformat") else (target_date or "")
+    try:
+        with _db() as conn:
+            unknown_ts, reconciled_ts = conn.execute(
+                "SELECT MAX(CASE WHEN outcome = 'unknown' THEN ts END), "
+                "       MAX(CASE WHEN outcome = 'reconciled' THEN ts END) "
+                "FROM live_order_attempts "
+                "WHERE station_icao = ? AND target_date = ? AND bucket_c = ? AND side = ?",
+                (station_icao, day, bucket_c, side),
+            ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[storage] could not read unknown live order attempts: {exc}")
+        return None
+    return unknown_ts is not None and (reconciled_ts is None or reconciled_ts < unknown_ts)
 
 
 def load_live_order_attempts(limit: int = 50) -> List[dict]:
