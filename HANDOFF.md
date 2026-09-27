@@ -54,7 +54,7 @@ Branch `main`, pushed; only HANDOFF.md dirty. Last commit: `b67ac73` Dashboard P
    - Judge on paper/live rows, not replay.
 4. **2026-10-05:** set `LOCK_SHA` in `weather-forecast/lock_score.py` to the newest `ev_snapshots.config_sha` on the box (the full `config_fingerprint`), commit it, and deploy. **No deploys 2026-10-06 → 11-02** (restarts OK). Read the exam on 2026-11-05: `python lock_score.py --locked-read`.
 5. **Redemption is still unproven.** The `[yes,no]` slot order is unverified on-chain. It needs a real winning live position plus POL for gas; then set `config.REDEMPTION_PROVEN_TX`.
-6. **Unscored:** NOAA daily max vs our METAR daily max for the NOAA-settled stations (see `config.py` ~671 note).
+6. ~~NOAA vs METAR~~ **ANSWERED 2026-09-27: safe.** Our METAR max hits the market's bucket on 1,023/1,028 NOAA-settled days (99.5%); no fix needed.
 7. **DST restarts** (not deploys): after 2026-10-25 01:00 UTC (EGLC) and after 2026-11-01 06:00 UTC (KLGA).
 8. **Kept from the 2026-09-24 handoff:** EDDM/ZSPD/RKPK collection-only → answered NO. SBGR/KSEA/KMIA/MMMX stay force-collection-only.
 
