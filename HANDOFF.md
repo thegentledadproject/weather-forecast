@@ -1,6 +1,8 @@
 # Handoff - 2026-09-25
 
 ## State
+> **2026-09-27 update:** the 09-25 scheduled deploy never ran (app closed). Deployed by hand 2026-09-27 15:34 UTC: box at `b67ac73` (includes `41a88cc`), migrate ok, paper, watchdog ok, contract_checks VALID so far, ntfy sent. Backup task never fired (PC asleep); WakeToRun now on, manual run verified, and `pull_backup.sh` stdin bug fixed (`9ceddbd`, only the first file was being fetched). Open items 1-2 below are DONE.
+
 Branch `main`, pushed; only HANDOFF.md dirty. Last commit: `b67ac73` Dashboard Phase 1: attention panel, exact P&L sums, honest CLOB label.
 - **Box (`ubuntu@43.216.25.99`) runs `c91ff66`** (= `72746e8` + a HANDOFF commit): the pre-live safety fixes (`244a065`) plus the CYYZ/KHOU release. **Plus a dashboard-only deploy (2026-09-25 05:44 UTC):** the 5 files of `b67ac73` are STAGED (not committed) on the box's `main`. Their contents match `b67ac73` exactly, so the 16:05 `git pull --ff-only` fast-forwards over them (simulated locally first). Generators in `/usr/local/bin` md5-match. Daemon was not restarted. **Daemon is PAPER** via `/etc/polyweather/mode.env` (since 2026-09-23 15:33 UTC). Wallet ~$0.26.
 - **Main is ahead of the box by the whole audit remediation (`41a88cc`, 2130 tests, verified).** A one-time Claude scheduled task `deploy-audit-remediation` deploys it at **2026-09-25 16:05 UTC**. It runs only while the Claude app is open, checks the schema, contract gate and watchdog, then sends ntfy "polyweather deploy OK/FAILED".
