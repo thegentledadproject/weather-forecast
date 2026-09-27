@@ -2626,6 +2626,11 @@ SCHEDULE_WINDOWS = [
 # arrival per pass with margin.
 COLLECTION_INTERVAL_MIN = 60
 
+# Day-ahead recording (day_ahead.py): from this LOCAL hour, inside the
+# 16:00-22:45 evening monitor window, each station records tomorrow's book
+# and raw model once. Collection only. None switches it off.
+DAY_AHEAD_RECORD_HOUR_LOCAL = 20
+
 # Opt-in only -- disabled by default per the walked-back Window-0 analysis.
 # If enabled, adds a sparse scan around a station's likely next-day market
 # open; treat any signal from this window as lower-confidence than the

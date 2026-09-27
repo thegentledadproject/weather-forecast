@@ -888,6 +888,28 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
         """
     )
 
+    # Day-ahead recording (day_ahead.py): tomorrow's book + RAW model, the
+    # evening before. Its own table so no ev_snapshots reader (shrink fit,
+    # lock_score, first-sighting analyses) ever sees a row a day early.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ev_snapshots_day_ahead (
+            station_icao TEXT NOT NULL,
+            target_date TEXT NOT NULL,
+            bucket_c INTEGER NOT NULL,
+            side TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            model_prob REAL,
+            market_price REAL,
+            market_bid REAL,
+            central_c REAL,
+            std_dev_c REAL,
+            config_sha TEXT,
+            PRIMARY KEY (station_icao, target_date, bucket_c, side, generated_at)
+        )
+        """
+    )
+
     # GAP 4 (2026-09-24): ALTER-only (not in the CREATE) so fresh and deployed
     # entry_decisions get the same column order: GAP 8 columns, then these.
     # Columns added to tables that already exist on the
@@ -1402,6 +1424,30 @@ def save_ev_snapshot_rows(
                  generated_at, r.model_prob, r.market_price, r.market_bid,
                  r.raw_edge, r.estimated_slippage_pct, r.fee_rate_pct,
                  r.net_ev_per_dollar, r.spread_source, r.notes, config_sha)
+                for r in results
+            ],
+        )
+
+
+def save_day_ahead_rows(
+    station_icao: str,
+    target_date: date,
+    generated_at: str,
+    results,
+    central_c: float,
+    std_dev_c: float,
+    config_sha: Optional[str] = None,
+) -> None:
+    """One day-ahead recording cycle (day_ahead.py), one row per (bucket, side)."""
+    with _db() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO ev_snapshots_day_ahead "
+            "(station_icao, target_date, bucket_c, side, generated_at, model_prob, "
+            " market_price, market_bid, central_c, std_dev_c, config_sha) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (station_icao, target_date.isoformat(), int(r.bucket_c), r.side, generated_at,
+                 r.model_prob, r.market_price, r.market_bid, central_c, std_dev_c, config_sha)
                 for r in results
             ],
         )

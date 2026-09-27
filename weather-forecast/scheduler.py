@@ -394,6 +394,14 @@ def run_cycle(window: dict, station_icaos: Optional[list] = None) -> None:
             # pass must never be what delays a stop.
             if _collection_due(icao, time.time()):
                 _run_collection_cycle(icao)
+            # Day-ahead recording: collection only, after exits, own table.
+            try:
+                import day_ahead
+
+                if day_ahead.due(icao):
+                    day_ahead.record(icao)
+            except Exception as exc:  # noqa: BLE001 - recording is never a gate
+                print(f"[scheduler] {icao}: day-ahead recording failed: {exc}")
         return
 
     print(f"[scheduler] unrecognized mode '{mode}' -- skipping this cycle.")

@@ -39,7 +39,7 @@ from clients.official.registry import get_official_client
 import storage
 
 
-def gather_forecasts(station) -> list:
+def gather_forecasts(station, target_date: date = None) -> list:
     """
     Step A: pull every available forecast source for this station, skipping
     failures silently.
@@ -75,7 +75,9 @@ def gather_forecasts(station) -> list:
     for f in forecasts:
         storage.save_forecast(f)
 
-    today = config.local_today(station)
+    # target_date is for the day-ahead recorder only (day_ahead.py); every
+    # trading caller omits it and gets local_today, as before.
+    today = target_date or config.local_today(station)
     todays = [f for f in forecasts if f.target_date == today]
     return config.blendable_forecasts(station.icao, todays)
 

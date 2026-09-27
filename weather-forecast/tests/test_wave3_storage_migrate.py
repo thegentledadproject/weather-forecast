@@ -66,9 +66,9 @@ def test_migrate_builds_the_whole_schema_once(tmp_path, monkeypatch):
     storage.migrate()
     assert {"forecasts", "observations", "positions", "live_order_attempts",
             "entry_decisions", "settled_buckets", "ensemble_spread", "ev_snapshots",
-            "contract_checks"} <= _tables(config.DB_PATH)
-    # 9 evidence tables (incl. gap-7 contract_checks) + 3 gap-8 `_history` twins
-    assert "12 tables" in storage.schema_summary() and "position_economics" in storage.schema_summary()
+            "contract_checks", "ev_snapshots_day_ahead"} <= _tables(config.DB_PATH)
+    # 10 evidence tables (incl. gap-7 contract_checks, day-ahead recording) + 3 gap-8 `_history` twins
+    assert "13 tables" in storage.schema_summary() and "position_economics" in storage.schema_summary()
 
 
 def test_migrate_on_a_pre_wave1_schema_adds_columns_and_tables_idempotently(tmp_path, monkeypatch):
