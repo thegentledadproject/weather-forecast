@@ -59,7 +59,7 @@ fetch_remote_file() {
     if [ -n "$FAKE_REMOTE" ]; then
         cp "$remote" "$local_path"
     else
-        "$PSCP" -batch -i "$KEY" "$HOST:$remote" "$local_path"
+        "$PSCP" -batch -i "$KEY" "$HOST:$remote" "$local_path" </dev/null
     fi
 }
 
@@ -68,7 +68,7 @@ delete_remote_file() {
     if [ -n "$FAKE_REMOTE" ]; then
         rm -f "$remote"
     else
-        "$PLINK" -batch -ssh -i "$KEY" "$HOST" "rm -f '$remote'"
+        "$PLINK" -batch -ssh -i "$KEY" "$HOST" "rm -f '$remote'" </dev/null
     fi
 }
 
