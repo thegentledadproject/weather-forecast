@@ -27,6 +27,9 @@ falling back to `chronyc tracking`'s offset when timedatectl gives no
 answer. Alerts if not synchronized or the offset exceeds 2s. Neither tool
 exists on a dev box or in a container; that is logged as "unknown", not an
 alert -- "can't tell" is not evidence of drift.
+
+KILL CRITERION. Once a day (the 00:xx UTC run) alerts if
+cohort_monitor.kill_criterion() has fired -- see _check_kill.
 """
 import subprocess
 import sys
@@ -120,9 +123,40 @@ def _check_clock(now: datetime) -> int:
     return 0
 
 
+def _check_kill(now: datetime) -> int:
+    """
+    Alert if cohort_monitor.kill_criterion() has fired. executor._live_brake
+    only evaluates it on a live entry attempt, so in paper mode nothing else
+    would say so. Runs in the 00:xx UTC cron run only: one alert a day, no
+    dedupe state. fired=None (thin sample) is logged, not alerted.
+    Returns 1 if it alerted.
+    """
+    if now.hour != 0 or now.minute >= 30:
+        return 0
+    try:
+        import cohort_monitor  # lazy: heavy import, needed once a day
+        rows, _ = cohort_monitor.load_cohort()
+        status = cohort_monitor.kill_criterion(cohort_monitor.windows(rows, as_of=now.date()))
+    except Exception as exc:  # noqa: BLE001 - a rule we cannot evaluate is worth hearing about
+        msg = f"cannot evaluate kill_criterion: {type(exc).__name__}: {exc}"
+        print(f"[watchdog] {now.isoformat()} ALERT {msg}")
+        alerts.send("polyweather watchdog: kill check failed", msg, priority="high")
+        return 1
+    edge = status["net_price_edge"]
+    detail = (f"trailing {status['window_days']}d net price edge "
+              f"{'n/a' if edge is None else f'{edge:+.3f}'} vs level {status['level']:+.3f}, "
+              f"{status['n_days']} station-days (min {status['min_station_days']})")
+    print(f"[watchdog] {now.isoformat()} kill fired={status['fired']} -- {detail}")
+    if status["fired"] is True:
+        alerts.send("polyweather watchdog: kill criterion FIRED",
+                    detail + ". New live entries are braked; paper continues.", priority="high")
+        return 1
+    return 0
+
+
 def check(now: Optional[datetime] = None) -> int:
     now = now or datetime.now(timezone.utc)
-    clock_alerted = _check_clock(now)
+    clock_alerted = _check_clock(now) | _check_kill(now)
     try:
         latest = storage.latest_cycle_write_ts()
     except Exception as exc:  # noqa: BLE001 - an unreadable DB is itself the alarm
