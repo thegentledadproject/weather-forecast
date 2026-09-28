@@ -130,3 +130,10 @@ class TestBucketForTemp:
         assert resolution.bucket_for_temp(t) == resolution.bucket_for_temp(
             t, config.BUCKET_MIN_C, config.BUCKET_MAX_C, "half_up"
         )
+
+
+def test_wsss_config_window_matches_live_event():
+    # Live WSSS event lists "25°C or below" .. "35°C or higher" (drift log, 2026-09-28).
+    st = config.get_station("WSSS")
+    assert (st.bucket_min_c, st.bucket_max_c) == (25, 35)
+    assert st.bucket_max_c - st.bucket_min_c + 1 == config.EXPECTED_BUCKET_COUNT
