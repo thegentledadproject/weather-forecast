@@ -104,16 +104,35 @@ class METMalaysiaClient(OfficialClient):
             resp.raise_for_status()
             payload = resp.json()
 
-            # WWIS JSON shape: city -> forecast -> forecastDay -> [{maxTemp, ...}, ...]
+            # WWIS JSON shape: city -> forecast -> forecastDay -> [{forecastDate, maxTemp, ...}, ...]
             forecast_days = payload["city"]["forecast"]["forecastDay"]
-            today_entry = forecast_days[0]  # first entry is typically "today"
-            max_c = today_entry.get("maxTemp")
+            target = config.local_today(station)
+            target_str = target.isoformat()
 
+            # Match forecastDate, never forecast_days[0]: once WWIS rolls its
+            # list forward, [0] is tomorrow, and stamping it target=today puts
+            # tomorrow's max into today's blend AND into WMKK's bias pairs.
+            # Same rule as clients/official/wwis.py's DAY SELECTION note.
+            today_entry = None
+            for day in forecast_days:
+                if day.get("forecastDate") == target_str:
+                    today_entry = day
+                    break
+            if today_entry is None:
+                available = [d.get("forecastDate") for d in forecast_days]
+                print(
+                    f"[METMalaysiaClient] {station.icao}: no forecastDay entry matched "
+                    f"{target_str}; available dates: {available}"
+                )
+                return None
+
+            # An empty maxTemp is "no number", not a reason to drop the row.
+            max_c = today_entry.get("maxTemp")
             return PointForecast(
                 station_icao=station.icao,
                 source="wwis_met_malaysia",
-                target_date=config.local_today(station),
-                max_temp_c=float(max_c) if max_c is not None else None,
+                target_date=target,
+                max_temp_c=float(max_c) if max_c not in (None, "") else None,
                 fetched_at=_now_iso(),
                 raw_note=today_entry.get("weather", ""),
             )
