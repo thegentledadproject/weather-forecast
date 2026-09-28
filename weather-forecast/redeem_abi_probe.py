@@ -2,13 +2,13 @@
 """
 redeem_abi_probe.py -- READ-ONLY spike (Wave 3, 3f).
 
-QUESTION. redeem.py builds NegRiskAdapter.redeemPositions(bytes32,uint256[])
-with a ONE-element amounts array ([amount]). The 2026-09-15 trade-logic review
-read the adapter's source as expecting TWO elements -- [yesAmount, noAmount],
-one per outcome -- forwarded as the `amounts` of an ERC1155
-safeBatchTransferFrom over the two position ids, which reverts on a length
-mismatch. If that is right, redemption has never been able to work. This
-script settles it against the DEPLOYED contract, and does nothing else.
+RESOLVED (65c0b65). redeem.py builds NegRiskAdapter.redeemPositions(bytes32,uint256[])
+with a TWO-element amounts array [yesAmount, noAmount]. redeem.py sends [n, 0]
+for YES and [0, n] for NO, forwarded as the `amounts` of an ERC1155
+safeBatchTransferFrom over the two position ids [yesId, noId]. The previous
+one-element array reverted on the length mismatch (gap audit 2026-09-24, gap 2).
+This script's original mission was to settle that question against the DEPLOYED
+contract. It is archived here as read-only documentation.
 
 WHAT IT DOES (no transaction, no private key, no wallet, no signing code):
   1. prints the selector it is looking for, computed here from the canonical
