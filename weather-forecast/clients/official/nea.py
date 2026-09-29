@@ -15,7 +15,7 @@ requests   (pip install requests)
 models.py, clients/official/base.py (local)
 """
 
-from datetime import datetime, date, timezone
+from datetime import datetime, date, timezone, timedelta
 from typing import Optional
 
 import requests
@@ -32,6 +32,23 @@ NEA_AIR_TEMPERATURE_URL = "https://api.data.gov.sg/v1/environment/air-temperatur
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# The daytime high falls in the local afternoon. A 24-hour period starting
+# after 14:00 local is stamped the next day (NEA issues start on the hour at
+# 06/12/18): the 06:00 and 12:00 issues are today, the 18:00 issue is tomorrow.
+AFTERNOON_HOUR_LOCAL = 14
+
+
+def _target_date(valid_period, fallback):
+    try:
+        start = datetime.fromisoformat(valid_period["start"])
+    except (TypeError, KeyError, ValueError):
+        return fallback
+    day = start.date()
+    if start.hour > AFTERNOON_HOUR_LOCAL:
+        day += timedelta(days=1)
+    return day
 
 
 class NEAClient(OfficialClient):
@@ -52,7 +69,7 @@ class NEAClient(OfficialClient):
             return PointForecast(
                 station_icao=station.icao,
                 source="nea_24hr",
-                target_date=config.local_today(station),
+                target_date=_target_date(record.get("valid_period"), config.local_today(station)),
                 max_temp_c=float(max_c) if max_c is not None else None,
                 fetched_at=_now_iso(),
                 raw_note=forecast_text,

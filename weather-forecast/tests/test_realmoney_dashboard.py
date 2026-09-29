@@ -805,7 +805,7 @@ def test_render_orders_empty_trail(monkeypatch):
 # label() renders its "or below"/"or higher" catch-alls whenever key<=lo or
 # key>=hi, so labelling against the discovered extremes would claim every
 # discovered range reaches the market's real edge, true only when discovery
-# is complete. WSSS is registered 28-38C (see config.STATIONS).
+# is complete. WSSS is registered 25-35C (see config.STATIONS).
 
 
 def test_bucket_range_html_complete_map_keeps_catch_all_wording():
@@ -813,7 +813,7 @@ def test_bucket_range_html_complete_map_keeps_catch_all_wording():
     must render byte-for-byte the same catch-all wording it did before the
     fix -- this is the case Task 15's carried-forward fix must not change."""
     gen = load_gen()
-    assert gen._bucket_range_html("WSSS", 28, 38) == "28&deg;C or below .. 38&deg;C or higher"
+    assert gen._bucket_range_html("WSSS", 25, 35) == "25&deg;C or below .. 35&deg;C or higher"
 
 
 def test_bucket_range_html_partial_interior_map_is_a_plain_range():
@@ -831,8 +831,8 @@ def test_bucket_range_html_partial_map_touching_one_edge_labels_only_that_side()
     catch-all wording on that side only -- the other side, still short of
     the registry bound, stays a plain number."""
     gen = load_gen()
-    out = gen._bucket_range_html("WSSS", 28, 32)
-    assert out == "28&deg;C or below .. 32&deg;C"
+    out = gen._bucket_range_html("WSSS", 25, 32)
+    assert out == "25&deg;C or below .. 32&deg;C"
     assert "or higher" not in out
 
 

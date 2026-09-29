@@ -304,13 +304,13 @@ STATIONS = {
             ("2026-07-10", 32.9), ("2026-07-11", 31.5), ("2026-07-12", 30.7),
             ("2026-07-13", 32.0), ("2026-07-14", 32.7),
         ],
-        # Was 25/35 ("confirmed" July 2026); the live August event runs 27-37.
+        # History: 25/35 ("confirmed" July 2026), then the live August event ran 27-37.
         # Polymarket re-centers the window seasonally -- these are cross-checks,
         # the discovered token map decides at trade time.
-        # Reswept 2026-08-20 (was 27-37): 28-38 on 54 of 74 cycles sampled, and the current window;
-        # 25-35 seen once (Aug 12).
-        bucket_min_c=28,
-        bucket_max_c=38,
+        # Reswept 2026-08-20 (was 27-37): 28-38 on 54 of 74 cycles sampled.
+        # Reswept 2026-09-28 (was 28-38): live event lists "25°C or below", 25-35.
+        bucket_min_c=25,
+        bucket_max_c=35,
     ),
     "WMKK": StationConfig(
         icao="WMKK",

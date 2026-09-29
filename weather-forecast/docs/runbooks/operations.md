@@ -83,8 +83,8 @@ Checklist before restoring `mode.env` to live:
 2. **Redemption proven.** `config.REDEMPTION_PROVEN_TX` must be a real tx
    hash, set by hand after one successful on-chain redemption — not by
    editing `mode.env`. As of `HANDOFF.md` (2026-09-24) this has never
-   happened; `redeem.py`'s amounts-array shape against the contract ABI is
-   still an open question (`redeem_abi_probe.py`).
+   happened. The amounts-array shape was resolved by 65c0b65: `redeem.py`
+   sends `[yesAmount, noAmount]` (two elements, not one).
 3. **No stranded live positions.**
    ```
    .venv/bin/python -c "import storage; print([p.position_id for p in storage.load_open_positions(is_paper=False) if getattr(p, 'execution_mode', '') == 'live'])"
