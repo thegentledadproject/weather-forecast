@@ -1,0 +1,15 @@
+[Unit]
+Description=polyweather fast recorder (METAR / book latency measurement, records only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+WorkingDirectory=/home/ubuntu/weather-forecast/weather-forecast
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/weather-forecast/.venv/bin/python fast_recorder.py
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
