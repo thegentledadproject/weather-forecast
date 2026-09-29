@@ -34,9 +34,9 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# The daytime high falls in the local afternoon. A 24-hour period is stamped
-# with the first 14:00 local at or after its start: the 06:00 issue is today,
-# the 18:00 evening issue is tomorrow.
+# The daytime high falls in the local afternoon. A 24-hour period starting
+# after 14:00 local is stamped the next day (NEA issues start on the hour at
+# 06/12/18): the 06:00 and 12:00 issues are today, the 18:00 issue is tomorrow.
 AFTERNOON_HOUR_LOCAL = 14
 
 

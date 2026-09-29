@@ -9,7 +9,7 @@
 - the NEA date stamp;
 - a small `day_ahead_report.py`.
 
-Nothing here touches the trading path, except two config values: the source exclusion, which ships only if Task 3 passes, and `REDEMPTION_PROVEN_TX`.
+Nothing here touches the trading path, except two config values (the source exclusion, which ships only if Task 3 passes, and `REDEMPTION_PROVEN_TX`) and Task 2. Task 2 (the NEA date) also changes live behaviour once deployed: evening collection cycles blend today's WSSS estimate without the tomorrow-dated NEA row, and the 20:00 day-ahead recorder now includes NEA for tomorrow. It therefore ships only in Phase 2 (11-03+). After that deploy, day-ahead rows switch from 2 to 3 sources, so split the Task 6 report by date if it is re-run after 11-03.
 
 **Tech Stack:** Python 3.11, sqlite3, pytest. Only the standard library: the box has no numpy.
 
@@ -246,6 +246,10 @@ python source_mix_replay.py --db C:/Users/user/polyweather-backups/replay.sqlite
 ### Task 4: Observed-term half-life replay in halves (spec step 4, run 11-02)
 
 No code: `backtest/observed_half_life.py` already sweeps half-lives. It has no date filter, so split the halves by scored day in Python.
+
+- [ ] **Step 0: WARNING, decontaminate the tool first**
+
+`backtest/observed_half_life._forecasts_by_day` takes the latest fetch per (day, source) with no fetch window. On the box until Phase 2, the 20:00 day-ahead recorder stores NEA's 18:00 issue (tomorrow's high) stamped today, so every WSSS day since 09-27 is contaminated. Before running on 11-02, restrict that tool to rows fetched inside the error-sample window (see `storage.forecast_rows_in_error_sample` / `config.ERROR_SAMPLE_FETCH_WINDOW_LOCAL`), or drop `nea_24hr` rows fetched after 14:00 local. Do this as its own small reviewed change.
 
 - [ ] **Step 1: Run the full-window sweep on the prod copy (the same `replay.sqlite3` as Task 3, re-pulled on 11-02)**
 

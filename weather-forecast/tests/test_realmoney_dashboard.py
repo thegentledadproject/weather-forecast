@@ -805,7 +805,7 @@ def test_render_orders_empty_trail(monkeypatch):
 # label() renders its "or below"/"or higher" catch-alls whenever key<=lo or
 # key>=hi, so labelling against the discovered extremes would claim every
 # discovered range reaches the market's real edge, true only when discovery
-# is complete. WSSS is registered 28-38C (see config.STATIONS).
+# is complete. WSSS is registered 25-35C (see config.STATIONS).
 
 
 def test_bucket_range_html_complete_map_keeps_catch_all_wording():
