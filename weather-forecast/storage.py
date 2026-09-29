@@ -1453,6 +1453,18 @@ def save_day_ahead_rows(
         )
 
 
+def load_day_ahead_rows(station_icao: str) -> List[Tuple[date, int, str, float, float]]:
+    """YES-side day-ahead rows as (target_date, bucket_c, generated_at, model_prob, market_price)."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT target_date, bucket_c, generated_at, model_prob, market_price "
+            "FROM ev_snapshots_day_ahead WHERE station_icao = ? AND side = 'YES' "
+            "AND model_prob IS NOT NULL AND market_price IS NOT NULL",
+            (station_icao,),
+        ).fetchall()
+    return [(date.fromisoformat(r[0]), int(r[1]), r[2], float(r[3]), float(r[4])) for r in rows]
+
+
 _EV_SNAPSHOT_COLUMNS = (
     "bucket_c", "side", "generated_at", "model_prob", "market_price",
     "market_bid", "raw_edge", "slippage_pct", "fee_rate_pct",
