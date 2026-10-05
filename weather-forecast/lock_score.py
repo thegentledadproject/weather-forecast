@@ -38,7 +38,7 @@ READ_DATE = date(2026, 11, 5)
 # The FULL config_fingerprint the box stamps (ev_snapshots.config_sha ==
 # entry_decisions.config_sha), e.g. '<40-hex sha>:<8 hex>'. Filled on
 # 2026-10-05 from the box's own rows, then never edited.
-LOCK_SHA = None
+LOCK_SHA = "7323eecf5899470e1f170b5cddc597b0a609f86c:080b6c4f"  # read off ev_snapshots 2026-10-05 16:01Z, after the freeze restart
 DRAWS, SEED, CI = 10_000, 20261006, 0.9833
 MIN_DATES, MIN_UNITS, EXTEND_DAYS = 20, 400, 14
 LOG_FLOOR = 1e-3
