@@ -49,3 +49,28 @@ def test_latest_recording_missing_settled_bucket_skips_day(tmp_db):
     _rec(date(2026, 10, 1), "2026-09-30T12:00:00Z", {32: (0.8, 0.5), 33: (0.2, 0.5)})
     _rec(date(2026, 10, 1), "2026-09-30T13:00:00Z", {33: (0.2, 1.0)})
     assert day_ahead_report.score("WSSS") == {}
+
+
+def test_fahrenheit_station_settles_on_its_own_axis(tmp_db):
+    # KLGA is a 2-degree F market: 25.0 C = 77.0 F settles into bucket 76 (76-77 F).
+    # Before the fix this raised: bucket_for_temp() refuses F bounds without an axis.
+    st = config.get_station("KLGA")
+    storage.save_observation(ObservedReading("KLGA", date(2026, 10, 1), 25.0, st.resolution_grade_source))
+    rows = [SimpleNamespace(bucket_c=b, side="YES", model_prob=0.5, market_price=0.5, market_bid=None)
+            for b in (76, 78)]
+    storage.save_day_ahead_rows("KLGA", date(2026, 10, 1), "2026-09-30T23:00:00Z", rows, 25.0, 1.0)
+    model, market = day_ahead_report.score("KLGA")[date(2026, 10, 1)]
+    assert round(model, 3) == 0.25 and round(market, 3) == 0.25
+
+
+def test_pooled_bootstrap_clusters_on_date():
+    # Two dates. Date A: 3 stations where the model is better by 0.1; date B: one
+    # station where it is worse by 0.1. Resampling DATES, a draw is all-A (+),
+    # all-B (-) or mixed; never "3 copies of A's stations scattered independently".
+    a, b = date(2026, 10, 1), date(2026, 10, 2)
+    rows = {(s, a): (0.1, 0.2) for s in ("X", "Y", "Z")}
+    rows[("X", b)] = (0.3, 0.2)
+    p, lo, hi, n_dates = day_ahead_report.pooled_bootstrap(rows, draws=2000)
+    assert n_dates == 2
+    assert round(lo, 3) == -0.1 and round(hi, 3) == 0.1    # all-A and all-B draws
+    assert 0.6 < p < 0.9                                   # P(mean < 0): AA, AB, BA -> ~0.75
