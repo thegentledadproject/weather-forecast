@@ -12,11 +12,19 @@ Answer is YES only if model Brier < market Brier in BOTH halves and paired
 bootstrap P >= 0.95 on the full window. Read-only.
 
 Run: python day_ahead_report.py --station WSSS
+     python day_ahead_report.py --all      (every station pooled)
+
+--all pools every station's scored days. A date's station-days share one
+weather pattern and one set of evening traders, so the bootstrap resamples
+DATES, not station-days (35 stations on one date are one draw, not 35).
+Same YES rule: model better in BOTH date-halves and P >= 0.95.
 """
 import argparse
+import random
 import statistics
 from datetime import date
 
+import bucket_axis
 import config
 import storage
 from backtest import resolution
@@ -44,7 +52,7 @@ def score(icao):
     per_day = {}
     for day, (_, rows) in recs.items():
         settled = resolution.bucket_for_temp(truth[day], st.bucket_min_c, st.bucket_max_c,
-                                             edge_mode=st.bucket_edge_mode)
+                                             axis=bucket_axis.for_station(st))
         total = sum(m for _, _, m in rows)
         if total <= 0 or settled not in {b for b, _, _ in rows}:
             continue
@@ -54,10 +62,61 @@ def score(icao):
             for d, v in sorted(per_day.items())}
 
 
+def pooled():
+    """{(icao, day): (model, market)} over every station with day-ahead rows."""
+    return {(icao, d): v for icao in sorted(config.STATIONS) for d, v in score(icao).items()}
+
+
+def pooled_bootstrap(rows, draws=2000, seed=20261005):
+    """
+    (P(model better), CI95 low, CI95 high, n_dates) on mean(model - market),
+    resampling whole dates. None for P/CI below 2 dates.
+    """
+    by_date = {}
+    for (_icao, d), (model, market) in rows.items():
+        by_date.setdefault(d, []).append(model - market)
+    dates = sorted(by_date)
+    if len(dates) < 2:
+        return None, None, None, len(dates)
+    rng = random.Random(seed)
+    means = sorted(statistics.fmean([x for d in rng.choices(dates, k=len(dates)) for x in by_date[d]])
+                   for _ in range(draws))
+    return (sum(m < 0 for m in means) / draws, means[int(0.025 * draws)],
+            means[int(0.975 * draws) - 1], len(dates))
+
+
+def report_pooled():
+    rows = pooled()
+    if not rows:
+        print("no settled station-days")
+        return
+    first, second = halves({d for _, d in rows})
+    verdict = True
+    for label, keep in (("full", None), ("1st", set(first)), ("2nd", set(second))):
+        sub = {k: v for k, v in rows.items() if keep is None or k[1] in keep}
+        model = statistics.fmean(m for m, _ in sub.values())
+        market = statistics.fmean(k for _, k in sub.values())
+        p, lo, hi, n_dates = pooled_bootstrap(sub)
+        ci = "n/a" if p is None else f"[{lo:+.4f},{hi:+.4f}]"
+        print(f"ALL {label}: {len(sub)} station-days / {n_dates} dates / "
+              f"{len({s for s, _ in sub})} stations  model {model:.4f} market {market:.4f} "
+              f"diff {model - market:+.4f} CI95 {ci} P(model better)={p}")
+        verdict = verdict and model < market and (label != "full" or (p or 0) >= 0.95)
+    print(f"verdict: {'YES' if verdict else 'NO'} (model better in both halves and P >= 0.95)")
+    print("per station (model - market, n days): " + "  ".join(
+        f"{s}:{statistics.fmean(m - k for (t, _), (m, k) in rows.items() if t == s):+.3f}"
+        f"({sum(t == s for t, _ in rows)})" for s in sorted({s for s, _ in rows})))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--station", default="WSSS")
-    icao = ap.parse_args().station.upper()
+    ap.add_argument("--all", action="store_true", help="pool every station, date-clustered bootstrap")
+    args = ap.parse_args()
+    if args.all:
+        report_pooled()
+        return
+    icao = args.station.upper()
     scored = score(icao)
     first, second = halves(scored)
     for label, days in (("full", list(scored)), ("1st", first), ("2nd", second)):
