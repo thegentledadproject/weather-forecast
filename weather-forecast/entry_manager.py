@@ -601,14 +601,24 @@ def forecast_bias_stats(station_icao: str) -> tuple:
     that would graduate it -- mixing the two estimators in one average
     would produce a number that is neither, and switching on "whichever is
     bigger" would let the coarse one quietly win everywhere.
+
+    A STALE PREFERRED SAMPLE ALSO TRIGGERS IT (2026-10-11). Once a CLMMAXT
+    month publishes, VHHH's preferred sample stops being empty but ends
+    ~45 days back, and bias_stats_weighted() cannot penalise a uniformly old
+    sample (Kish n_eff is scale-invariant). On 10-11 the live bias was
+    August's -0.88 while settlements measured Sep -1.40 / Oct -1.22. So the
+    preferred sample must reach within BIAS_MAX_STALENESS_DAYS of today; if
+    it does not and the fallback has data, the fallback is used WHOLE --
+    still a switch, never a mix. Fallback validated on VHHH 10-11: -0.87 vs
+    -0.88 over the same 26 dates.
     """
     try:
         station = config.get_station(station_icao)
         dated = storage.forecast_error_samples_dated(
             station_icao, station.resolution_grade_source)
-        if dated:
-            return calibration.bias_stats_weighted(
-                dated, config.local_today(station), config.BIAS_HALF_LIFE_DAYS)
+        today = config.local_today(station)
+        if dated and (today - max(d for d, _ in dated)).days <= config.BIAS_MAX_STALENESS_DAYS:
+            return calibration.bias_stats_weighted(dated, today, config.BIAS_HALF_LIFE_DAYS)
     except Exception as exc:  # noqa: BLE001 - KeyError (unregistered) or any storage failure
         print(f"[entry_manager] could not measure forecast bias for {station_icao}: {exc}")
         return None, None, None
@@ -620,13 +630,16 @@ def forecast_bias_stats(station_icao: str) -> tuple:
         print(f"[entry_manager] could not derive {station_icao}'s bias from settlements: {exc}")
         return None, None, None
 
+    if not n and dated:
+        # Stale but real beats nothing: no settlements to fall back on.
+        return calibration.bias_stats_weighted(dated, today, config.BIAS_HALF_LIFE_DAYS)
     if n:
         log_key = (station_icao, "derived_bias")
         if log_key not in _collection_only_logged:
             _collection_only_logged.add(log_key)
             print(
                 f"[entry_manager] {station_icao} has no settlement-grade forecast/observation "
-                f"pairs, so its bias is measured against MARKET SETTLEMENT instead: "
+                f"pairs within {config.BIAS_MAX_STALENESS_DAYS} days, so its bias is measured against MARKET SETTLEMENT instead: "
                 f"{bias:+.3f}C over n={n} (stderr "
                 f"{'unknown' if stderr is None else f'{stderr:.3f}C'}). Bucket-quantized, "
                 f"~0.03C from the settlement-grade estimator where both exist."

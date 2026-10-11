@@ -17,7 +17,7 @@ moving the central estimate, and the gate refusing a bias that is too
 noisy to correct with.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -494,7 +494,7 @@ def test_settlement_grade_pairs_win_when_they_exist(monkeypatch):
     # 1-degree bucket, so a station with both must keep using the former.
     # Three same-day errors so the recency weighting is a no-op and the
     # assertion stays about WHICH sample won, not about the weighting.
-    day = date(2026, 8, 20)
+    day = config.local_today(config.get_station("WSSS"))
     monkeypatch.setattr(storage, "forecast_error_samples_dated",
                         lambda i, s: [(day, -1.0), (day, -1.4), (day, -1.2)])
     import bucket_bias
@@ -511,6 +511,35 @@ def test_an_empty_settlement_grade_sample_falls_back(monkeypatch):
     import bucket_bias
     monkeypatch.setattr(bucket_bias, "derived_bias_stats", lambda i: (-1.027, 15, 0.232))
     assert entry_manager.forecast_bias_stats("VHHH") == (-1.027, 15, 0.232)
+
+
+def test_a_stale_settlement_grade_sample_falls_back(monkeypatch):
+    # VHHH after a CLMMAXT month publishes: the preferred sample is no
+    # longer empty but ends ~45 days back. The fresh fallback must win.
+    old = config.local_today(config.get_station("VHHH")) - timedelta(days=41)
+    monkeypatch.setattr(storage, "forecast_error_samples_dated",
+                        lambda i, s: [(old, -0.88)] * 26)
+    import bucket_bias
+    monkeypatch.setattr(bucket_bias, "derived_bias_stats", lambda i: (-1.26, 66, 0.1))
+    assert entry_manager.forecast_bias_stats("VHHH") == (-1.26, 66, 0.1)
+
+
+def test_a_stale_sample_beats_nothing(monkeypatch):
+    old = config.local_today(config.get_station("VHHH")) - timedelta(days=41)
+    monkeypatch.setattr(storage, "forecast_error_samples_dated",
+                        lambda i, s: [(old, -0.9), (old, -0.9), (old, -0.9)])
+    import bucket_bias
+    monkeypatch.setattr(bucket_bias, "derived_bias_stats", lambda i: (None, 0, None))
+    bias, n, _ = entry_manager.forecast_bias_stats("VHHH")
+    assert n == 3 and bias == pytest.approx(-0.9)
+
+
+def test_vhhh_blend_is_forecast_only():
+    # A CLMMAXT month publishing must not move VHHH's central estimate.
+    obs = [_obs(31.0, date(2026, 9, d)) for d in range(1, 30)]
+    w = config.forecast_blend_weight("VHHH")
+    assert w == 1.0
+    assert calibration.blend_central_estimate([_fc(27.0)], obs, 27.0, forecast_weight=w) == 27.0
 
 
 def test_the_fallback_still_gates_when_it_measures_nothing(monkeypatch):
