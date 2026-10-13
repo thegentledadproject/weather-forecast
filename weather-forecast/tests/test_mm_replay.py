@@ -33,6 +33,17 @@ def test_touch_no_fill_through_fills():
     assert fills[0]["shares"] == mm_replay.QUOTE_SHARES
 
 
+def test_trade_print_alone_does_not_fill():
+    # A last_trade below our_bid (0.48) while the book stays at 0.49/0.51 never
+    # reached our resting bid: the better bids ahead of us are still there.
+    rows = [
+        _row("2026-09-28T00:00:00+00:00", 0.49, 0.51, trade=0.50),
+        _row("2026-09-28T00:00:15+00:00", 0.49, 0.51, trade=0.40),
+        _row("2026-09-28T00:00:30+00:00", 0.49, 0.51, trade=0.60),
+    ]
+    assert mm_replay.simulate(rows, [], half_spread=0.02, pull_s=0) == []
+
+
 def test_pull_window_blocks_fill():
     rows_through = [
         _row("2026-09-28T00:00:00+00:00", 0.49, 0.51),
