@@ -144,11 +144,15 @@ def simulate(rows: List[dict], metar_times: List[datetime], half_spread: float, 
         our_bid = min(our_bid, ask - 0.01)
         our_ask = max(our_ask, bid + 0.01)
 
-        nxt_ask, nxt_bid, nxt_trade = nxt["best_ask"], nxt["best_bid"], nxt["last_trade"]
-        trade_changed = nxt_trade is not None and nxt_trade != cur["last_trade"]
+        # Book-through only. A last_trade print past our quote while the book
+        # stayed on our side of it cannot have reached a resting order behind
+        # the queue (likely a neg-risk/complement print). On 2026-10-13 those
+        # fills were ALL of the replay's profit (+$6.5k at hs 0.03) while the
+        # book-through fills lost at every spread.
+        nxt_ask, nxt_bid = nxt["best_ask"], nxt["best_bid"]
 
         if inv < MAX_INV:
-            through = (nxt_ask is not None and nxt_ask < our_bid) or (trade_changed and nxt_trade < our_bid)
+            through = nxt_ask is not None and nxt_ask < our_bid
             if through:
                 fills.append({
                     "time": nxt["seen_at"], "dt": nxt["dt"], "side": "buy",
@@ -157,7 +161,7 @@ def simulate(rows: List[dict], metar_times: List[datetime], half_spread: float, 
                 inv += QUOTE_SHARES
 
         if inv > -MAX_INV:
-            through = (nxt_bid is not None and nxt_bid > our_ask) or (trade_changed and nxt_trade > our_ask)
+            through = nxt_bid is not None and nxt_bid > our_ask
             if through:
                 fills.append({
                     "time": nxt["seen_at"], "dt": nxt["dt"], "side": "sell",
