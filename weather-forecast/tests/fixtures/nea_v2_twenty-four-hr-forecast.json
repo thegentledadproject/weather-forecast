@@ -1,0 +1,159 @@
+{
+ "code": 0,
+ "data": {
+  "records": [
+   {
+    "date": "2026-10-22",
+    "timestamp": "2026-10-22T23:32:00+08:00",
+    "updatedTimestamp": "2026-10-22T23:41:01+08:00",
+    "general": {
+     "validPeriod": {
+      "start": "2026-10-23T00:00:00+08:00",
+      "end": "2026-10-24T00:00:00+08:00",
+      "text": "0 AM 23 Oct to 0 AM 24 Oct"
+     },
+     "temperature": {
+      "high": 34,
+      "low": 25,
+      "unit": "Degrees Celsius"
+     },
+     "relativeHumidity": {
+      "high": 95,
+      "low": 60,
+      "unit": "Percentage"
+     },
+     "wind": {
+      "direction": "SSW",
+      "speed": {
+       "low": 5,
+       "high": 15
+      }
+     },
+     "forecast": {
+      "code": "TL",
+      "text": "Thundery Showers"
+     }
+    },
+    "periods": [
+     {
+      "regions": {
+       "east": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "west": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "north": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "south": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "central": {
+        "code": "CL",
+        "text": "Cloudy"
+       }
+      },
+      "timePeriod": {
+       "text": "Midnight to 6 am 23 Oct",
+       "start": "2026-10-23T00:00:00+08:00",
+       "end": "2026-10-23T06:00:00+08:00"
+      }
+     },
+     {
+      "regions": {
+       "east": {
+        "code": "PC",
+        "text": "Partly Cloudy (Day)"
+       },
+       "west": {
+        "code": "PC",
+        "text": "Partly Cloudy (Day)"
+       },
+       "north": {
+        "code": "PC",
+        "text": "Partly Cloudy (Day)"
+       },
+       "south": {
+        "code": "PC",
+        "text": "Partly Cloudy (Day)"
+       },
+       "central": {
+        "code": "PC",
+        "text": "Partly Cloudy (Day)"
+       }
+      },
+      "timePeriod": {
+       "text": "6 am to Midday 23 Oct",
+       "start": "2026-10-23T06:00:00+08:00",
+       "end": "2026-10-23T12:00:00+08:00"
+      }
+     },
+     {
+      "regions": {
+       "east": {
+        "code": "TL",
+        "text": "Thundery Showers"
+       },
+       "west": {
+        "code": "TL",
+        "text": "Thundery Showers"
+       },
+       "north": {
+        "code": "TL",
+        "text": "Thundery Showers"
+       },
+       "south": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "central": {
+        "code": "CL",
+        "text": "Cloudy"
+       }
+      },
+      "timePeriod": {
+       "text": "Midday to 6 pm 23 Oct",
+       "start": "2026-10-23T12:00:00+08:00",
+       "end": "2026-10-23T18:00:00+08:00"
+      }
+     },
+     {
+      "regions": {
+       "east": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "west": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "north": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "south": {
+        "code": "CL",
+        "text": "Cloudy"
+       },
+       "central": {
+        "code": "CL",
+        "text": "Cloudy"
+       }
+      },
+      "timePeriod": {
+       "text": "6 pm to Midnight 24 Oct",
+       "start": "2026-10-23T18:00:00+08:00",
+       "end": "2026-10-24T00:00:00+08:00"
+      }
+     }
+    ]
+   }
+  ]
+ },
+ "errorMsg": ""
+}

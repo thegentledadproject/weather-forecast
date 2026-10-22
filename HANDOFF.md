@@ -1,63 +1,55 @@
-# Handoff - 2026-09-28
+# Handoff - 2026-10-22
 
 ## State
-Branch `main`, clean, level with `origin/main`. Last commit: `c18f061` HANDOFF: NOAA vs METAR truth check answered (99.5% match).
+- **Branch `main`**, last commit `2bcf38f` (Merge fix/mm-replay-fill-rule: book-through fills only).
+  - Local `main` is 13 ahead of `origin/main` (`7323eec`). **Not pushed: push only after the 2026-11-05 read.**
+  - Dirty: `HANDOFF.md`.
+  - Untracked: `2026-09-28-*.md` (3 files), `2026-10-22-revamp-implementation-plan-redline.md`, `skill_all.py`, `skill_all_20261017.txt`, `skill_report.py`, `vhhh_skill_report_20261017.txt`.
+- **No code changed this session.** Every analysis was read-only on local copies of the databases.
+- **Box** (`ubuntu@43.216.25.99`): **FROZEN until 2026-11-03.** It runs `7323eec`, paper only, and the lock stamp is intact. Do not touch it.
+- **Unmerged local branches:** `feat/vhhh-fresh-bias` (deploy after 11-05), `fix/mm-replay-fill-rule` (already in main), `analysis/source-mix-replay`, `fix/observation-lookback-window`, `fix/settled-bucket-resolution-fallback`, `spec/recency-weighted-observed-term`.
 
-**Box** (`ubuntu@43.216.25.99`), checked 2026-09-27 16:15 UTC:
-- **Code:** runs `b67ac73`. Main is ahead only by docs plus `9ceddbd`, which is `pull_backup.sh` and runs on this PC, so there is nothing to deploy.
-- **Daemon:** active since 2026-09-27 15:34 UTC, NRestarts=0, 0 tracebacks in 24h.
-- **Mode:** PAPER (`--mode paper --fallback-mode paper`), 3 open paper positions, 0 live.
-- **Repo:** git is clean except untracked `weather-forecast/data/`. The 5 staged dashboard files are gone.
-- **Watchdog:** `~/watchdog.log` says ok every 30 min.
-- **Contract checks:** 23 stations VALID in the last day. That is fewer than 35 only because checks began at the 15:34 deploy.
-- **Entries:** approvals ~1-10/day, falling as intended (`ADMIT_ON_ROBUST_EDGE`). Top refusals on 09-27: `collection_gate` 262, `0a2` 180, `00c` 51.
-- **Backups:** `C:\Users\user\polyweather-backups\pull_backup.log` ends `pull_backup.sh ok` (2026-09-27 15:38 UTC, a manual run). No scheduled run is confirmed yet.
-- **Re-checked 2026-09-27 16:24 UTC:**
-  - Same code, and the daemon is healthy: 0 tracebacks in 24h, watchdog ok. Still PAPER, with 3 open paper positions.
-  - Approvals per day since 09-21 were 48, 10, 9, 10, 3, 7, and 1 by 16:24 on 09-27.
-  - `contract_checks` still showed 23 VALID.
-  - 20 positions settled with target date 09-24..26: 1 won and 19 lost, −$79.44 on $103.35.
-    - Mostly cheap YES tickets at a 0.04-0.25 ask, which should win ~1 in 5.
-    - 1 or fewer wins out of ~17 at p≈0.2 happens about 12% of the time, so this is a watch item, not a defect.
-  - The scheduled backup task last ran 23:37 local with result 0. Its next run is 01:30 local on 09-28.
-- **Box disk:** 71% used, 2.0G free, after deleting the two 2026-09-24 pre-deploy backups (~310MB) on 2026-09-27.
-  - The DB is 715MB. The only box-side backup left is `~/polyweather-pre-deploy-20260927T153454Z.sqlite3` (176MB).
-  - Every deploy adds another ~180MB backup, and nothing prunes them. Delete old ones by hand after the freeze.
-
-## Done this session (2026-09-28)
-- **Memory index trimmed:**
-  - `MEMORY.md` went from 25.7KB to 8.1KB; each entry is now one line under 200 chars.
-  - Every old full index line was first appended to its topic file under `## Index summary (moved from MEMORY.md, 2026-09-28)`, so nothing was lost.
-  - Old index backup: `scratchpad/MEMORY.md.bak` (session scratch, may vanish).
-- **Worktrees:** removed all 9 merged agent worktrees plus an empty leftover dir. `.claude/worktrees/` is empty.
-- **Branches:** deleted 44 local branches merged into `origin/main` (`git branch -d`, local only).
+## Done 2026-10-22
+- **Reviewed @AlexL's revamp doc and implementation plan.** Findings:
+  - The maker leg is already measured STOP (10-13 `mm_replay`).
+  - M2 is dead (VHHH Phase 0).
+  - The plan's fallback, the forecast product, was itself killed on 10-17.
+  - The bot already prices from the market: 0 entries since 09-28.
+- **Redlined the implementation plan:** `2026-10-22-revamp-implementation-plan-redline.md` (untracked, not sent to @AlexL).
+- **Do other bots see readings first?** Yes. Script: scratchpad `C:\Users\user\AppData\Local\Temp\claude\C--Users-user-Downloads-weather-forecast\972b43ff-7517-4c93-a83b-5a2fd3f019c0\scratchpad\lead_lag.py`.
+  - Over 729 new-high events, prices moved a median **154 s before aviationweather received the METAR**, and in 65% of events they moved before it arrived.
+  - Our own delay after the feed receives a reading is only 24 s, so the lag is in the public feed, not our polling.
+- **The RCSS "lag" isn't tradable.** Script: `killed_bucket.py` in the same scratchpad.
+  - At RCSS, 0 of 58 just-ruled-out buckets still had NO on sale cheap enough for ≥1¢ after fee.
+  - Across all stations, 5 of 1,992 did, worth about $1.34 in total.
+- **Settled bucket vs our recorded daily high:** 21 of 2,008 station-days disagree (backup `polyweather-20261017T141136Z`).
+  - **LFPB 10-07:** the 14:00Z METAR read 19 °C, YES-18 crashed to 2¢, recovered to 76¢ within about 2.5 hours, and settled 18. Someone was reading the cited NOAA timeseries page.
+  - **Other groups:** ZGSZ 08-07..08-23 (12 days; an early data problem on our side); **09-20 at WSSS, RPLL and ZGGG, each settled 1 °C below our high**; RKSI 08-21; 4 US °F days.
+- **Inputs used:** recorder copy `...\c7c99cfe*\scratchpad\fr\fr.sqlite3`; trading copy `...\c7c99cfe*\scratchpad\pw\pw.sqlite3`. Both are under `C:\Users\user\AppData\Local\Temp\claude\C--Users-user-Downloads-weather-forecast\`.
 
 ## Open / next step
-1. **Confirm the scheduled backup ran.** Check `pull_backup.log` for a run at 01:30 local (17:30 UTC) after 2026-09-27, or run `Get-ScheduledTaskInfo PolyweatherPullBackup`.
-2. **Re-check `contract_checks`** after every region's window has run. It should reach 35 VALID:
-   `select status, count(distinct station_icao) from contract_checks where checked_at >= datetime('now','-1 day') group by 1`
-3. **~2026-10-04 checkpoint:**
-   - `wave2_falsifier.py` on the box. Stop rule: CI upper of (after − before) < 0 → set `ERROR_SAMPLE_FETCH_WINDOW_ENABLED` and `SPREAD_FLOOR_MEASURED_TIERS_EXEMPT` to False.
-   - `cohort_monitor.py --by region --since 2026-09-03` and `--by station`.
-   - Re-run `calibration_shrink_replay.py` and `calibration_side_replay.py`.
-4. **2026-10-05:**
-   - Set `LOCK_SHA` in `weather-forecast/lock_score.py` to the newest `ev_snapshots.config_sha` on the box, commit it, and deploy.
-   - **No deploys 2026-10-06 → 11-02** (restarts OK).
-   - On 2026-11-05 read `python lock_score.py --locked-read`.
-5. **Redemption is unproven.** It needs one real winning live position plus POL gas; then set `config.REDEMPTION_PROVEN_TX`. Live also requires measured maturity, because `MATURITY_OVERRIDE` is empty.
-6. **DST restarts:** after 2026-10-25 01:00 UTC and after 2026-11-01 06:00 UTC.
-7. **Three unmerged local branches were kept.** Decide whether to merge or drop:
-   - `fix/observation-lookback-window`
-   - `fix/settled-bucket-resolution-fallback`
-   - `spec/recency-weighted-observed-term`
-8. **Not started:** dashboard Phases 2-4.
+1. **User to choose next:**
+   - (a) Look into the 09-20 triple. If our data was wrong that day, the bot scored itself against false answers.
+   - (b) Run a recorder on the PC for the cited settlement pages (NOAA timeseries for Europe, Wunderground for RCSS), so they can be compared with METAR as readings arrive. This doesn't touch the box, so the freeze holds.
+2. **Not done:** check NOAA precision for M5. US observations do carry tenths of a degree (e.g. KBKF 32.7 °C), which counts against M5.
+3. **Not done:** sending the redline to @AlexL. If the user wants it shared, publish it as a page.
+4. **Carried from 10-13:**
+   - **Before 11-03, local only:** fix `backtest/observed_half_life._forecasts_by_day` (ignore late-day fetches) and the KLAX/KSFO/KSEA config bounds.
+   - **From 11-05, in order:** `lock_score.py --locked-read`, then push `main`, then merge and deploy `feat/vhhh-fresh-bias` (16:00–19:00 UTC, `~/deploy.sh`).
+   - **About mid-November:** re-run `python -I vhhh_check.py <copy>`.
+   - **Also open:** redemption proof needs POL and the user's OK; DST restarts after 10-25 and 11-01.
+5. **NEA (WSSS official forecast): fixed locally 2026-10-23, uncommitted, not deployed.**
+   - `clients/official/nea.py` now reads data.gov.sg **v2** (`api-open.data.gov.sg/v2/real-time/api/{twenty-four-hr-forecast,two-hr-forecast,air-temperature}`). Shapes taken from real captures, saved as `tests/fixtures/nea_v2_*.json`.
+   - **Date stamp:** the 24h forecast is stamped with the SGT day whose whole 12:00-18:00 its `validPeriod` covers; no afternoon or an unreadable payload gives None. This replaces `abafd5b`'s start-hour rule, which fell back to `local_today`. The 20:00 SGT day-ahead row now carries NEA as tomorrow. Source string is still `nea_24hr`.
+   - **API key:** not needed. Keyless v2 limit is 6 calls per 10 s; an `x-api-key` header raises it to 12/30.
+   - **v1 is still alive** (HTTP 200 on 2026-10-23), so this waits for the freeze to lift. Deploy with the 11-05 batch unless v1 dies on the box first.
+   - `get_live_reading` was ported but still has no callers. It reads NEA's Changi street station (S24), not the METAR that settles the market.
+   - Tests: `tests/test_nea_target_date.py` (9). Full suite 2,168 passed.
 
 ## Gotchas
-- **SSH:** `"/c/Program Files/PuTTY/plink.exe" -batch -ssh -i "C:\Users\user\Downloads\multicityweatherbot.ppk" ubuntu@43.216.25.99 "<cmd>"`. pscp takes one remote source per call.
-- **Box layout:** code is in `~/weather-forecast/weather-forecast/`, venv at `~/weather-forecast/.venv/bin/python`.
-- **Reading the DB:** use `sqlite3.connect("file:data/polyweather.sqlite3?mode=ro", uri=True)`.
-  - `positions` has no `pnl_usd` column; `contract_checks` uses `status`, not `verdict`.
-- **Deploys:** only 16:00–19:00 UTC, with `~/deploy.sh`. `!! DEPLOY ABORTED` means the daemon is STOPPED.
-- **Tests:** never run pytest on the box. Locally: `cd weather-forecast && timeout 540 python -m pytest -q -p no:cacheprovider`, in the foreground.
-- **Shared checkout:** another session also commits to main here. Fetch and check `git log` before merging.
-- **Stale memory note:** `dashboard-phase1-deploy.md` still says to run "checkout main" on the box. That's stale; the box is on main.
+- **SSH:** `"/c/Program Files/PuTTY/plink.exe" -batch -ssh -i "C:\Users\user\Downloads\multicityweatherbot.ppk" ubuntu@43.216.25.99 "<cmd>"`. Never run pytest on the box.
+- **On the box, a pull is a deploy.** No pulls and no box changes before 11-03: any change splits the lock.
+- **The fast-recorder DB is not in `pull_backup.sh` output.** A durable copy is at `C:\Users\user\polyweather-backups\fast_recorder-20261013.sqlite3` (sha256 `f325b11d…a1ff7`). Its name carries no `T…Z` stamp, so `pull_backup.sh` never prunes it.
+- **Analysis scripts need the repo code on their import path.** Run them with `python -I <script> <db...> /c/Users/user/Downloads/weather-forecast/weather-forecast`.
+- **Re-running `mm_replay`:** only from `2bcf38f` or later. `7323eec` reproduces the fake GO.
+- **Pushing to `origin/main` has been blocked for Claude before.** Expect the user to push.
