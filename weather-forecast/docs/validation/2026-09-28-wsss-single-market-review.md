@@ -1,5 +1,66 @@
 # WSSS single-market review - 2026-09-28
 
+## Re-check 2026-10-22, against main at `7323eec`
+
+Seven commits have landed since the first review. The original review is
+below, unchanged.
+
+| # | Finding (2026-09-28) | Status now |
+|---|---|---|
+| 1 | `MATURITY_SNAPSHOT` comment wrong | **Fixed** in `10763eb`. The comment now calls it the test pin. |
+| 2 | WSSS bucket window stale (28-38) | **Open.** It is still 28-38 at `config.py:312-313`. |
+| 3 | NEA forecast stamped "today" | **Open, and now worse.** See A below. |
+| 4 | `BIAS_HALF_LIFE_DAYS` defined twice | **Fixed** in `10763eb`. |
+
+### A. The NEA date bug is the WMKK bug that was just fixed (medium)
+`fd869f2` fixed this exact mistake for WMKK. Its client stamped whatever
+forecast it got as `local_today`, so tomorrow's max was filed as today's. WSSS's
+`clients/official/nea.py:55` still does the same thing. The day-ahead recorder
+(`30f256d`) makes it bite:
+- `day_ahead.py:61` runs at 20:00 SGT (`DAY_AHEAD_RECORD_HOUR_LOCAL = 20`).
+  By then NEA's current 24-hour forecast is the evening issue, whose high
+  belongs to TOMORROW.
+- `nea.py` stamps that row as TODAY. `pipeline.gather_forecasts` then
+  filters on `target_date == tomorrow` and drops it.
+- So WSSS's day-ahead record leaves out the NEA forecast, while the live
+  morning blend includes it. The two are not like-for-like for WSSS only.
+  Every WWIS station already matches by date, and WMKK does now too.
+- It also saves a `nea_24hr` row for today that carries tomorrow's high.
+  Bias samples are safe while `ERROR_SAMPLE_FETCH_WINDOW_ENABLED = True`,
+  because only 04:00-08:00 local fetches count. The flag's own stop rule says
+  to set it False if the wave-2 falsifier fails. If that happens, the
+  mislabelled rows flow into WSSS's bias pairs, and `wave2_falsifier.py`'s
+  "window off" arm already reads them today.
+- Fix: do what `fd869f2` did for WMKK. Read `items[0].valid_period`, and
+  stamp the date whose afternoon (12:00-18:00 SGT) the period covers.
+  Return None if it covers no afternoon. Keep the source string
+  `nea_24hr` so the history stays joined. This is a code change, so it waits
+  for the end of the freeze (after 11-02).
+- Not verified here: whether the old `api.data.gov.sg/v1` endpoints still
+  answer. This sandbox's proxy blocks the host. Check the box logs for
+  `[NEAClient] ... failed`.
+
+### B. LOCK_SHA was never committed (medium, not WSSS-only)
+HANDOFF step 4 said to set `LOCK_SHA` on 2026-10-05, commit it and deploy.
+`lock_score.py:41` is still `None` on main, and the freeze has since begun.
+If the box was set by hand, commit that value so main matches the box.
+If it was never set, the 11-05 `--locked-read` has nothing to score
+against, and that needs a decision before 11-05.
+
+### C. Stale comment in the backtest (low)
+`backtest/engine.py:151-153` still says stored observations go back to
+"`target_date.replace(day=1)`". The live path has used a rolling 30-day
+lookback since the lookback fix. It is comment only, because the code uses
+`OBSERVATION_WINDOW_DAYS = 30`.
+
+### Checked and fine in the new code
+- `fast_recorder.py:93-99` includes WSSS, because it takes every
+  `metar_daily_max` station.
+- The watchdog's daily kill-criterion alert covers WSSS through the cohort
+  rule.
+- WSSS is still locked out of live trading: `REDEMPTION_PROVEN_TX` is None,
+  and `MATURITY_OVERRIDE` is empty.
+
 Scope: one market, Singapore Changi (WSSS). The review followed one WSSS
 market through the code, from the market rules to settlement, and checked
 every WSSS-specific setting. It is a code and config review only. It used no
