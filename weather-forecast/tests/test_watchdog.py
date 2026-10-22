@@ -154,3 +154,34 @@ def test_check_alerts_and_returns_nonzero_on_clock_drift(monkeypatch, sent):
                         lambda: (NOW - timedelta(minutes=5)).isoformat())
     assert watchdog.check(now=NOW) == 1
     assert len(sent) == 1
+
+
+def _kill_status(monkeypatch, fired):
+    import cohort_monitor
+    monkeypatch.setattr(cohort_monitor, "load_cohort", lambda: ([], {}))
+    monkeypatch.setattr(cohort_monitor, "kill_criterion", lambda w: {
+        "window_days": 30, "level": 0.0, "min_station_days": 30,
+        "n": 100, "n_days": 40, "net_price_edge": -0.02, "fired": fired})
+
+
+@pytest.mark.parametrize("fired, alerted", [(True, 1), (False, 0), (None, 0)])
+def test_kill_check_alerts_only_when_fired(monkeypatch, sent, fired, alerted):
+    _kill_status(monkeypatch, fired)
+    assert watchdog._check_kill(datetime(2026, 9, 24, 0, 5, tzinfo=timezone.utc)) == alerted
+    assert len(sent) == alerted
+
+
+def test_kill_check_runs_once_a_day_only(monkeypatch, sent):
+    _kill_status(monkeypatch, True)
+    assert watchdog._check_kill(datetime(2026, 9, 24, 0, 30, tzinfo=timezone.utc)) == 0
+    assert watchdog._check_kill(NOW) == 0
+    assert sent == []
+
+
+def test_kill_check_that_cannot_evaluate_alerts(monkeypatch, sent):
+    import cohort_monitor
+    def boom():
+        raise OSError("db gone")
+    monkeypatch.setattr(cohort_monitor, "load_cohort", boom)
+    assert watchdog._check_kill(datetime(2026, 9, 24, 0, 5, tzinfo=timezone.utc)) == 1
+    assert "db gone" in sent[0][1]

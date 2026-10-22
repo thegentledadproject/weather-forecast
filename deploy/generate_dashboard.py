@@ -188,7 +188,6 @@ except Exception as exc:  # noqa: BLE001
     live_stations = []
     warnings.append(f"live station check failed: {exc}")
 
-live_at_risk = sum(float(p.size_usd or 0.0) for p in live_open)
 # Region-scoped live blast radius. These used to read the flat LIVE_MAX_*
 # constants directly, which was fine back when there was only one region --
 # now that Europe carries its own (zero) blast radius, the card must read
@@ -999,95 +998,6 @@ except Exception as exc:  # noqa: BLE001
     pnl_calendar_html = "<div class='empty'>daily P&amp;L calendar unavailable</div>"
     pnl_cal_cap = ""
 
-# --- real-money card ---------------------------------------------------------
-# Deliberately the FIRST card on the page and visually the loudest. Everything
-# below it is paper; this is the only section where a number moving means real
-# capital moved. Open real positions are the headline -- an operator glancing
-# at this page should never have to work out whether money is currently at
-# risk, which was impossible when the page read is_paper=True everywhere.
-MAX_LIVE_CLOSED_SHOWN = 10
-try:
-    blocks = []
-    if live_open:
-        cap_bits = []
-        if live_cap_usd:
-            pct_of_cap = live_at_risk / live_cap_usd if live_cap_usd else 0
-            cap_bits.append(f"{pct_of_cap:.0%} of the ${live_cap_usd:,.2f} exposure cap")
-        if live_cap_n:
-            cap_bits.append(f"{len(live_open)} of {live_cap_n} concurrent slots")
-        blocks.append(
-            "<div class='moneybar'>"
-            f"<div class='mb-amt'>${live_at_risk:,.2f}</div>"
-            f"<div class='mb-lab'>real capital at risk right now<br>"
-            f"<span class='mb-sub'>{' &middot; '.join(cap_bits)}</span></div>"
-            "</div>"
-        )
-        blocks.append(
-            "<div class='tablewrap'><table class='ptable'>" + POS_COLS +
-            f"<tbody>{''.join(_pos_row(p, live=True) for p in live_open)}</tbody>"
-            "</table></div>"
-        )
-    elif live_region_caps_all_zero:
-        blocks.append(
-            "<div class='moneybar flat'>"
-            "<div class='mb-amt'>$0.00</div>"
-            "<div class='mb-lab'>no real capital at risk right now<br>"
-            f"<span class='mb-sub'>no station in the {html.escape(region)} region can submit a real "
-            "order &mdash; config.REGION_LIVE_MAX_CONCURRENT_POSITIONS, _TOTAL_EXPOSURE_USD and "
-            f"_ORDERS_PER_DAY are all 0 for {html.escape(region)!r}. Promotion means raising those "
-            "three entries, not just adding a station to LIVE_TRADING_STATIONS.</span></div>"
-            "</div>"
-        )
-    else:
-        blocks.append(
-            "<div class='moneybar flat'>"
-            "<div class='mb-amt'>$0.00</div>"
-            "<div class='mb-lab'>no real capital at risk right now<br>"
-            f"<span class='mb-sub'>{html.escape(', '.join(live_stations)) if live_stations else 'no station'} "
-            f"armed for live orders at ${live_size_usd:,.2f} per entry</span></div>"
-            "</div>"
-        )
-
-    if live_closed:
-        shown_live = live_closed[:MAX_LIVE_CLOSED_SHOWN]
-        realized = f"{'-' if live_pnl_usd < 0 else '+'}${abs(live_pnl_usd):,.2f}"
-        realized_cls = "neg" if live_pnl_usd < 0 else "pos"
-        pct = f" ({live_pnl_usd / live_staked_usd:+.1%})" if live_staked_usd else ""
-        blocks.append(
-            f"<p class='cap' style='margin:16px 0 6px'>Closed real-money trades &mdash; realized "
-            f"<span class='{realized_cls}'><b>{realized}</b></span> on ${live_staked_usd:,.2f} staked"
-            f"{pct}, {len(live_closed)} trade(s)</p>"
-            "<div class='tablewrap'><table class='ptable'>" + POS_COLS +
-            f"<tbody>{''.join(_pos_row(p, live=True) for p in shown_live)}</tbody>"
-            "</table></div>"
-        )
-        # Real money gets its own daily grid, inside its own card. Same builder
-        # as the paper calendar further down the page, never the same grid: the
-        # heat scale is per-grid, so a $0.40 real day and a $40 paper day would
-        # otherwise be shaded against each other.
-        blocks.append(
-            "<p class='cap' style='margin:18px 0 6px'>Real-money daily realized P&amp;L</p>"
-            + _pnl_calendar(live_closed, "No closed real-money trades yet.")
-        )
-
-    realmoney_html = "".join(blocks)
-    if live_stations:
-        realmoney_cap = (f"live-armed: {html.escape(', '.join(live_stations))} &middot; "
-                         f"${live_size_usd:,.2f} per entry &middot; separate from every paper number "
-                         "on this page, never summed with them")
-    elif live_region_caps_all_zero:
-        realmoney_cap = (f"no station in the {html.escape(region)} region can submit a real order "
-                         "&mdash; REGION_LIVE_MAX_CONCURRENT_POSITIONS / _TOTAL_EXPOSURE_USD / "
-                         f"_ORDERS_PER_DAY are all 0 for {html.escape(region)!r} &middot; the whole "
-                         "book below is paper")
-    else:
-        realmoney_cap = ("no station passes config.live_mode_is_permitted() &mdash; "
-                         "the whole book below is paper")
-except Exception as exc:  # noqa: BLE001
-    warnings.append(f"real-money card failed: {exc}")
-    realmoney_html = "<div class='empty'>real-money view unavailable</div>"
-    realmoney_cap = ""
-
 now_utc = datetime.now(timezone.utc)
 snap_sgt = now_utc.astimezone(timezone.utc).strftime("%d %b %Y, ")
 snap_sgt += f"{(now_utc.hour + 8) % 24:02d}:{now_utc.minute:02d} SGT"
@@ -1121,16 +1031,6 @@ region_nav_html = "".join(
      f"{html.escape(_r.capitalize())}</a>")
     for _r in sorted(config.REGION_BANKROLL_USD)
 )
-
-live_at_risk_display = "unknown" if open_n is None else f"${live_at_risk:,.2f}"
-if live_open:
-    live_note = f"{len(live_open)} open"
-    if live_cap_usd:
-        live_note += f" &middot; cap ${live_cap_usd:,.2f}"
-elif live_stations:
-    live_note = f"{html.escape(', '.join(live_stations))} armed &middot; ${live_size_usd:,.2f}/entry"
-else:
-    live_note = "no live stations armed"
 
 try:
     import calibration_panel as _attn_panel
@@ -1218,8 +1118,7 @@ def _station_table():
 
 try:
     stations_table_html = _station_table()
-    stations_cap = ("PAPER track only &mdash; real-money trades are in the card at the top, never "
-                    "mixed in here &middot; &ldquo;Per $1 staked&rdquo; is realized P&amp;L divided by "
+    stations_cap = ("PAPER track only &middot; &ldquo;Per $1 staked&rdquo; is realized P&amp;L divided by "
                     "everything staked, so a big trade counts for more than a small one &middot; "
                     "At risk sums open paper stakes")
 except Exception as exc:  # noqa: BLE001
@@ -1349,16 +1248,6 @@ page = """<!doctype html>
      nothing to click into) so it never reads as a live link back to itself;
      the other regions stay ordinary clickable pills. */
   .pill.regioncur { background:var(--paper); color:var(--muted); cursor:default; }
-  .card.money, .tile.money { border-color:var(--heat); border-width:2px; }
-  .card.money h2 { color:var(--heat); }
-  .moneybar { display:flex; align-items:center; gap:16px; padding:14px 16px; border-radius:8px;
-    background:var(--paper); border:1px solid var(--heat); }
-  .moneybar.flat { border-style:dashed; border-color:var(--line); }
-  .mb-amt { font-family:var(--mono); font-size:30px; font-variant-numeric:tabular-nums;
-    color:var(--heat); line-height:1; }
-  .moneybar.flat .mb-amt { color:var(--muted); }
-  .mb-lab { font-size:13px; color:var(--ink-2); }
-  .mb-sub { font-size:12px; color:var(--muted); }
   .badge.live { background:var(--heat); color:var(--card); }
   .badge.paper { background:var(--paper); color:var(--muted); border:1px solid var(--line); }
   .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; }
@@ -1510,15 +1399,6 @@ page = """<!doctype html>
       <div class="note">what the report scores</div></div>
     <div class="tile"><div class="label">Paper P&amp;L</div><div class="value @@PNLDIM@@">@@PNL@@</div>
       <div class="note">@@PNLNOTE@@</div></div>
-    <div class="tile money"><div class="label">Real money at risk</div>
-      <div class="value @@LIVEDIM@@">@@LIVEATRISK@@</div>
-      <div class="note">@@LIVENOTE@@</div></div>
-  </div>
-
-  <div class="card money">
-    <h2>Real money</h2>
-    <p class="cap">@@REALMONEYCAP@@</p>
-    @@REALMONEY@@
   </div>
 
   <div class="card">
@@ -1649,11 +1529,6 @@ page = (
     .replace("@@MODEPILL@@", mode_pill)
     .replace("@@REGIONNAV@@", region_nav_html)
     .replace("@@REGIONLABEL@@", html.escape(region_label))
-    .replace("@@LIVEATRISK@@", live_at_risk_display)
-    .replace("@@LIVEDIM@@", "" if live_open else "dim")
-    .replace("@@LIVENOTE@@", live_note)
-    .replace("@@REALMONEYCAP@@", realmoney_cap)
-    .replace("@@REALMONEY@@", realmoney_html)
     .replace("@@WARNINGS@@", warn_html)
     .replace("@@ATTENTION@@", attention_html)
     .replace("@@JOURNAL@@", html.escape(journal))

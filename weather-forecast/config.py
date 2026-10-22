@@ -3701,38 +3701,6 @@ MAX_BIAS_STANDARD_ERROR_C = 0.5
 # the bias honest must not quietly stop a station trading.
 BIAS_HALF_LIFE_DAYS = 14.0
 
-# How fast a bias sample stops counting, in days. A sample this old counts
-# half as much as today's; twice this old, a quarter.
-#
-# WHY DECAY AT ALL. The estimator was a flat mean over all history, so a
-# stale sample kept full weight forever and the number lagged further
-# behind reality the longer a station ran. That is a property of the
-# estimator, not a claim that any particular station is drifting right now
-# -- the VHHH drift that raised the question measured 0.45-1.1 sigma, which
-# is nothing. This is insurance against a real drift arriving unnoticed,
-# not a fix for a proven one, and the half-life is picked accordingly.
-#
-# WHY 14 AND NOT LESS. Measured across the registry 2026-08-27 (bias / n_eff
-# at each half-life, versus the flat mean):
-#
-#            flat        hl=21       hl=14       hl=10        hl=7
-#   WSSS   -0.228 n27  -0.301 n25  -0.334 n23  -0.368 n21  -0.408 n17
-#   RKSI   -0.465 n21  -0.597 n20  -0.667 n19  -0.754 n17  -0.883 n15
-#   WMKK   -1.351 n26  -1.282 n24  -1.250 n22  -1.214 n20  -1.163 n17
-#   VHHH   -0.956 n21  -0.903 n20  -0.876 n19  -0.844 n17  -0.795 n15
-#
-# Two things decided it. Stations drift in BOTH directions (RKSI is getting
-# colder, WMKK and VHHH warmer), so this is per-station movement rather
-# than a seasonal shift a constant could absorb. And the cost is effective
-# sample size: 14 days keeps ~90% of it while 7 gives up ~29%, for a change
-# in the biases of 0.05-0.20C either way. A fortnight is also the period
-# this book already reviews stations over.
-#
-# NOTHING NEWLY FAILS THE GATE at any half-life above -- verified across all
-# 20 registered stations before deploying, because a change meant to keep
-# the bias honest must not quietly stop a station trading.
-BIAS_HALF_LIFE_DAYS = 14.0
-
 # --- Per-station override of the BIAS-QUALITY half of the gate -----------
 # Stations listed here skip the MIN_BIAS_PAIRS_BEFORE_ENTRY /
 # MAX_BIAS_STANDARD_ERROR_C checks in
@@ -4755,13 +4723,13 @@ MATURITY_OVERRIDE: dict = {}
 # as of 2026-09-24 redeem.py had never redeemed anything.
 REDEMPTION_PROVEN_TX: Optional[str] = None
 
-# Frozen snapshot for the BACKTEST replica only. backtest/entry_sim.py must
-# stay a pure function of its injected state -- it cannot read storage
-# without (a) breaking the parity contract it exists to hold and (b) reading
-# the whole stored record, which is lookahead of exactly the kind the engine
-# refuses for forecast_bias_c. So replays use this frozen dict, which is
-# what station_maturity() evaluated to on 2026-08-11, and any drift between
-# the two shows up as a parity failure rather than silently.
+# Frozen maturity for TESTS only: tests/conftest.py pins every test's
+# maturity cache to this dict so order-mechanics tests do not depend on
+# whatever the dev database holds. WSSS stays "mature" here because the
+# live-path tests need one mature station, not because WSSS is mature now.
+# Backtest replays do NOT read this -- backtest/entry_sim.py reads the live,
+# storage-derived config.STATION_MATURITY, so a replay's maturity reflects
+# today's stored record, not the date being replayed.
 MATURITY_SNAPSHOT = {
     "WSSS": "mature",
     "WMKK": "exploratory",
@@ -5059,8 +5027,8 @@ def maturity_report(station_icao: str) -> dict:
     """
     Every maturity criterion for one station, with its value and verdict.
 
-    Reads storage, so it is NOT usable from backtest/entry_sim.py -- see
-    MATURITY_SNAPSHOT. Never raises: an unreadable criterion is a FAILED
+    Reads storage. Tests pin the result via MATURITY_SNAPSHOT (see
+    tests/conftest.py). Never raises: an unreadable criterion is a FAILED
     criterion, because "I could not check" must not read as "it passed".
     """
     import calibration
