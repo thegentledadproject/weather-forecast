@@ -34,11 +34,19 @@
    - The day-ahead recorder runs at 20:00 SGT, when NEA's high is tomorrow's. So WSSS's day-ahead record leaves out the NEA forecast, and a row with tomorrow's high is saved as today.
    - Bias is safe only while `ERROR_SAMPLE_FETCH_WINDOW_ENABLED = True`.
    - Fix it after the freeze: stamp from `valid_period`. The full spec is in the review doc, section A.
+   - In the same change, move `nea.py` from the old `api.data.gov.sg/v1` address to the new `api-open.data.gov.sg/v2/real-time/api/...` one (forecast: `twenty-four-hr-forecast`). Both touch the same function. Check the v2 response shape from a live call before coding, because it is not the same as v1.
+   - The queued task card covers both.
 3. **Wave-2 falsifier result (~10-04): unknown here.**
    - If it said to set `ERROR_SAMPLE_FETCH_WINDOW_ENABLED = False`, do item 2 first. Otherwise the mislabelled NEA rows enter WSSS bias pairs.
    - On main both flags are still True.
 4. **WSSS bucket bounds are stale.** `config.py:312-313` says 28-38, but the live 09-25 event was 25-35. This affects backtests only. Re-sweep from the drift log, or build the bucket-window self-heal.
-5. **Check the NEA v1 API is alive.** `nea.py` still calls `api.data.gov.sg/v1`, and the sandbox proxy blocks that host. On the box, grep the journal for `[NEAClient] ... failed`.
+5. **Check the NEA v1 API is alive.** `nea.py` still calls `api.data.gov.sg/v1`, and the sandbox proxy blocks both that host and the v2 one. On the box, grep the journal for `[NEAClient] ... failed`, and run:
+   ```
+   curl -s -o /dev/null -w '%{http_code}\n' https://api.data.gov.sg/v1/environment/24-hour-weather-forecast
+   curl -s -o /dev/null -w '%{http_code}\n' https://api-open.data.gov.sg/v2/real-time/api/twenty-four-hr-forecast
+   ```
+   - If v1 fails and v2 answers, WSSS has silently lost its official forecast. Then the v2 move in item 2 can't wait for the end of the freeze.
+   - `get_live_reading` (NEA air temperature) is never called. It reads NEA street thermometers, not the airport METAR, so it can only ever be a hint, never settlement truth.
 6. **Carried over from the 09-28 handoff:**
    - Confirm the scheduled backup runs.
    - Re-check `contract_checks` reaches 35 VALID.
