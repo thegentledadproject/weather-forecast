@@ -6,7 +6,7 @@
   - Dirty: `HANDOFF.md`.
   - Untracked: `2026-09-28-*.md` (3 files), `2026-10-22-revamp-implementation-plan-redline.md`, `skill_all.py`, `skill_all_20261017.txt`, `skill_report.py`, `vhhh_skill_report_20261017.txt`.
 - **No code changed this session.** Every analysis was read-only on local copies of the databases.
-- **Box** (`ubuntu@43.216.25.99`): **FROZEN until 2026-11-03.** It runs `7323eec`, paper only, and the lock stamp is intact. Do not touch it.
+- **Box** (`ubuntu@43.216.195.130`): **FROZEN until 2026-11-03.** It runs `7323eec`, paper only, and the lock stamp is intact. Do not touch it.
 - **Unmerged local branches:** `feat/vhhh-fresh-bias` (deploy after 11-05), `fix/mm-replay-fill-rule` (already in main), `analysis/source-mix-replay`, `fix/observation-lookback-window`, `fix/settled-bucket-resolution-fallback`, `spec/recency-weighted-observed-term`.
 
 ## Done 2026-10-22
@@ -47,7 +47,7 @@
    - Tests: `tests/test_nea_target_date.py` (9). Full suite 2,168 passed.
 
 ## Gotchas
-- **SSH:** `"/c/Program Files/PuTTY/plink.exe" -batch -ssh -i "C:\Users\user\Downloads\multicityweatherbot.ppk" ubuntu@43.216.25.99 "<cmd>"`. Never run pytest on the box.
+- **SSH:** `"/c/Program Files/PuTTY/plink.exe" -batch -ssh -i "C:\Users\user\Downloads\multicityweatherbot.ppk" ubuntu@43.216.195.130 "<cmd>"`. Never run pytest on the box.
 - **On the box, a pull is a deploy.** No pulls and no box changes before 11-03: any change splits the lock.
 - **The fast-recorder DB is not in `pull_backup.sh` output.** A durable copy is at `C:\Users\user\polyweather-backups\fast_recorder-20261013.sqlite3` (sha256 `f325b11d…a1ff7`). Its name carries no `T…Z` stamp, so `pull_backup.sh` never prunes it.
 - **Analysis scripts need the repo code on their import path.** Run them with `python -I <script> <db...> /c/Users/user/Downloads/weather-forecast/weather-forecast`.

@@ -30,7 +30,7 @@ set -euo pipefail
 PLINK="/c/Program Files/PuTTY/plink.exe"
 PSCP="/c/Program Files/PuTTY/pscp.exe"
 KEY="C:\\Users\\user\\Downloads\\multicityweatherbot.ppk"
-HOST="ubuntu@43.216.25.99"
+HOST="ubuntu@43.216.195.130"
 REMOTE_SCRIPT="bash ~/weather-forecast/deploy/offbox_backup.sh"
 KEEP=7
 

@@ -6,7 +6,7 @@ Plain, command-first. Every command below is sourced from the repo or
 SSH is PuTTY plink, not OpenSSH, everywhere below:
 
 ```
-"/c/Program Files/PuTTY/plink.exe" -batch -ssh -i "C:\Users\user\Downloads\multicityweatherbot.ppk" ubuntu@43.216.25.99 "<cmd>"
+"/c/Program Files/PuTTY/plink.exe" -batch -ssh -i "C:\Users\user\Downloads\multicityweatherbot.ppk" ubuntu@43.216.195.130 "<cmd>"
 ```
 
 Box layout: code at `~/weather-forecast/weather-forecast/`, venv at
@@ -106,7 +106,7 @@ Checklist before restoring `mode.env` to live:
 gap (`HANDOFF.md`, gotchas; Wave 3 plan Task 8 step 2).
 
 ```
-"/c/Program Files/PuTTY/plink.exe" -batch -ssh -i "C:\Users\user\Downloads\multicityweatherbot.ppk" ubuntu@43.216.25.99 "~/deploy.sh"
+"/c/Program Files/PuTTY/plink.exe" -batch -ssh -i "C:\Users\user\Downloads\multicityweatherbot.ppk" ubuntu@43.216.195.130 "~/deploy.sh"
 ```
 
 `~/deploy.sh` is a shim to `deploy/deploy_daemon.sh`. It stops the daemon,
