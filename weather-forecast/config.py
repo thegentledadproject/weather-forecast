@@ -3564,6 +3564,11 @@ OBSERVED_HALF_LIFE_DAYS = None
 # was enough to establish the direction here, not the value.
 FORECAST_BLEND_WEIGHT_BY_STATION = {
     "WSSS": 0.40,
+    # Forecast-only. VHHH's observed term is CLMMAXT, which lands ~45 days
+    # late a month at a time: the 30-day lookback is usually empty, then
+    # fills with 2-6-week-old readings (Sep ~31C pushed into late Oct, normal
+    # ~27C: about +0.5C warm). Physical reason, not a fit (2026-10-11).
+    "VHHH": 1.0,
 }
 
 
@@ -3700,6 +3705,11 @@ MAX_BIAS_STANDARD_ERROR_C = 0.5
 # 20 registered stations before deploying, because a change meant to keep
 # the bias honest must not quietly stop a station trading.
 BIAS_HALF_LIFE_DAYS = 14.0
+
+# Newest settlement-grade bias pair may be at most this old before
+# entry_manager.forecast_bias_stats() switches to the settlement-derived
+# fallback. Exists for VHHH, whose CLMMAXT record lands ~45 days late.
+BIAS_MAX_STALENESS_DAYS = 7
 
 # --- Per-station override of the BIAS-QUALITY half of the gate -----------
 # Stations listed here skip the MIN_BIAS_PAIRS_BEFORE_ENTRY /
