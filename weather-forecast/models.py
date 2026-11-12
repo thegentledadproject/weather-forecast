@@ -147,7 +147,12 @@ class StationConfig:
     # (with Wunderground as a no-data fallback, no URL). The Asian markets
     # cited Wunderground when registered on 2026-08-05; every one except
     # RCSS and VHHH has since been re-pointed to NOAA for the SAME ICAO.
-    contract_source: str = "noaa"
+    #
+    # Default "awc" since target date 2026-10-23: Polymarket rewrote all 34
+    # non-HKO stations (RCSS included) to settle on the AWC METAR feed,
+    # aviationweather.gov/api/data/metar?ids=<icao> -- the same feed
+    # clients/metar_client.py reads. Only VHHH stays "hko".
+    contract_source: str = "awc"
 
     # How many METARs this station files per LOCAL day when reporting
     # normally. A half-hourly-filing airport (most of the Asia/Europe

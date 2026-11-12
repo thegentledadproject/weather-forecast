@@ -2,7 +2,10 @@
 Gap 7: each market's own rules text is checked against the station's
 expected contract fingerprint before the station-day may produce ENTRIES.
 
-Fixtures are real Gamma events (2026-09-25), trimmed: tests/fixtures/gamma_rules/.
+Fixtures are real Gamma events, trimmed: tests/fixtures/gamma_rules/. The
+2026-11-13 ones carry the AWC METAR wording Polymarket moved every non-HKO
+station to from target date 2026-10-23; the 2026-09-25 ones are the old
+NOAA/Wunderground wording (VHHH's is still current).
 """
 import copy
 import json
@@ -22,8 +25,14 @@ FAMILIES = ["WSSS", "EGLC", "KLGA", "RCSS", "VHHH"]
 D = date(2026, 9, 25)
 
 
-def _event(icao):
-    return json.loads((FIXTURES / f"{icao}_2026-09-25.json").read_text(encoding="utf-8"))
+NEW = "2026-11-13"   # AWC wording
+OLD = "2026-09-25"   # NOAA / Wunderground wording; still current for VHHH only
+DAY = "13 Nov"       # the date clause in the NEW fixtures
+
+
+def _event(icao, day=None):
+    day = day or (OLD if icao == "VHHH" else NEW)
+    return json.loads((FIXTURES / f"{icao}_{day}.json").read_text(encoding="utf-8"))
 
 
 def _mutate(event, old, new):
@@ -49,9 +58,9 @@ def test_golden_fixture_is_valid(icao):
 
 
 @pytest.mark.parametrize("icao,old,new", [
-    ("WSSS", "site=wsss", "site=wmkk"),
-    ("KLGA", "site=klga", "site=kjfk"),
-    ("RCSS", "tw/taipei/RCSS", "tw/taipei/RCTP"),
+    ("WSSS", "ids=WSSS", "ids=WMKK"),
+    ("KLGA", "ids=KLGA", "ids=KJFK"),
+    ("RCSS", "ids=RCSS", "ids=RCTP"),
     ("VHHH", "recorded by the Hong Kong Observatory", "recorded at Hong Kong International Airport"),
 ])
 def test_station_swapped_is_invalid(icao, old, new):
@@ -61,10 +70,10 @@ def test_station_swapped_is_invalid(icao, old, new):
 
 
 @pytest.mark.parametrize("icao,old,new", [
-    ("WSSS", "https://www.weather.gov/wrh/timeseries?site=wsss",
-     "https://www.wunderground.com/history/daily/sg/singapore/WSSS"),
-    ("RCSS", "https://www.wunderground.com/history/daily/tw/taipei/RCSS",
-     "https://www.weather.gov/wrh/timeseries?site=rcss"),
+    ("WSSS", "https://aviationweather.gov/api/data/metar?ids=WSSS",
+     "https://www.wunderground.com/history/daily/sg/singapore/WSSS?x=1"),
+    ("RCSS", "https://aviationweather.gov/api/data/metar?ids=RCSS",
+     "https://www.weather.gov/wrh/timeseries?site=rcss&x=1"),
     ("VHHH", "https://www.weather.gov.hk/en/cis/climat.htm", "https://example.org/hk"),
 ])
 def test_source_domain_changed_is_invalid(icao, old, new):
@@ -83,17 +92,33 @@ def test_unit_flip_is_invalid(icao, old, new):
     assert "UNIT_MISMATCH" in reasons
 
 
+HALF_UP = "rounded to the nearest whole degree, with a value ending in exactly half rounded up"
+
+
 def test_precision_change_is_invalid():
-    e = _mutate(_event("WSSS"), "to whole degrees Celsius (eg, 9°C)", "in Celsius to one decimal place (eg, 9.1°C)")
+    e = _mutate(_event("WSSS"), HALF_UP, "measures temperatures in Celsius to one decimal place")
     status, reasons = contract_rules.check_contract(config.STATIONS["WSSS"], e)
     assert status == INVALID
     assert "PRECISION_MISMATCH" in reasons
 
 
+def test_rounding_rule_dropped_is_uncertain():
+    e = _mutate(_event("KLGA"), HALF_UP, "truncated")
+    status, reasons = contract_rules.check_contract(config.STATIONS["KLGA"], e)
+    assert status == UNCERTAIN and reasons == ["PRECISION_MISMATCH"]
+
+
+@pytest.mark.parametrize("icao", ["WSSS", "EGLC", "KLGA", "RCSS"])
+def test_old_noaa_wunderground_wording_is_now_invalid(icao):
+    """Every non-HKO station moved to AWC from 2026-10-23; the old text no longer describes it."""
+    status, reasons = contract_rules.check_contract(config.STATIONS[icao], _event(icao, OLD))
+    assert status == INVALID and "UNKNOWN_SOURCE" in reasons
+
+
 def test_one_bucket_repointed_is_caught():
     """Each bucket market resolves on its OWN description, not the event's."""
     e = _event("WSSS")
-    e["markets"][1]["description"] = e["markets"][1]["description"].replace("site=wsss", "site=wmkk")
+    e["markets"][1]["description"] = e["markets"][1]["description"].replace("ids=WSSS", "ids=WMKK")
     status, reasons = contract_rules.check_contract(config.STATIONS["WSSS"], e)
     assert status == INVALID and "UNKNOWN_STATION" in reasons
 
@@ -108,6 +133,8 @@ def test_rules_missing_is_uncertain(event):
 def test_every_station_has_a_consistent_fingerprint():
     for icao, st in config.STATIONS.items():
         assert st.contract_source in contract_rules.SOURCES, icao
+        # Since 2026-10-23 every non-HKO station settles on the AWC METAR feed.
+        assert st.contract_source in ("awc", "hko"), icao
         # Hong Kong settles on the Observatory's 0.1C extract; nothing else may claim it.
         assert (st.contract_source == "hko") == (st.resolution_grade_source == "hko_daily_max"), icao
         assert (st.contract_source == "hko") == (st.bucket_edge_mode == "floor"), icao
@@ -117,7 +144,7 @@ def test_every_station_has_a_consistent_fingerprint():
 
 def test_hash_ignores_the_date_but_nothing_else():
     e = _event("KLGA")
-    other_day = _mutate(e, "25 Sep '26", "26 Sep '26")
+    other_day = _mutate(_mutate(e, "13 Nov '26", "14 Nov '26"), "2026-11-14T08:00:00Z", "2026-11-15T08:00:00Z")
     assert contract_rules.rules_hash(e) == contract_rules.rules_hash(other_day)
     reworded = _mutate(e, "resolve to the lowest bracket", "resolve 50-50")
     assert contract_rules.rules_hash(e) != contract_rules.rules_hash(reworded)
@@ -149,7 +176,7 @@ def test_wording_change_blocks_one_station_day_then_heals(tmp_db, monkeypatch):
     monkeypatch.setattr(contract_rules.alerts, "send", lambda *a, **kw: sent.append(a) or True)
     st = config.STATIONS["WSSS"]
     e = _event("WSSS")
-    assert contract_rules.evaluate(st, date(2026, 9, 24), _mutate(e, "25 Sep", "24 Sep"))[0] == VALID
+    assert contract_rules.evaluate(st, date(2026, 9, 24), _mutate(e, DAY, "12 Nov"))[0] == VALID
 
     changed = _mutate(e, "resolve to the lowest bracket", "resolve 50-50")
     status, reasons = contract_rules.evaluate(st, D, changed)
@@ -157,7 +184,7 @@ def test_wording_change_blocks_one_station_day_then_heals(tmp_db, monkeypatch):
     # Every cycle that day agrees -- the reference is the PREVIOUS day, not the last row.
     assert contract_rules.evaluate(st, D, changed)[0] == UNCERTAIN
     # The next day compares against the new text and is clean again.
-    assert contract_rules.evaluate(st, date(2026, 9, 26), _mutate(changed, "25 Sep", "26 Sep"))[0] == VALID
+    assert contract_rules.evaluate(st, date(2026, 9, 26), _mutate(changed, DAY, "14 Nov"))[0] == VALID
     assert len(sent) == 1  # one alert per station per UTC day
 
 
@@ -197,7 +224,7 @@ def test_ev_engine_carries_the_contract_status(monkeypatch, tmp_db):
     st = config.STATIONS["WSSS"]
     token_map = {b: {"yes_token_id": f"y{b}", "no_token_id": f"n{b}"}
                  for b in range(st.bucket_min_c, st.bucket_max_c + 1)}
-    bad = _mutate(_event("WSSS"), "site=wsss", "site=wmkk")
+    bad = _mutate(_event("WSSS"), "ids=WSSS", "ids=WMKK")
 
     def fake_discover(station, target_date, *a, **kw):
         market_discovery._remember(market_discovery.build_event_slug(station, target_date), bad)
@@ -282,7 +309,7 @@ def test_manual_trigger_refuses_a_non_valid_contract(monkeypatch, capsys, tmp_db
     import market_discovery
     from test_manual_trigger import _Args
 
-    bad = _mutate(_event("WSSS"), "site=wsss", "site=wmkk")
+    bad = _mutate(_event("WSSS"), "ids=WSSS", "ids=WMKK")
 
     def fake_discover(station, target_date, *a, **kw):
         market_discovery._remember(market_discovery.build_event_slug(station, target_date), bad)

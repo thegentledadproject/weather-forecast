@@ -83,8 +83,12 @@ _last_ingest_by_station: Dict[str, date] = {}
 def fetch_metars(icao: str, hours: int, timeout: int = 15) -> List[Tuple[int, float]]:
     """
     (obs_unix_ts, temp_c) pairs for the last `hours` hours, oldest first.
-    Reports without a temperature are skipped. Returns [] on any failure
-    (fail-soft, matching the other clients' stance).
+    Reports without a temperature are skipped, and so are SPECI reports:
+    since target date 2026-10-23 the contracts say "A report whose line
+    begins with SPECI is a special observation and does not count." AWC's
+    `temp` is already the 0.1C T-group when the report carries one, else the
+    whole-degree body value -- exactly the contract's qualifying value.
+    Returns [] on any failure (fail-soft, matching the other clients' stance).
     """
     try:
         resp = requests.get(
@@ -104,6 +108,8 @@ def fetch_metars(icao: str, hours: int, timeout: int = 15) -> List[Tuple[int, fl
         temp = row.get("temp")
         ts = row.get("obsTime")
         if temp is None or ts is None:
+            continue
+        if row.get("metarType") == "SPECI" or str(row.get("rawOb") or "").startswith("SPECI"):
             continue
         try:
             out.append((int(ts), float(temp)))

@@ -18,6 +18,13 @@ market. The station is identified by the source URL -- NOAA
 clause instead). Unit: "in degrees Celsius|Fahrenheit". Precision: "measures
 temperatures to whole degrees ..." or "... to one decimal place".
 
+FROM TARGET DATE 2026-10-23 every non-HKO station was rewritten to the AWC
+wording: source `aviationweather.gov/api/data/metar?ids=<ICAO>&...&date=<ISO>`,
+"states its range in whole degrees Celsius|Fahrenheit", and the 0.1C T-group
+"rounded to the nearest whole degree, with a value ending in exactly half
+rounded up" (= bucket_edge_mode half_up). The ISO date in that URL changes
+daily, so it is masked like the date clause.
+
 WHAT IS HASHED, AND WHY THE WHOLE TEXT. Across consecutive days the ONLY
 difference in any of the 35 stations' text was the date clause
 ("on 25 Sep '26"). So the date is masked and everything else is hashed: the
@@ -41,6 +48,10 @@ _RANK = {VALID: 0, UNCERTAIN: 1, INVALID: 2}
 
 # family -> (URL regex capturing the station id, expected id for a station)
 SOURCES = {
+    # Every non-HKO station since target date 2026-10-23: the AWC METAR feed,
+    # highest hourly T-group of routine reports, rounded half-up.
+    "awc": (re.compile(r"aviationweather\.gov/api/data/metar\?ids=([A-Za-z0-9]+)", re.I),
+            lambda st: st.icao.lower()),
     "noaa": (re.compile(r"weather\.gov/wrh/timeseries\?site=([A-Za-z0-9]+)", re.I),
              lambda st: st.icao.lower()),
     "wunderground": (re.compile(r"wunderground\.com/history/daily/([A-Za-z0-9_/-]+)", re.I),
@@ -53,9 +64,15 @@ _RECORDED_AT = re.compile(r"recorded (?:by |at )(?:NOAA at )?(?:the )?(.+?) in d
 _UNIT_RES = (
     re.compile(r"in degrees (Celsius|Fahrenheit)", re.I),
     re.compile(r"measures temperatures (?:to whole degrees|in) (Celsius|Fahrenheit)", re.I),
+    re.compile(r"states its range in whole degrees (Celsius|Fahrenheit)", re.I),  # AWC wording
 )
-_PRECISION = re.compile(r"measures temperatures (to whole degrees|in \w+ to one decimal place)", re.I)
-_DATE = re.compile(r"\b\d{1,2} [A-Z][a-z]{2} '\d{2}\b")
+_PRECISION_RES = (
+    re.compile(r"measures temperatures (to whole degrees|in \w+ to one decimal place)", re.I),
+    # AWC wording: the 0.1C reading is rounded half-up to a whole degree.
+    re.compile(r"(rounded to the nearest whole degree), with a value ending in exactly half rounded up", re.I),
+)
+# The "on 25 Sep '26" clause, and the AWC source URL's own &date=<ISO> window.
+_DATE = re.compile(r"\b\d{1,2} [A-Z][a-z]{2} '\d{2}\b|\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 _alerted = set()  # (icao, UTC date): one alert per station per UTC day, per process
 
@@ -76,7 +93,7 @@ def normalised_rules(event) -> Optional[str]:
     if not descs:
         return None
     norm = sorted({" ".join(_DATE.sub("<DATE>", d).split()) for d in descs})
-    return "\n\n".join(norm + ["resolutionSource: " + s for s in srcs])
+    return "\n\n".join(norm + sorted({"resolutionSource: " + _DATE.sub("<DATE>", s) for s in srcs}))
 
 
 def rules_hash(event) -> Optional[str]:
@@ -103,7 +120,7 @@ def check_contract(station, event) -> Tuple[str, List[str]]:
     family = station.contract_source
     rx, expected_id = SOURCES[family]
     want_unit = "fahrenheit" if station.bucket_unit == "F" else "celsius"
-    want_precision = "one decimal" if station.bucket_edge_mode == "floor" else "whole degrees"
+    want_precision = "one decimal" if station.bucket_edge_mode == "floor" else "whole degree"
 
     for src in srcs:
         if not rx.search(src):
@@ -125,7 +142,7 @@ def check_contract(station, event) -> Tuple[str, List[str]]:
             flag("UNIT_MISMATCH", UNCERTAIN)
         elif units != {want_unit}:
             flag("UNIT_MISMATCH", INVALID)
-        precision = [p.lower() for p in _PRECISION.findall(text)]
+        precision = [p.lower() for r in _PRECISION_RES for p in r.findall(text)]
         if not precision:
             flag("PRECISION_MISMATCH", UNCERTAIN)
         elif any(want_precision not in p for p in precision):
